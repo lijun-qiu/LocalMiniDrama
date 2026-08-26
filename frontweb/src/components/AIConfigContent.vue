@@ -125,7 +125,7 @@
       <el-tab-pane label="生成设置" name="generation">
         <div class="tab-content generation-settings">
           <div class="gs-section-title">⚡ 一键生成并发设置</div>
-          <p class="gs-desc">控制「一键生成视频」和「补全并生成」流水线中，各类任务同时并行生成的数量。并发数越高速度越快，但过高可能触发 API 限流（429 错误）。建议根据你的 API 额度选择。</p>
+          <p class="gs-desc">控制「一键生成视频」和「补全并生成」流水线中，各类任务同时并行生成的数量。Agnes 视频上游限流为每 Key 每分钟 1 次提交（5 Key 约每分钟 5 次），手动与自动提交均受此限制；图片无此限制。并发过高可能触发 429。</p>
 
           <div class="gs-row">
             <span class="gs-label">图片并发数</span>
@@ -161,8 +161,9 @@
             >
               <el-option label="1（串行，最稳定）" :value="1" />
               <el-option label="2" :value="2" />
-              <el-option label="3（默认）" :value="3" />
+              <el-option label="3" :value="3" />
               <el-option label="5" :value="5" />
+              <el-option label="7（默认，多 Key）" :value="7" />
               <el-option label="8" :value="8" />
               <el-option label="10" :value="10" />
             </el-select>
@@ -189,7 +190,7 @@
             <div class="gs-tip-title">📌 适用范围</div>
             <ul class="gs-tip-list">
               <li>图片并发：步骤 2 角色图、步骤 4 场景图、步骤 6 分镜图</li>
-              <li>视频并发：步骤 7 分镜视频</li>
+              <li>视频并发：步骤 7 分镜视频；「批量生成分镜视频」固定 7 路</li>
             </ul>
           </div>
         </div>
@@ -554,7 +555,7 @@ input_reference = (图片文件，可选)</pre>
           <el-input
             v-model="form.api_key"
             type="password"
-            :placeholder="form.service_type === 'jimeng2_character_auth' ? 'Bearer Token' : (form.provider === 'jimeng_ai_api' ? '即梦 Session，多个用英文逗号分隔' : 'API 密钥')"
+            :placeholder="form.service_type === 'jimeng2_character_auth' ? 'Bearer Token' : (form.provider === 'jimeng_ai_api' ? '即梦 Session，多个用英文逗号分隔' : (form.provider === 'agnes' ? '多个 Key 用英文逗号分隔，每 Key 并发 1，自动轮询' : 'API 密钥'))"
             show-password
           />
         </el-form-item>
@@ -969,7 +970,7 @@ input_reference = (图片文件，可选)</pre>
             <li><b>文本/对话</b>：Agnes 2.0 Flash（agnes-2.0-flash）— 生成故事剧本</li>
             <li><b>文本生成图片</b>：Agnes Image 2.1 Flash — 角色/场景/道具图</li>
             <li><b>分镜图片生成</b>：Agnes Image 2.1 Flash — 支持参考图编辑</li>
-            <li><b>视频生成</b>：Agnes Video V2.0（agnes-video-v2.0）— 生成视频片段</li>
+            <li><b>视频生成</b>：Agnes Video 2.0（agnes-video-v2.0，默认）/ 2.5（agnes-video-2.5）— 生成视频片段</li>
           </ul>
         </div>
         <div class="one-key-section">
@@ -980,7 +981,7 @@ input_reference = (图片文件，可选)</pre>
             <li>点击「Create new secret key」创建密钥</li>
             <li>复制 Key 填入下方</li>
           </ol>
-          <p class="one-key-note">💡 一个 Key 同时支持文本、图片、视频；接口文档见 <a href="https://agnes-ai.com/doc/agnes-20-flash" target="_blank" class="one-key-link">agnes-ai.com/doc</a></p>
+          <p class="one-key-note">💡 多个 Key 用英文逗号分隔，自动轮询。图片：每 Key 并发 1。视频：每 Key <b>每分钟最多提交 1 次</b>（N Key ≈ 每分钟 N 次），手动与流水线相同。接口文档见 <a href="https://agnes-ai.com/doc/agnes-20-flash" target="_blank" class="one-key-link">agnes-ai.com/doc</a></p>
         </div>
       </div>
       <el-form label-width="0" style="margin-top: 8px">
@@ -988,7 +989,7 @@ input_reference = (图片文件，可选)</pre>
           <el-input
             v-model="oneKeyAgnesKey"
             type="password"
-            placeholder="请输入 Agnes API Key"
+            placeholder="请输入 Agnes API Key（多个用英文逗号分隔）"
             show-password-on="click"
             clearable
           />
@@ -1109,7 +1110,7 @@ const importFileRef = ref(null)
 
 // ---- 生成设置 ----
 const genConcurrencyInput = ref(3)
-const genVideoConcurrencyInput = ref(3)
+const genVideoConcurrencyInput = ref(7)
 const genSettingSaving = ref(false)
 const genSettingSaved = ref(false)
 
@@ -1117,7 +1118,7 @@ async function loadGenerationSettings() {
   try {
     const res = await generationSettingsAPI.get()
     genConcurrencyInput.value = res?.concurrency ?? 3
-    genVideoConcurrencyInput.value = res?.video_concurrency ?? 3
+    genVideoConcurrencyInput.value = res?.video_concurrency ?? 7
   } catch (_) {}
 }
 
@@ -1350,7 +1351,7 @@ const providerConfigs = {
     },
     { id: 'openai', name: 'OpenAI', models: ['sora-2', 'sora-2-pro'] },
     { id: 'xai', name: 'xAI Grok Imagine', models: ['grok-imagine-video'] },
-    { id: 'agnes', name: 'Agnes AI', models: ['agnes-video-v2.0'] },
+    { id: 'agnes', name: 'Agnes AI', models: ['agnes-video-v2.0', 'agnes-video-2.5'] },
   ],
   tts: [
     { id: 'minimax', name: 'MiniMax T2A', models: ['speech-02-hd', 'speech-02-turbo'] },
@@ -1699,7 +1700,7 @@ const AGNES_CONFIGS = [
   { service_type: 'text', name: 'Agnes 文本', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-2.0-flash'] },
   { service_type: 'image', name: 'Agnes 文本生图', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-image-2.1-flash'] },
   { service_type: 'storyboard_image', name: 'Agnes 分镜图', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-image-2.1-flash'] },
-  { service_type: 'video', name: 'Agnes 视频', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'agnes', endpoint: '/videos', query_endpoint: '/videos/{taskId}', model: ['agnes-video-v2.0'] },
+  { service_type: 'video', name: 'Agnes 视频', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'agnes', endpoint: '/videos', query_endpoint: '/videos/{taskId}', model: ['agnes-video-v2.0', 'agnes-video-2.5'] },
 ]
 
 function serviceTypeLabel(t) {

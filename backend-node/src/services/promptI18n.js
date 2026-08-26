@@ -265,6 +265,7 @@ function getStoryboardSystemPrompt(cfg) {
    - 构图建议：三分法（稳定叙事）/ 对角线（动态张力）/ 框架构图（增加纵深）/ 中心构图（庄重仪式感）
    - 光线方向：在 atmosphere 字段中注明光源方向和色温（如"左侧冷蓝光，逆光轮廓"）
    - 对话场景：使用正反打（过肩镜头交替），避免连续同向构图
+   - 视频电话/语音电话/远程会议：以**接听方**为主镜（中近景），characters只填接听方；对方仅在手机/屏幕小窗或画外音，禁止两人实体同框
 
 **重要：必须只返回纯JSON数组，不要包含任何markdown代码块、说明文字或其他内容。直接以 [ 开头，以 ] 结尾。**
 
@@ -348,6 +349,84 @@ ${spec}`;
 ${spec}`;
 }
 
+/** 全文解说旁白视频模式：任务说明（替换默认 task_instruction） */
+function getStoryboardFullNarrationTaskInstruction(cfg) {
+  if (isEnglish(cfg)) {
+    return 'Treat the script block above as the **full verbatim narration script** (not a plot summary). Split it into consecutive shots by readable VO length: each shot\'s "narration" must be a **continuous verbatim excerpt** from that script — no paraphrase, no shortening, no skipped sentences. Concatenating all "narration" fields in shot order must cover the **entire** script text exactly once. Shot count follows script length and per-shot duration, not arbitrary plot merging.';
+  }
+  return '将上方【剧本内容】视为**全文解说旁白原文**（不是剧情摘要或提纲）。按朗读时长把原文**逐字连续分段**拆成多个镜头：每镜 "narration" 必须是原文的**连续摘录**，禁止改写、缩写、概括或跳句；所有镜头的 narration 按镜序拼接后须**完整覆盖**原文且每句只出现一次。镜数由原文长度与每镜可读时长决定，禁止为凑镜数合并段落或跳过原文。';
+}
+
+/**
+ * 全文解说旁白视频模式：追加到用户提示词
+ * @param {{ clipDuration?: number|null, scriptLength?: number }} opts
+ */
+function getStoryboardFullNarrationModeInstructions(cfg, opts = {}) {
+  const { resolveFullNarrationLimits } = require('./fullNarrationConstants');
+  const limits = opts.narrationLimits || resolveFullNarrationLimits();
+  const {
+    NARRATION_CHARS_PER_SEC: charsPerSec,
+    FULL_NARRATION_TARGET_SEC: targetSegmentSec,
+    FULL_NARRATION_MAX_SEC: maxSegmentSec,
+    FULL_NARRATION_DURATION_MIN_SEC: durationMinSec,
+    FULL_NARRATION_TARGET_CHARS: targetCharsPerShot,
+    FULL_NARRATION_MAX_CHARS: maxCharsPerShot,
+  } = limits;
+  const exampleFloor = Math.round(durationMinSec * charsPerSec);
+  const exampleTarget = targetCharsPerShot;
+  const exampleMax = maxCharsPerShot;
+  if (isEnglish(cfg)) {
+    return `
+
+【FULL VERBATIM NARRATION VIDEO MODE — STRICT】
+- The script above is the **only** narration source. Each shot's "narration" = **verbatim** continuous excerpt (**target ~${targetCharsPerShot} speech chars / ~${targetSegmentSec}s; hard max ${maxCharsPerShot} chars / ${maxSegmentSec}s**).
+- Pack at punctuation only: fill toward ~${targetCharsPerShot} chars; if adding the next clause would exceed ${maxCharsPerShot}, **back up to the previous punctuation**. Last shot may be shorter; if last remainder > ${maxCharsPerShot}, split into two shots at punctuation — **never cut mid-word**.
+- **duration formula**: ceil(speech char count ÷ ${charsPerSec}) seconds, clamped to **${durationMinSec}–${maxSegmentSec}s**. Speech chars = Chinese/letters/digits only. Examples: ${exampleFloor}→${durationMinSec}s, ${exampleTarget}→~${targetSegmentSec}s, ${exampleMax}→${maxSegmentSec}s.
+- **Forbidden**: rewriting, summarizing, merging unrelated paragraphs, or inventing narration not in the script.
+- "dialogue" must be **empty** unless the script explicitly contains labeled character lines (Name: "line").
+- "action" / "result" / visuals: illustrate what the narration segment describes; on-screen characters stay **silent with closed lips** (VO only).
+- Order shots strictly along the script; do not reorder or skip text.
+- **Shot 1** is a title/establishing card: "narration" MUST be empty; copy scene/characters/props from shot 2; duration 6s. **Narration script starts at shot 2** (segment 1 in binding).`;
+  }
+  return `
+
+【全文解说旁白视频模式 — 硬性要求】
+- 上方剧本正文即**唯一旁白来源**；每镜 "narration" = 原文**逐字连续摘录**（**目标约 ${targetCharsPerShot} 字 / ${targetSegmentSec} 秒，硬上限 ${maxCharsPerShot} 字 / ${maxSegmentSec} 秒**）。
+- **只在标点处切分**：尽量装到约 ${targetCharsPerShot} 字；再加下一段会超过 ${maxCharsPerShot} 字时，**退回上一符号成镜**。末镜可短于目标；末段仍超 ${maxCharsPerShot} 字则再拆成两镜；**禁止在词语中间截断**。
+- 每镜 **duration 计算公式**：ceil(旁白可读字数 ÷ ${charsPerSec}) 秒，限制在 **${durationMinSec}～${maxSegmentSec} 秒**。可读字数 = 汉字/字母/数字，**不含标点**；例：${exampleFloor}字→${durationMinSec}秒，${exampleTarget}字→约${targetSegmentSec}秒，${exampleMax}字→${maxSegmentSec}秒。
+- **禁止**：改写、缩写、概括、合并不相邻段落、编造剧本中不存在的旁白。
+- "dialogue" 一律留空，除非剧本中明确写了角色对白（如 角色名：「台词」）。
+- "action" / "result" / 画面：配合该段旁白内容设计镜头；画内人物**闭口无口型**（仅画外解说）。
+- 分镜顺序严格沿原文从头到尾，不得跳段、重排或遗漏句子。
+- **第 1 镜**为片头/标题氛围镜：narration 必须留空；场景/角色/物品与第 2 镜一致即可；duration 6 秒。**旁白原文从第 2 镜开始**绑定。`;
+}
+
+/** 全文解说旁白视频模式：系统提示词最高优先级覆盖 */
+function getStoryboardFullNarrationSystemOverride(cfg, opts = {}) {
+  const { resolveFullNarrationLimits } = require('./fullNarrationConstants');
+  const limits = opts.narrationLimits || resolveFullNarrationLimits();
+  const {
+    FULL_NARRATION_TARGET_CHARS: targetCharsPerShot,
+    FULL_NARRATION_MAX_CHARS: maxCharsPerShot,
+  } = limits;
+  if (isEnglish(cfg)) {
+    return `
+
+[HIGHEST PRIORITY — FULL VERBATIM NARRATION VIDEO MODE]
+This OVERRIDES conflicting rules (one-action-one-shot, plot-driven merge, short VO snippets, 10–50 char narration limits).
+- Split by **narration script punctuation**, not by dramatic beats alone.
+- Every "narration" field (shots 2+): verbatim excerpt; **target ~${targetCharsPerShot} speech chars, hard max ${maxCharsPerShot}**; pack at punctuation and back up if exceeding max; shots 2–end narration concatenated must cover the full script.
+- **Shot 1**: title card only — empty "narration". **Shot 2** starts at the **first words** of the script; last narration shot ends at the **last words**.`;
+  }
+  return `
+
+【最高优先级——全文解说旁白视频模式】
+本模式覆盖与之冲突的一切规则（一动作一镜、情节驱动合并、每镜过短旁白等）。
+- 按**旁白原文标点**拆镜，而非仅按戏剧节拍随意合并。
+- 每镜 "narration"（第 2 镜起）必须是用户剧本的逐字摘录；**目标约 ${targetCharsPerShot} 字，硬上限 ${maxCharsPerShot} 字**；只在标点处装段，超上限则退回上一符号；第 2 镜至最后一镜旁白拼接后须完整覆盖用户原文。
+- **第 1 镜**为片头：narration 留空。**第 2 镜**从原文**第一个字**开始；最后一镜旁白止于原文**最后一个字**。`;
+}
+
 /** 分镜生成勾选「解说旁白」时追加到用户提示词末尾 */
 function getStoryboardNarrationExtraInstructions(cfg) {
   if (isEnglish(cfg)) {
@@ -382,7 +461,7 @@ function formatUserPrompt(cfg, key, ...args) {
       character_list_label: '【Available Character List】',
       scene_list_label: '【Extracted Scene Backgrounds】',
       task_instruction: 'Break down the novel script into storyboard shots based on **independent action units**.',
-      character_constraint: '**Important** — characters field rules:\n1. Only use character IDs (numbers) from the above character list. Do not invent IDs.\n2. Only include characters who **physically appear and act** in this specific shot. Do NOT list characters who are merely mentioned, offscreen, or appear in the overall scene but not in this shot.\n3. The number of characters listed must match who is described in the action/dialogue fields. If the action only describes one person, list only that one character.',
+      character_constraint: '**Important** — characters field rules:\n1. Only use character IDs (numbers) from the above character list. Do not invent IDs.\n2. Only include characters who **physically appear and act** in this specific shot. Do NOT list characters who are merely mentioned, offscreen, or appear in the overall scene but not in this shot.\n3. The number of characters listed must match who is described in the action/dialogue fields. If the action only describes one person, list only that one character.\n4. **Video/voice call or remote meeting**: use the **person who answers/receives the call** as the on-screen subject. characters must list only that receiver; the remote party may appear only on a phone/screen inset or as voice — never both people physically in the same frame.',
       scene_constraint: '**Important**: In the scene_id field, select the most matching background ID (number) from the above background list. If no suitable background exists, use null.',
       prop_list_label: '【Available Prop List】',
       prop_constraint: '**Important** — props field rules:\n1. Only use prop IDs (numbers) from the above prop list. Do not invent IDs.\n2. Only include props that are **visually present and actively used or prominently featured** in this specific shot.\n3. If no props from the list appear in the shot, use an empty array [].',
@@ -410,7 +489,7 @@ function formatUserPrompt(cfg, key, ...args) {
       character_list_label: '【本剧可用角色列表】',
       scene_list_label: '【本剧已提取的场景背景列表】',
       task_instruction: '将小说剧本按**独立动作单元**拆解为分镜头方案。',
-      character_constraint: '**重要** — characters字段填写规则：\n1. 只能使用上述角色列表中的角色ID（数字），不得自创ID。\n2. 只填写在**本镜头中实际出现并有具体行为**的角色。不要把"提到的"、"画面外的"、或整个场景里有但本镜头动作中未描述的角色也列进去。\n3. characters数量必须与action/dialogue中实际描写的人物数量一致。如果action只描述了一个人的动作，characters里就只填那一个人的ID。',
+      character_constraint: '**重要** — characters字段填写规则：\n1. 只能使用上述角色列表中的角色ID（数字），不得自创ID。\n2. 只填写在**本镜头中实际出现并有具体行为**的角色。不要把"提到的"、"画面外的"、或整个场景里有但本镜头动作中未描述的角色也列进去。\n3. characters数量必须与action/dialogue中实际描写的人物数量一致。如果action只描述了一个人的动作，characters里就只填那一个人的ID。\n4. **视频电话/语音电话/远程会议**：以**接听方**为主镜构图，characters只填接听方一人；对方仅可在手机/屏幕小窗或画外音中出现，禁止两人实体同框。',
       scene_constraint: '**重要**：在scene_id字段中，必须从上述背景列表中选择最匹配的背景ID（数字）。如果没有合适的背景，则填null。',
       prop_list_label: '【本集可用道具列表】',
       prop_constraint: '**重要** — props字段填写规则：\n1. 只能使用上述道具列表中的道具ID（数字），不得自创ID。\n2. 只填写在**本镜头中视觉上出现并被使用或显著展示**的道具。\n3. 如果本镜头中没有列表中的道具出现，则填空数组[]。',
@@ -438,19 +517,76 @@ function formatUserPrompt(cfg, key, ...args) {
   return t.replace(/%[sd]/g, () => (args[i] != null ? String(args[i++]) : ''));
 }
 
+/** 项目常用单镜时长档位（与前端「X秒/段」选项对齐） */
+const STORYBOARD_DURATION_TIERS = [4, 5, 6, 8, 10, 12, 15];
+
+/**
+ * ArcReel 风格：未指定总分镜数时，由 AI 按情节自然拆分镜数与单镜时长。
+ * @param {object} cfg
+ * @param {{ clipDuration?: number|null }} opts
+ */
+function getStoryboardPlotDrivenInstructions(cfg, opts = {}) {
+  const clip = opts.clipDuration != null && Number(opts.clipDuration) > 0 ? Math.round(Number(opts.clipDuration)) : null;
+  const tiers = STORYBOARD_DURATION_TIERS.join(', ');
+  const maxDur = STORYBOARD_DURATION_TIERS[STORYBOARD_DURATION_TIERS.length - 1];
+  if (isEnglish(cfg)) {
+    const durationBlock = clip
+      ? `Pick each shot's "duration" from [${tiers}] seconds. Default preference: **${clip}s** when content fits; use longer tiers (up to ${maxDur}s) for dialogue-heavy, action, or emotional beats—do NOT default every shot to the shortest tier. If dialogue would take longer to speak than the chosen duration, raise duration to fit (rough guide: ~4 characters per second for Chinese dialogue).`
+      : `Pick each shot's "duration" from [${tiers}] seconds based on content complexity (max ${maxDur}s). Dialogue-heavy shots need enough time to deliver lines; action/emotion beats may use longer tiers.`;
+    return `
+
+【PLOT-DRIVEN SHOT COUNT — HIGHEST PRIORITY WHEN NO TARGET COUNT IS SET (overrides "one action = one shot" rules above)】
+- Cover the **entire script** in order; shot count follows plot, **NOT** char-count÷clip formula.
+- **Split by scene first** (location/time change → new shot); merge continuous action in the same scene into one shot (use internal cuts in action).
+- One shot = one completable visual beat (one dialogue exchange or one action chain). Do **NOT** split every short sentence or micro-gesture.
+- Typical short episode: **8–25 shots**; only exceed **30** with strong plot justification.
+- Opening hook ~2–4s; end on a visual hook when the script implies suspense.
+- **duration**: ${durationBlock}`;
+  }
+  const durationBlock = clip
+    ? `每镜 duration 从 [${tiers}] 秒档位中按画面内容选择：默认偏好 **${clip} 秒**（项目「每段秒数」），对白多/打斗/情绪铺陈可取更长档至 ${maxDur} 秒，禁止机械全部选最短档。若对白朗读时间超过所选时长，应提高 duration（中文对白粗估约每 4 字 1 秒）。`
+    : `每镜 duration 从 [${tiers}] 秒档位中按画面复杂度选择（最长 ${maxDur} 秒）；对白多的镜头要给足朗读时间，动作/情绪镜头可用更长档。`;
+  return `
+
+【情节驱动分镜数——未指定目标镜数时最高优先级（参照 ArcReel 剧情分镜，覆盖上文「一动作一镜/禁止合并」类规则）】
+- **必须覆盖剧本全部情节**，镜数由情节自然决定，**不由字数÷每段秒数公式推算**。
+- **先按场景/场次拆分**（地点或时间明显切换 → 新镜头），同一场景内连续动作链 **合并为一镜**（action 内可用「镜头1…切镜到镜头2…」描述子画面）。
+- 一镜 = 一个可完成的视觉节拍（一轮核心对白、或一段连续动作），**禁止**把每个短句、每个微小动作都拆成独立分镜。
+- **禁止**为凑数量填充重复/空泛镜头；**禁止**把无关节拍硬合并成一镜。
+- 一集短剧通常 **8–25 镜** 即可讲完；剧本较长（>2500字）可适当增加，但 **超过 30 镜需有充分情节依据**，不要机械细拆。
+- 开篇钩子宜 2–4 秒节奏感；中段情绪转折可用更长单镜；剧本有悬念收束时末镜定格悬念画面。
+- **duration**：${durationBlock}`;
+}
+
 /** 分镜用户提示词后缀：详细输出格式与要求
  * @param {object} cfg - 配置对象
- * @param {number|null} shotDuration - 单镜建议时长（秒），由后端从项目配置或总时长/数量推算后注入
+ * @param {number|null} shotDuration - 单镜建议时长（秒）
+ * @param {'fixed'|'preferred'|'auto'} [durationMode] - fixed=用户指定总时长+镜数；preferred=项目每段秒数为偏好；auto=纯按内容
  */
-function getStoryboardUserPromptSuffix(cfg, shotDuration) {
+function getStoryboardUserPromptSuffix(cfg, shotDuration, durationMode = 'auto', opts = {}) {
+  const includeNarration = !!opts.includeNarration;
+  const fullNarration = !!opts.fullNarration;
+  const narrFieldEn = includeNarration
+    ? (fullNarration
+      ? ', narration (REQUIRED: verbatim excerpt from user script, non-empty string)'
+      : ', narration (REQUIRED: non-empty narrator VO string per shot)')
+    : '';
+  const narrFieldZh = includeNarration
+    ? (fullNarration
+      ? '、**narration（必填：剧本原文逐字连续摘录，非空字符串）**'
+      : '、**narration（必填：每镜解说旁白原文，非空字符串）**')
+    : '';
   const lang = isEnglish(cfg) ? 'en' : 'zh';
   const durationHint = shotDuration && Number.isFinite(Number(shotDuration)) && Number(shotDuration) > 0
     ? Number(shotDuration)
     : null;
   if (lang === 'en') {
-    const durationInstruction = durationHint
-      ? `approximately ${durationHint}s per shot (project setting), adjust ±1s based on dialogue length and action complexity`
-      : 'estimate per shot from dialogue length, action complexity, and emotion';
+    let durationInstruction = 'pick from supported tiers [4,5,6,8,10,12,15] based on dialogue length, action complexity, and emotion';
+    if (durationMode === 'fixed' && durationHint) {
+      durationInstruction = `approximately ${durationHint}s per shot (user total budget), adjust ±1s based on dialogue and action`;
+    } else if (durationMode === 'preferred' && durationHint) {
+      durationInstruction = `prefer ~${durationHint}s from tiers [4,5,6,8,10,12,15], override when dialogue/action needs longer`;
+    }
     return `
 
 **dialogue field**: "Character: \"line\"". Multiple: "A: \"...\" B: \"...\"". Monologue: "(Monologue) content". No dialogue: "".
@@ -461,16 +597,19 @@ function getStoryboardUserPromptSuffix(cfg, shotDuration) {
 
 **Audio rule**: bgm_prompt MUST be an empty string or "No BGM". Do not design background music per shot. Put only diegetic ambience, foley, and voice/timbre details in sound_effect, so audio remains consistent across clips.
 
-**Output**: JSON with "storyboards" array. Each item: shot_number, segment_index, segment_title, title, shot_type, angle, time, location, scene_id, movement, action, dialogue, result, atmosphere, emotion, duration, bgm_prompt, sound_effect, characters (array of IDs), props (array of prop IDs), is_primary. Return ONLY valid JSON, no markdown.`;
+**Output**: JSON with "storyboards" array. Each item: shot_number, segment_index, segment_title, title, shot_type, angle, time, location, scene_id, movement, action, dialogue, result, atmosphere, emotion, duration, bgm_prompt, sound_effect, characters (array of IDs), props (array of prop IDs), is_primary${narrFieldEn}. Return ONLY valid JSON, no markdown.`;
   }
-  const _sbUserLocked = `\n\n【输出格式】请以JSON格式输出，包含 "storyboards" 数组。每个镜头包含：shot_number, segment_index, segment_title, title, shot_type, angle, time, location, scene_id, movement, action, dialogue, result, atmosphere, emotion, duration, bgm_prompt, sound_effect, characters（角色ID数组）, props（道具ID数组）, is_primary, **layout_description（画面布局与人物站位描述，必填，最高优先级空间合同）**。**必须只返回纯JSON，不要markdown。**`;
+  const _sbUserLocked = `\n\n【输出格式】请以JSON格式输出，包含 "storyboards" 数组。每个镜头包含：shot_number, segment_index, segment_title, title, shot_type, angle, time, location, scene_id, movement, action, dialogue, result, atmosphere, emotion, duration, bgm_prompt, sound_effect, characters（角色ID数组）, props（道具ID数组）, is_primary, **layout_description（画面布局与人物站位描述，必填，最高优先级空间合同）**${narrFieldZh}。**必须只返回纯JSON，不要markdown。**`;
   const _sbUserOverride = _overrideCache['storyboard_user_suffix'];
   if (_sbUserOverride) {
     return '\n\n' + _sbUserOverride + _sbUserLocked;
   }
-  const durationInstruction = durationHint
-    ? `每镜头约${durationHint}秒（项目配置），综合对话、动作、情绪可适当调整±1秒`
-    : '综合对话、动作、情绪估算每镜时长（秒）';
+  let durationInstruction = '从档位 [4,5,6,8,10,12,15] 秒中按对话、动作、情绪选择';
+  if (durationMode === 'fixed' && durationHint) {
+    durationInstruction = `每镜头约${durationHint}秒（用户指定总时长规划），综合对话、动作可适当±1秒`;
+  } else if (durationMode === 'preferred' && durationHint) {
+    durationInstruction = `优先约${durationHint}秒（项目每段秒数偏好），对白/动作需要时可选用更长档`;
+  }
   return `
 
 【分镜要素】每个分镜聚焦一个叙事节拍（可包含内部多切镜序列），描述要详尽具体：
@@ -480,6 +619,7 @@ function getStoryboardUserPromptSuffix(cfg, shotDuration) {
 4. **镜头设计**：**景别(shot_type)**、**镜头角度(angle)**、**运镜方式(movement)**
 5. **人物行为**：**详细动作描述**
 6. **对话/独白**：提取该镜头中的完整对话或独白内容（如无对话则为空字符串）
+${includeNarration ? (fullNarration ? '6b. **解说旁白 narration（必填）**：必须是上方剧本正文的**逐字连续摘录**，禁止改写；画外解说写在 narration，不要写进 dialogue 或 sound_effect' : '6b. **解说旁白 narration（必填）**：画外第三人称解说，与 dialogue 严格区分；禁止留空') : ''}
 7. **画面结果**：动作的即时后果+视觉细节+氛围变化
 8. **环境氛围**：光线质感+色调+声音环境+整体氛围
 9. **声音设计**：bgm_prompt 必须填空字符串""或"无背景音乐/禁BGM"；**不要为单个片段设计背景音乐**。sound_effect 只写现场环境声、动作音效、对白/旁白音色（如低沉、沙哑、颤抖、冷静、急促等）和口型同步要求
@@ -501,7 +641,7 @@ function getStoryboardUserPromptSuffix(cfg, shotDuration) {
 **duration时长**：${durationInstruction}。
 **声音一致性**：所有镜头默认无BGM；若有对白/旁白，sound_effect 必须补充音色与情绪强度，并与动作节奏、环境声保持一致。
 
-【输出格式】请以JSON格式输出，包含 "storyboards" 数组。每个镜头包含：shot_number, segment_index, segment_title, title, shot_type, angle, time, location, scene_id, movement, action, dialogue, result, atmosphere, emotion, duration, bgm_prompt, sound_effect, characters（角色ID数组）, props（道具ID数组）, is_primary。**必须只返回纯JSON，不要markdown。**`;
+【输出格式】请以JSON格式输出，包含 "storyboards" 数组。每个镜头包含：shot_number, segment_index, segment_title, title, shot_type, angle, time, location, scene_id, movement, action, dialogue, result, atmosphere, emotion, duration, bgm_prompt, sound_effect, characters（角色ID数组）, props（道具ID数组）, is_primary${narrFieldZh}。**必须只返回纯JSON，不要markdown。**`;
 }
 
 /**
@@ -1395,6 +1535,118 @@ If CURRENT_UNIVERSAL_SEGMENT is non-empty, preserve narrative beats but rewrite 
 }
 
 /**
+ * 全文解说旁白 + 经典模式：生成/润色 video_prompt 共用系统提示（标签分句格式）
+ */
+function getFullNarrationClassicVideoPromptBase(cfg) {
+  const isEn = isEnglish(cfg);
+  if (isEn) {
+    return `You are an expert prompt engineer for full-narration documentary-style image-to-video (Agnes, Seedance, Kling, etc.).
+
+Narration is added post-production via IndexTTS — the video clip must be **silent on-screen speech** (characters keep mouths closed).
+
+OUTPUT FORMAT — labeled clauses joined by 「。」 (omit empty labels; if narration exists, 「解说旁白：」 is mandatory):
+场景：…。镜头标题：…。动作：…。对话：…。解说旁白：…。结果：…。景别：…。镜头角度：…。运镜：…。氛围：…。情绪：…。情绪强度：…。配乐：…。音效：…。时长：Xs。风格：…。=VideoRatio: 16:9
+
+FULL-NARRATION RULES:
+1. **Narration-driven visuals**: design concrete action, environment, and emotional payoff that match NARRATION verbatim; viewers must "see what the VO describes".
+2. **Narration verbatim**: when NARRATION is non-empty, copy it exactly after 「解说旁白：」.
+3. **Silent clip**: motion serves off-screen VO; no lip sync; BGM/SFX = ambience only.
+4. **Title shot (empty narration)**: shot 1 = establishing/title mood; omit 「解说旁白：」 clause.
+5. **Dialogue field**: keep in 「对话：」 if present, but action still treats speech as silent (no mouth movement).
+6. **Fact conservation**: do not change duration seconds, =VideoRatio, angle English parentheticals, or invent plot.
+7. **Dynamic video language**: camera motion and pacing must fit duration seconds.
+8. **Content moderation**: soften explicit romance/violence/harassment while keeping causality.
+9. Weave VISUAL_STYLE into 「风格：」 naturally.`;
+  }
+
+  return `你是「全文解说旁白视频模式」下的图生视频提示词专家（Agnes / Seedance / 可灵等）。旁白由分镜视频后处理 IndexTTS 叠加，**成片须画面无声、人物闭口无口型**。
+
+【输出格式——必须按下列标签分句，用中文句号「。」连接】
+按字段存在情况输出对应分句（无内容可省略；narration 非空时「解说旁白：」**必填**）：
+场景：…。镜头标题：…。动作：…。对话：…。解说旁白：…。结果：…。景别：…。镜头角度：…。运镜：…。氛围：…。情绪：…。情绪强度：…。配乐：…。音效：…。时长：Xs。风格：…。=VideoRatio: 16:9
+
+【全文解说模式专用规则】
+1. **旁白驱动画面**：根据 NARRATION 原文设计与之匹配的**具体可视动作、环境细节与情绪落幅**；画面须让观众「看见旁白在讲什么」，禁止与旁白无关的空镜或无意义走动。
+2. **解说旁白逐字保留**：STORYBOARD_FIELDS 中 narration 非空时，「解说旁白：」后须**逐字照抄**原文，禁止改写、缩写或概括。
+3. **无声成片约束**：动作/结果/运镜须服务于「画外解说 + 画面无人说话」；人物闭口、无口型；「配乐：」「音效：」仅写环境声与氛围音乐侧写，不写对白/旁白配音要求。
+4. **片头镜（narration 为空）**：第 1 镜为标题/定场氛围镜，动作为慢运镜或象征性画面，**省略**「解说旁白：」分句。
+5. **对话字段**：若有 dialogue，保留在「对话：」分句（逐字），但动作描述仍按无声处理——人物不张口说话。
+6. **事实守恒**：不得删改场景、动作要点、结果、景别、镜头角度（含括号内完整英文技术描述）、运镜、**时长：Xs**、**=VideoRatio:**；禁止编造剧本与字段未写的情节。
+7. **动态视频语言**：运镜、切镜、节奏须与本镜 duration 秒数匹配；首帧参考图已锁定人物/场景外观，文案负责动效与节奏。
+8. **内容合规**：弱化露骨婚恋/性暗示/暴力/骚扰等敏感表述，保留剧情因果；USER_INSTRUCTION 优先。
+9. 自然融入 VISUAL_STYLE 至「风格：」分句；保留角色姓名。`;
+}
+
+/**
+ * 经典分镜 video_prompt 系统提示：普通润色 vs 全文解说（生成/润色共用基线）
+ */
+function getClassicVideoPromptSystemPrompt(cfg, opts = {}) {
+  const fullNarration = !!opts?.fullNarration;
+  const mode = opts?.mode === 'generate' ? 'generate' : 'polish';
+  if (!fullNarration) {
+    return getClassicVideoPromptPolishPrompt(cfg);
+  }
+  const base = getFullNarrationClassicVideoPromptBase(cfg);
+  if (mode === 'generate') {
+    if (isEnglish(cfg)) {
+      return `${base}
+
+GENERATE MODE:
+From STORYBOARD_FIELDS, neighbors, FULL_EPISODE_SCRIPT and AUTO_COMPOSED_VIDEO_PROMPT, **generate** a complete video_prompt from scratch. AUTO_COMPOSED shows label order only — expand action and camera from narration meaningfully.`;
+    }
+    return `${base}
+
+【生成模式】
+根据 STORYBOARD_FIELDS、邻镜、FULL_EPISODE_SCRIPT 与 AUTO_COMPOSED_VIDEO_PROMPT，**从零生成**完整 video_prompt。AUTO_COMPOSED 仅作标签顺序与字段底线参考，须据旁白语义合理扩展动作、运镜与氛围，不得机械照抄拼装句。`;
+  }
+  if (isEnglish(cfg)) {
+    return `${base}
+
+POLISH MODE:
+Refine CURRENT_VIDEO_DRAFT: same facts and seconds, noticeably rephrased; follow USER_INSTRUCTION when given.`;
+  }
+  return `${base}
+
+【润色模式】
+在 CURRENT_VIDEO_DRAFT 基础上润色：事实、旁白/对白原文与时长秒数不变，须明显换表述；优先满足 USER_INSTRUCTION。`;
+}
+
+/**
+ * 经典分镜 video_prompt 流式润色：将分镜字段 + 当前草稿转为可直接送图生视频模型的中文提示词。
+ */
+function getClassicVideoPromptPolishPrompt(cfg) {
+  const isEn = isEnglish(cfg);
+  if (isEn) {
+    return `You are an expert prompt engineer for image-to-video models (Kling, Seedance, Agnes, etc.).
+
+Transform storyboard facts into ONE polished Chinese video prompt paragraph (or labeled clauses joined by 「。」).
+
+HARD RULES:
+1. Output ONLY the final prompt — no explanations, labels, JSON, or markdown fences.
+2. Preserve ALL factual beats from STORYBOARD_FIELDS / AUTO_COMPOSED / CURRENT_VIDEO_DRAFT: scene, action, dialogue verbatim in 「」, narration, result, shot size, angle (keep full English parenthetical if present), movement, atmosphere, BGM/SFX if any, emotion intensity numbers, duration seconds, =VideoRatio line.
+3. Do NOT change duration seconds or aspect ratio token.
+4. Do NOT invent plot absent from script + fields + draft.
+5. Dynamic video language allowed (camera motion, transitions, pacing) — unlike static image polish.
+6. If USER_INSTRUCTION is provided (e.g. remove sensitive wording, pass content moderation), follow it while keeping story meaning; soften explicit romance/harassment/violence triggers, use euphemistic phrasing, avoid sexualized crowd descriptions.
+7. Re-polish must rephrase noticeably vs CURRENT_VIDEO_DRAFT when user clicks again; same facts, new wording.
+8. Weave STYLE_ZH / STYLE_EN naturally; keep character names from fields.`;
+  }
+
+  return `你是图生视频（可灵、Seedance、Agnes 等）提示词专家。
+
+任务：根据用户消息中的分镜字段、剧本邻镜、AUTO_COMPOSED 与 CURRENT_VIDEO_DRAFT，输出**一段可直接提交的中文 video_prompt**（可用「场景：…。动作：…。」等标签分句，用句号连接）。
+
+【硬性规则】
+1. **只输出成稿**，无任何解释、前言、JSON、代码块。
+2. **事实守恒**：不得删改 STORYBOARD_FIELDS / AUTO_COMPOSED / CURRENT_VIDEO_DRAFT 中的叙事要点——场景、动作、对白（须逐字保留「」内台词）、解说旁白、结果、景别、镜头角度（含括号内完整英文技术描述）、运镜、氛围、配乐/音效/情绪强度数值、**时长：Xs**、**=VideoRatio:** 画幅行。
+3. **禁止**改 duration 秒数与 =VideoRatio 值；禁止编造剧本与字段未写的情节。
+4. **允许**使用动态视频语言（运镜、切镜、节奏、声画暗示），与静态图 prompt 不同。
+5. **内容合规（USER_INSTRUCTION 优先）**：若用户要求去掉敏感描述、防止审核失败，须在保留剧情含义前提下：弱化露骨婚恋/性暗示/群体骚扰等表述，用含蓄中性措辞；避免暴力、仇恨、未成年相关敏感描写；不改变人物关系与事件因果。
+6. **多次润色**：与 CURRENT_VIDEO_DRAFT 相比须明显换表述，不得仅改标点。
+7. 自然融入 VISUAL_STYLE；保留角色姓名。`;
+}
+
+/**
  * 全能片段「润色」模式：在 getUniversalOmniSegmentPrompt 的硬性格式与参考图规则之上，强化短剧叙事与上下文一致。
  */
 function getUniversalOmniPolishPrompt() {
@@ -1581,6 +1833,70 @@ function getPropPolishPrompt(cfg) {
 **必须**在同一段内自然包含以下关键约束的中文表述（或等价流畅说法）：单一主体、纯色无缝棚拍背景、无多余物体、无人物、无手、无环境；并融入真实尺度与次要元素要求；末尾再接画风：${styleZh ? styleZh + ' 渲染质感' : '写实产品主图质感'}`;
 }
 
+
+/**
+ * 全文解说经典模式：一次调用同时生成静态生图提示词 + 视频提示词（减少 API 次数）
+ */
+function getFullNarrationDualPromptSystemPrompt(cfg) {
+  const isEn = isEnglish(cfg);
+  if (isEn) {
+    return `You generate TWO prompts for one full-narration classic storyboard shot in ONE reply.
+
+OUTPUT: ONLY a valid JSON object (no markdown fences, no preamble):
+{
+  "polished_prompt": "<static single-frame IMAGE prompt>",
+  "video_prompt": "<labeled VIDEO prompt clauses joined by 。>"
+}
+
+IMAGE (polished_prompt) RULES:
+- Static frozen millisecond only; ban camera motion / gradually / then / cut to
+- One continuous frame, no split panels/collage
+- Chinese or English per project language; ~80–160 chars if Chinese / 50–100 words if English
+- 5-layer feel: shot design, lighting, content focus, atmosphere, style tokens
+- Characters: identity anchors only; NEVER invent clothing (refs decide costume)
+- Repeat STYLE tokens from user message
+- Honor PREV_CONTINUITY_STATE clothing/posture when present
+
+VIDEO (video_prompt) RULES — full-narration classic:
+- Labeled clauses: 场景：…。镜头标题：…。动作：…。对话：…。解说旁白：…。结果：…。景别：…。镜头角度：…。运镜：…。氛围：…。情绪：…。情绪强度：…。配乐：…。音效：…。时长：Xs。风格：…。=VideoRatio: …
+- Narration drives visuals; copy NARRATION verbatim after 解说旁白： when non-empty
+- Silent on-screen speech (mouth closed); VO added later via TTS
+- Fact conservation: keep duration seconds and =VideoRatio; do not invent plot
+- Dynamic camera language allowed in video_prompt only
+- Title shot (empty narration): omit 解说旁白： clause
+
+Reuse STORYBOARD_FIELDS / AUTO_COMPOSED / neighbors / ASSETS from the user message.`;
+  }
+
+  return `你是「全文解说旁白视频模式」下的双提示词专家：一次输出同一分镜的**静态生图提示词**与**图生视频提示词**。
+
+【输出格式——只返回纯 JSON，不要 markdown 代码块、不要解释】
+{
+  "polished_prompt": "<中文静态单帧生图提示词>",
+  "video_prompt": "<中文视频提示词，标签分句用。连接>"
+}
+
+【polished_prompt — 生图】
+1. 静态单帧冻结瞬间；禁止运镜/逐渐/然后/切到等动态词
+2. 单一连续画面，无分格/拼贴
+3. 约 80–160 字，中文逗号「，」连接；推荐 5 层：镜头设计、光线、内容焦点、氛围、视觉风格
+4. 角色只写固定身份特征 + 姿态表情；**严禁任何服装/衣着描述**（服装由参考图决定）
+5. 必须重复用户消息中的画风 / STYLE_TOKENS
+6. 有 PREV_CONTINUITY_STATE 时保持服装与姿态连戏（未写换装不得改服装）
+
+【video_prompt — 全文解说视频】
+按字段存在情况输出标签分句（narration 非空时「解说旁白：」必填）：
+场景：…。镜头标题：…。动作：…。对话：…。解说旁白：…。结果：…。景别：…。镜头角度：…。运镜：…。氛围：…。情绪：…。情绪强度：…。配乐：…。音效：…。时长：Xs。风格：…。=VideoRatio: 16:9
+1. 旁白驱动画面；解说旁白须**逐字照抄** NARRATION（非空时）
+2. 成片画面无声、人物闭口；配乐/音效仅环境侧写
+3. 片头镜（旁白为空）省略「解说旁白：」
+4. 事实守恒：不改 duration 秒数与 =VideoRatio；不编造情节
+5. 允许动态运镜语言（仅 video_prompt）
+6. 自然融入 VISUAL_STYLE；保留角色姓名
+
+依据用户消息中的 STORYBOARD_FIELDS、AUTO_COMPOSED、邻镜、ASSETS、画风等生成。`;
+}
+
 module.exports = {
   getLanguage,
   isEnglish,
@@ -1595,7 +1911,11 @@ module.exports = {
   getUniversalOmniMultiBeatFormatSpec,
   getStoryboardUniversalOmniModeSuffix,
   getStoryboardUserPromptSuffix,
+  getStoryboardPlotDrivenInstructions,
   getStoryboardNarrationExtraInstructions,
+  getStoryboardFullNarrationTaskInstruction,
+  getStoryboardFullNarrationModeInstructions,
+  getStoryboardFullNarrationSystemOverride,
   getStoryExpansionSystemPrompt,
   buildStoryExpansionUserPrompt,
   getRolePolishPrompt,
@@ -1605,6 +1925,10 @@ module.exports = {
   getSceneGenerateImagePrompt,
   getSceneGenerateSingleImagePrompt,
   getImagePolishPrompt,
+  getClassicVideoPromptPolishPrompt,
+  getClassicVideoPromptSystemPrompt,
+  getFullNarrationClassicVideoPromptBase,
+  getFullNarrationDualPromptSystemPrompt,
   getUniversalOmniSegmentPrompt,
   getUniversalOmniPolishPrompt,
   getContinuitySnapshotPrompt,

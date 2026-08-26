@@ -1,8 +1,26 @@
 // 与 Go pkg/ai + application/services/ai_service 对齐：读取 ai_service_configs，调用 OpenAI 兼容的 chat completions
 const aiConfigService = require('./aiConfigService');
 const { applyDeepSeekChatOptions } = require('./deepseekConfig');
+const { getApiKeyPool, parseApiKeys } = require('../utils/apiKeyPool');
 const https = require('https');
 const http = require('http');
+
+function isAgnesConfig(config) {
+  return (config?.provider || '').toLowerCase() === 'agnes';
+}
+
+/** Agnes 多 Key：从池中取单个 Key 再调 API，避免 Bearer 里带逗号 */
+async function withAgnesApiKey(config, fn) {
+  if (!isAgnesConfig(config)) {
+    return fn(config.api_key || '');
+  }
+  const pool = getApiKeyPool(config.api_key, 1);
+  if (!pool) {
+    const keys = parseApiKeys(config.api_key);
+    return fn(keys[0] || config.api_key || '');
+  }
+  return pool.run((key) => fn(key));
+}
 
 /**
  * 非流式 POST，发送 JSON body，等待完整 HTTP 响应后返回。
@@ -337,7 +355,7 @@ async function generateText(db, log, serviceType, userPrompt, systemPrompt, opti
   body = applyDeepSeekChatOptions(config, body);
   const startMs = Date.now();
   log.info('AI generateText request', { url: url.slice(0, 60), model, max_tokens: finalMaxTokens ?? '(model default)', json_mode, stream: true });
-  const res = await postJSONStream(url, { Authorization: 'Bearer ' + (config.api_key || '') }, body, 60000, (receivedLen, event, accumulated) => {
+  const res = await withAgnesApiKey(config, (apiKey) => postJSONStream(url, { Authorization: 'Bearer ' + apiKey }, body, 60000, (receivedLen, event, accumulated) => {
     if (event === 'first_token') {
       log.info('AI stream first token', { model, ttft_ms: Date.now() - startMs });
     } else if (receivedLen > 0 && receivedLen % 500 < 20) {
@@ -346,7 +364,7 @@ async function generateText(db, log, serviceType, userPrompt, systemPrompt, opti
     }
     // 调用者提供的流式回调（如分镜增量解析），传入当前已积累的完整文本
     if (streamCallback && accumulated) streamCallback(accumulated);
-  });
+  }));
   // 流式模式下 res.body 已是拼接好的完整文本内容（非 JSON）
   const content = res.body;
   const elapsedMs = Date.now() - startMs;
@@ -441,9 +459,9 @@ async function streamGenerateText(db, log, serviceType, userPrompt, systemPrompt
     stream: true,
   });
   let lastLen = 0;
-  const res = await postJSONStream(
+  const res = await withAgnesApiKey(config, (apiKey) => postJSONStream(
     url,
-    { Authorization: 'Bearer ' + (config.api_key || '') },
+    { Authorization: 'Bearer ' + apiKey },
     body,
     silenceMs,
     (receivedLen, event, accumulated) => {
@@ -455,7 +473,7 @@ async function streamGenerateText(db, log, serviceType, userPrompt, systemPrompt
       lastLen = accumulated.length;
       if (onDelta && delta) onDelta(delta);
     }
-  );
+  ));
   const content = res.body;
   if (!content) {
     throw new Error('AI 返回内容为空');
@@ -592,7 +610,7 @@ async function generateTextWithVision(db, log, serviceType, userPrompt, systemPr
   let res;
   try {
     // 使用非流式请求：视觉分析响应短，且流式对推理模型（o1/o3/o4）和部分代理兼容性差
-    res = await postJSONNonStream(url, { Authorization: 'Bearer ' + (config.api_key || '') }, body, 120000);
+    res = await withAgnesApiKey(config, (apiKey) => postJSONNonStream(url, { Authorization: 'Bearer ' + apiKey }, body, 120000));
   } catch (httpErr) {
     log.error('[Vision] HTTP 请求失败', { model, url: url.slice(0, 80), error: httpErr.message });
     throw httpErr;

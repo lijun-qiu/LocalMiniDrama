@@ -50,9 +50,16 @@ test('unknown legacy string still mirrors zh/en', () => {
 
 test('getStyleLabel covers custom and presets', () => {
   assert.equal(getStyleLabel('realistic'), '写实')
+  assert.equal(getStyleLabel('ai short drama'), 'AI短剧')
   assert.equal(getStyleLabel(CUSTOM_STYLE_VALUE), '自定义')
   assert.equal(getStyleLabel('2d gufeng'), '2D 古风')
   assert.equal(getStyleLabel('unknown-x'), 'unknown-x')
+})
+
+test('ai short drama preset returns zh/en prompts', () => {
+  const m = stylePromptMetadataForSave('ai short drama')
+  assert.ok(m.style_prompt_zh.includes('AI数字人短剧'))
+  assert.ok(m.style_prompt_en.includes('digital human short drama'))
 })
 
 test('findStyleOption does not treat custom as preset', () => {

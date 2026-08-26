@@ -52,6 +52,14 @@ export const dramaAPI = {
   finalizeEpisode(episodeId, data) {
     return request.post(`/episodes/${episodeId}/finalize`, data || {})
   },
+  /** 清空本集除剧本正文外的全部生成内容 */
+  clearEpisodeGenerated(episodeId) {
+    return request.post(`/episodes/${episodeId}/clear-generated`)
+  },
+  /** 按类型清除本集媒体：kind = narration_audio | images | videos */
+  clearEpisodeMedia(episodeId, kind) {
+    return request.post(`/episodes/${episodeId}/clear-media`, { kind })
+  },
   extractBackgrounds(episodeId, body) {
     return request.post(`/images/episode/${episodeId}/backgrounds/extract`, body || {})
   },

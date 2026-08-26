@@ -1,0 +1,13 @@
+{
+  "voices": [
+    {
+      "voice_id": "demo-narrator",
+      "voice_name": "示例旁白",
+      "ref_audio_path": "demo-narrator.wav",
+      "prompt_text": "你好，这是一段参考音频对应的文本，请与参考 wav 内容一致。",
+      "prompt_lang": "zh",
+      "language": "中文",
+      "description": ["将 demo-narrator.wav 放入 data/gptsovits-refs/ 后可用"]
+    }
+  ]
+}

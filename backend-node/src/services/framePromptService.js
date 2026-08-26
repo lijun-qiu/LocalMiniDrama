@@ -425,7 +425,28 @@ async function generateSingleFrame(db, log, cfg, sb, scene, characterNames, mode
   const systemKey = frameKind === 'first' ? 'getFirstFramePrompt' : frameKind === 'key' ? 'getKeyFramePrompt' : 'getLastFramePrompt';
   const userKey = frameKind === 'first' ? 'frame_info' : frameKind === 'key' ? 'key_frame_info' : 'last_frame_info';
   const systemPrompt = promptI18n[systemKey](cfg);
-  const userPrompt = promptI18n.formatUserPrompt(cfg, userKey, context);
+  let userPrompt = promptI18n.formatUserPrompt(cfg, userKey, context);
+  const extraLines = [];
+  const draftPrompt = sanitizeOpts.draftPrompt != null ? String(sanitizeOpts.draftPrompt).trim() : '';
+  const userInstruction = sanitizeOpts.userInstruction != null ? String(sanitizeOpts.userInstruction).trim() : '';
+  const isEn = promptI18n.isEnglish(cfg);
+  if (draftPrompt) {
+    extraLines.push(
+      isEn
+        ? `CURRENT_DRAFT_PROMPT (refine based on this when regenerating):\n${draftPrompt}`
+        : `当前提示词草稿（重新生成时请在此基础上优化）:\n${draftPrompt}`
+    );
+  }
+  if (userInstruction) {
+    extraLines.push(
+      isEn
+        ? `USER_INSTRUCTION (must prioritize while preserving story facts):\n${userInstruction}`
+        : `用户补充要求（须优先满足，且不违背分镜事实）:\n${userInstruction}`
+    );
+  }
+  if (extraLines.length) {
+    userPrompt = `${userPrompt}\n\n${extraLines.join('\n\n')}`;
+  }
 
   // ── 调试日志：打印完整提示词，方便确认角度/视角是否正确注入 ──
   log.info('[帧提示词] ===== generateSingleFrame DEBUG =====', {
@@ -477,7 +498,9 @@ async function generateSingleFrame(db, log, cfg, sb, scene, characterNames, mode
   };
 }
 
-async function processFramePromptGeneration(db, log, taskId, storyboardId, frameType, panelCount, model) {
+async function processFramePromptGeneration(db, log, taskId, storyboardId, frameType, panelCount, model, options = {}) {
+  const userInstruction = options.userInstruction != null ? String(options.userInstruction).trim() : '';
+  const draftPrompt = options.draftPrompt != null ? String(options.draftPrompt).trim() : '';
   let cfg = loadConfig();
   taskService.updateTaskStatus(db, taskId, 'processing', 0, '正在生成帧提示词...');
 
@@ -513,7 +536,7 @@ async function processFramePromptGeneration(db, log, taskId, storyboardId, frame
   const scene = loadScene(db, sb.scene_id);
   const characterNames = loadStoryboardCharacterNames(db, storyboardId);
   const allDramaNames = loadDramaCharacterNamesForStoryboard(db, storyboardId);
-  const sanitizeOpts = { allDramaNames };
+  const sanitizeOpts = { allDramaNames, userInstruction, draftPrompt };
 
   // 强调试日志：确认角色视觉锚点是否成功加载（用于排查“黑发扎马尾”等脑补问题）
   log.info('[帧提示词] 角色视觉锚点加载结果', {
@@ -589,7 +612,7 @@ async function processFramePromptGeneration(db, log, taskId, storyboardId, frame
   }
 }
 
-function generateFramePrompt(db, log, storyboardId, frameType, panelCount, model) {
+function generateFramePrompt(db, log, storyboardId, frameType, panelCount, model, options = {}) {
   const sid = Number(storyboardId);
   const sb = db.prepare('SELECT id FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(sid);
   if (!sb) {
@@ -601,7 +624,7 @@ function generateFramePrompt(db, log, storyboardId, frameType, panelCount, model
   }
   const task = taskService.createTask(db, log, 'frame_prompt_generation', String(storyboardId));
   setImmediate(() => {
-    processFramePromptGeneration(db, log, task.id, storyboardId, frameType, panelCount || 0, model);
+    processFramePromptGeneration(db, log, task.id, storyboardId, frameType, panelCount || 0, model, options);
   });
   log.info('Frame prompt task created', { task_id: task.id, storyboard_id: storyboardId, frame_type: frameType });
   return task.id;

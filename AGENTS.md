@@ -11,7 +11,7 @@ LocalMiniDrama (本地短剧助手) — an AI-powered local short drama creation
 | Service | Directory | Port | Start Command |
 |---------|-----------|------|---------------|
 | Backend (Express + SQLite) | `backend-node/` | 5679 | `npm run dev` |
-| Frontend (Vite + Vue 3) | `frontweb/` | 3013 | `npm run dev` |
+| Frontend (Vite + Vue 3) | `frontweb/` | 3055 | `npm run dev` |
 
 Frontend proxies `/api` and `/static` to backend via Vite config.
 

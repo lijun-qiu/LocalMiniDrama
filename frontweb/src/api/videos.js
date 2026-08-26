@@ -12,4 +12,7 @@ export const videosAPI = {
   resumePoll(id) {
     return request.post(`/videos/${id}/resume-poll`)
   },
+  delete(id) {
+    return request.delete(`/videos/${id}`)
+  },
 }

@@ -19,6 +19,7 @@ const videoRoutes = require('./videos');
 const videoMergeRoutes = require('./videoMerges');
 const assetRoutes = require('./assets');
 const audioRoutes = require('./audio');
+const aiVoicesRoutes = require('./aiVoices');
 const promptOverridesRoutes = require('./promptOverrides');
 const sceneModelMapRoutes = require('./sceneModelMap');
 
@@ -46,6 +47,7 @@ function setupRouter(cfg, db, log) {
   const videoMerges = videoMergeRoutes(db, log);
   const assets = assetRoutes(db, log);
   const audio = audioRoutes(db, log, cfg);
+  const aiVoices = aiVoicesRoutes(db, log, cfg);
   const promptOverrides = promptOverridesRoutes.routes(db, log);
 
   // ---------- dramas ----------
@@ -213,10 +215,13 @@ function setupRouter(cfg, db, log) {
   // 注意：drama.generateStoryboard 已处理所有逻辑（包括参数解析），这里统一使用 drama 模块的实现
   // 之前可能有部分路由指向了 storyboards.episodeStoryboardsGenerate，这可能导致参数解析不一致
   r.post('/episodes/:episode_id/storyboards', drama.generateStoryboard);
+  r.post('/episodes/:episode_id/resync-full-narration', storyboards.resyncFullNarration);
   r.post('/episodes/:episode_id/props/extract', prop.extractProps);
   r.post('/episodes/:episode_id/characters/extract', stub.episodeCharactersExtract);
   r.get('/episodes/:episode_id/storyboards', storyboards.episodeStoryboardsGet);
   r.post('/episodes/:episode_id/finalize', drama.finalizeEpisode);
+  r.post('/episodes/:episode_id/clear-generated', drama.clearEpisodeGenerated);
+  r.post('/episodes/:episode_id/clear-media', drama.clearEpisodeMedia);
   r.get('/episodes/:episode_id/download', drama.downloadEpisodeVideo);
 
   // ---------- tasks ----------
@@ -298,6 +303,15 @@ function setupRouter(cfg, db, log) {
   // ---------- audio ----------
   r.post('/audio/extract', audio.extract);
   r.post('/audio/extract/batch', audio.extractBatch);
+
+  // ---------- ai-voices (IndexTTS 克隆音色) ----------
+  r.get('/ai-voices/indextts/health', aiVoices.indexttsHealth);
+  r.post('/ai-voices/indextts/ensure', aiVoices.indexttsEnsure);
+  r.get('/ai-voices/clone/voices', aiVoices.listCloneVoices);
+  r.post('/ai-voices/clone/voices', aiVoices.saveCloneVoice);
+  r.delete('/ai-voices/clone/voices/:id', aiVoices.deleteCloneVoice);
+  r.post('/ai-voices/clone/upload-ref', aiVoices.uploadRef);
+  r.post('/ai-voices/preview', aiVoices.preview);
 
   // ---------- settings ----------
   r.get('/settings/language', settings.getLanguage);

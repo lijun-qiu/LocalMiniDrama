@@ -61,6 +61,7 @@ const uploadService = require('./uploadService');
 const storageLayout = require('./storageLayout');
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
+const { isRemoteCallScene, extractCallReceiverName } = require('../utils/storyboardCallReceiver');
 
 const LAST_FRAME_TYPES = new Set(['last', 'storyboard_last', 'tail', 'last_frame']);
 
@@ -1155,14 +1156,14 @@ async function processImageGeneration(db, log, imageGenId) {
     }
     log.info('[图生] Step3 尺寸', { id: imageGenId, size: imageSize, elapsed: elapsed() });
 
-    // ── Step 3.5: 分镜 prompt 文本AI二次优化（单帧分镜；优先用 image_polish 模型，无则 fallback 默认文本模型）──
+    // ── Step 3.5: 分镜 prompt — 优先用入库时已 AI 写入的 polished_prompt；仅缺失时再 fallback 润色 ──
     let finalPrompt = row.prompt;
     const isSingleStoryboard = row.storyboard_id && row.frame_type !== 'quad_grid' && row.frame_type !== 'nine_grid';
     if (isSingleStoryboard && row.prompt) {
       try {
-        // 若分镜已有 polished_prompt（手动编辑或上次优化结果），直接使用，不再重复调 AI
-        // 但**首帧/尾帧/关键帧专用提示词优先**：这些是用户通过“生成首/尾帧提示词”+“生成图片”流程明确批准的干净 prompt，
-        // 不能被通用的 storyboards.polished_prompt（可能来自旧的整体润色，含错误服装描述）覆盖。
+        // 分镜生成入库后会批量 AI 写 polished_prompt；有则直接使用，生图不再重复调 AI。
+        // 但**首帧/尾帧/关键帧专用提示词优先**：用户通过“生成首/尾帧提示词”+“生成图片”批准的干净 prompt，
+        // 不能被通用的 storyboards.polished_prompt 覆盖。
         let alreadyPolished = false;
         const isFrameSpecial = row.frame_type && ['first', 'last', 'key', 'storyboard_first', 'storyboard_last'].includes(String(row.frame_type));
         if (row.storyboard_id && !isFrameSpecial) {
@@ -1556,11 +1557,11 @@ async function processImageGeneration(db, log, imageGenId) {
 
 function deleteById(db, log, id) {
   const numId = Number(id);
+  const row = db.prepare('SELECT * FROM image_generations WHERE id = ? AND deleted_at IS NULL').get(numId);
+  if (!row) return false;
   const now = new Date().toISOString();
-  // 若该图当前绑定为某分镜的首/尾帧，解除绑定（避免悬空引用）
   try {
-    const row = db.prepare('SELECT storyboard_id FROM image_generations WHERE id = ? AND deleted_at IS NULL').get(numId);
-    if (row && row.storyboard_id != null) {
+    if (row.storyboard_id != null) {
       const sid = Number(row.storyboard_id);
       db.prepare(`UPDATE storyboards SET first_frame_image_id = NULL, image_url = NULL, local_path = NULL, updated_at = ? WHERE id = ? AND first_frame_image_id = ?`).run(now, sid, numId);
       db.prepare(`UPDATE storyboards SET last_frame_image_id = NULL, last_frame_image_url = NULL, last_frame_local_path = NULL, updated_at = ? WHERE id = ? AND last_frame_image_id = ?`).run(now, sid, numId);
@@ -1568,8 +1569,9 @@ function deleteById(db, log, id) {
   } catch (e) {
     try { log?.warn?.('[image delete] 清除分镜绑定失败', { id: numId, err: e.message }); } catch (_) {}
   }
-  const result = db.prepare('UPDATE image_generations SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(now, numId);
-  return result.changes > 0;
+  const { hardDeleteImageGenerationRows, resolveStorageRoot } = require('./generatedAssetPurgeService');
+  const out = hardDeleteImageGenerationRows(db, log, [row], resolveStorageRoot(require('../config').loadConfig()));
+  return out.rowsDeleted > 0;
 }
 
 function getBackgroundsForEpisode(db, episodeId) {
@@ -1642,7 +1644,8 @@ function syncStoryboardCharacters(db, log, storyboardId) {
     if (!dramaId) return { added };
 
     // 构造扫描文本
-    const scanText = [sb.action, sb.dialogue, sb.result, sb.description].filter(Boolean).join(' ').toLowerCase();
+    const contextText = [sb.action, sb.result, sb.description].filter(Boolean).join(' ');
+    const scanText = [contextText, sb.dialogue].filter(Boolean).join(' ').toLowerCase();
     if (!scanText) return { added };
 
     // 解析已关联角色
@@ -1652,15 +1655,39 @@ function syncStoryboardCharacters(db, log, storyboardId) {
 
     // 与剧集全角色做文本匹配
     const allChars = db.prepare('SELECT id, name FROM characters WHERE drama_id = ? AND deleted_at IS NULL').all(Number(dramaId));
+    const allNames = allChars.map((c) => c.name).filter(Boolean);
+    const callScene = isRemoteCallScene(contextText);
+    const callReceiver = callScene ? extractCallReceiverName(contextText, allNames) : null;
+    const callReceiverChar = callReceiver
+      ? allChars.find((c) => c.name === callReceiver)
+      : null;
+
     let updated = false;
     for (const ch of allChars) {
       if (!ch.name) continue;
       if (coveredIds.has(ch.id)) continue;
+      if (callReceiverChar && ch.id !== callReceiverChar.id) continue;
       if (!scanText.includes(ch.name.toLowerCase())) continue;
+      if (callScene && !callReceiverChar) continue;
       charList.push({ id: ch.id, name: ch.name });
       coveredIds.add(ch.id);
       added.push(ch.name);
       updated = true;
+    }
+
+    if (callReceiverChar) {
+      const hasReceiver = charList.some((c) => Number(typeof c === 'object' && c != null ? c.id : c) === callReceiverChar.id);
+      const filtered = charList.filter(
+        (c) => Number(typeof c === 'object' && c != null ? c.id : c) === callReceiverChar.id
+      );
+      if (!hasReceiver) {
+        filtered.push({ id: callReceiverChar.id, name: callReceiverChar.name });
+        added.push(callReceiverChar.name);
+      }
+      if (filtered.length !== charList.length || !hasReceiver) {
+        charList = filtered.length ? filtered : [{ id: callReceiverChar.id, name: callReceiverChar.name }];
+        updated = true;
+      }
     }
 
     if (updated) {

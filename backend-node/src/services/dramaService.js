@@ -255,10 +255,28 @@ function updateDrama(db, log, dramaId, req) {
 
 function generateStoryboard(db, log, episodeId, options) {
   const episodeStoryboardService = require('./episodeStoryboardService');
-  const { model, style, storyboard_count, video_duration, aspect_ratio, include_narration, universal_omni_storyboard } = options || {};
+  const { model, style, storyboard_count, video_duration, aspect_ratio, include_narration, universal_omni_storyboard, full_narration_video_mode, narration_chars_per_sec } = options || {};
+  if (narration_chars_per_sec != null && narration_chars_per_sec !== '') {
+    const ep = db.prepare('SELECT drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL').get(Number(episodeId));
+    if (ep?.drama_id) {
+      const drama = getDramaById(db, ep.drama_id);
+      const meta = { ...(drama?.metadata || {}), narration_chars_per_sec: Number(narration_chars_per_sec) };
+      db.prepare('UPDATE dramas SET metadata = ?, updated_at = ? WHERE id = ?').run(
+        JSON.stringify(meta),
+        new Date().toISOString(),
+        ep.drama_id
+      );
+    }
+  }
   // 转换可能为字符串的数字
-  const count = storyboard_count ? Number(storyboard_count) : undefined;
-  const duration = video_duration ? Number(video_duration) : undefined;
+  const count =
+    storyboard_count != null && Number(storyboard_count) > 0 && Number.isFinite(Number(storyboard_count))
+      ? Number(storyboard_count)
+      : undefined;
+  const duration =
+    video_duration != null && Number(video_duration) > 0 && Number.isFinite(Number(video_duration))
+      ? Number(video_duration)
+      : undefined;
   return episodeStoryboardService.generateStoryboard(
     db,
     log,
@@ -269,7 +287,8 @@ function generateStoryboard(db, log, episodeId, options) {
     duration,
     aspect_ratio,
     include_narration,
-    universal_omni_storyboard
+    universal_omni_storyboard,
+    full_narration_video_mode
   );
 }
 
@@ -829,6 +848,17 @@ function finalizeEpisode(db, log, episodeId, baseUrl, body = {}) {
       watermark_text: (body && body.watermark_text != null)
         ? String(body.watermark_text).trim().slice(0, 200)
         : '',
+      use_indextts_narration: !!(body && body.use_indextts_narration),
+      indextts_voice: (body && body.indextts_voice != null)
+        ? String(body.indextts_voice).trim().slice(0, 120)
+        : 'gsv:008',
+      indextts_emotion: (body && body.indextts_emotion != null)
+        ? String(body.indextts_emotion).trim().slice(0, 500)
+        : '自然流畅的解说语气，情绪饱满',
+      indextts_speed: (body && body.indextts_speed != null && Number(body.indextts_speed) > 0)
+        ? Number(body.indextts_speed)
+        : 1.2,
+      narration_subtitle_mode: (body && body.use_indextts_narration) ? 'per_line' : (body?.narration_subtitle_mode || 'per_shot'),
     },
   };
   const created = videoMergeService.create(db, log, mergeReq);

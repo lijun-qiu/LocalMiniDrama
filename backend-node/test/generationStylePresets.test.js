@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { resolveStylePreset } = require('../src/constants/generationStylePresets');
 
 const EXTRA = [
+  'ai short drama',
   '2d gufeng',
   'xianxia 3d',
   'gufeng 3d',

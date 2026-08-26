@@ -218,49 +218,92 @@ function resolveStoragePath(cfg) {
     : path.join(process.cwd(), cfg.storage?.local_path || './data/storage');
 }
 
+async function maybeApplyStoryboardNarrationPost(db, log, videoGenId, row, localPath, storagePath) {
+  if (!localPath || !row.storyboard_id || !row.drama_id) {
+    return { localPath, postWarning: null };
+  }
+  const abs = path.join(storagePath, localPath.replace(/\//g, path.sep));
+  if (!fs.existsSync(abs)) return { localPath, postWarning: null };
+
+  const { runStoryboardNarrationPostProcess } = require('./mergedEpisodePostProcess');
+  const post = await runStoryboardNarrationPostProcess(db, log, {
+    videoAbsPath: abs,
+    storageRoot: storagePath,
+    storyboardId: row.storyboard_id,
+    dramaId: row.drama_id,
+  });
+
+  if (post.ok && post.relativePath) {
+    return { localPath: post.relativePath, postWarning: post.warning || null };
+  }
+  if (post.error === 'NO_NARRATION' || post.error === 'NOT_FULL_NARRATION') {
+    return { localPath, postWarning: null };
+  }
+  log.warn('Storyboard narration post skipped', {
+    videoGenId,
+    storyboard_id: row.storyboard_id,
+    error: post.error,
+  });
+  return { localPath, postWarning: post.error || '旁白后处理失败' };
+}
+
 async function finalizeSuccessfulVideo(db, log, videoGenId, row, rowForAspect, videoUrl, logLabel) {
   const now = new Date().toISOString();
   let localPath = null;
+  let postWarning = null;
   try {
     const cfg = require('../config').loadConfig();
     const storagePath = resolveStoragePath(cfg);
     const projectSubdir = storageLayout.getProjectStorageSubdir(db, row.drama_id);
     localPath = await downloadVideoToLocal(storagePath, videoUrl, videoGenId, log, projectSubdir);
     maybeNormalizeVideoAfterDownload(storagePath, localPath, rowForAspect, videoGenId, log);
+    if (localPath) {
+      const postResult = await maybeApplyStoryboardNarrationPost(
+        db, log, videoGenId, row, localPath, storagePath
+      );
+      localPath = postResult.localPath;
+      postWarning = postResult.postWarning;
+    }
   } catch (_) {}
+  const finalVideoUrl = localPath
+    ? `/static/${String(localPath).replace(/^\//, '')}`
+    : videoUrl;
   try {
     db.prepare(
       'UPDATE video_generations SET status = ?, video_url = ?, local_path = ?, completed_at = ?, updated_at = ? WHERE id = ?'
-    ).run('completed', videoUrl, localPath, now, now, videoGenId);
+    ).run('completed', finalVideoUrl, localPath, now, now, videoGenId);
   } catch (e) {
     if ((e.message || '').includes('completed_at')) {
       db.prepare(
         'UPDATE video_generations SET status = ?, video_url = ?, local_path = ?, updated_at = ? WHERE id = ?'
-      ).run('completed', videoUrl, localPath, now, videoGenId);
+      ).run('completed', finalVideoUrl, localPath, now, videoGenId);
     } else throw e;
   }
   if (row.storyboard_id) {
     try {
       db.prepare('UPDATE storyboards SET video_url = ?, local_path = ?, updated_at = ? WHERE id = ?').run(
-        videoUrl, localPath, now, row.storyboard_id
+        finalVideoUrl, localPath, now, row.storyboard_id
       );
       log.info('Updated storyboard video' + (logLabel ? ` (${logLabel})` : ''), {
         storyboard_id: row.storyboard_id,
-        video_url: videoUrl,
+        video_url: finalVideoUrl,
+        post_warning: postWarning || undefined,
       });
     } catch (_) {}
   }
   if (row.task_id) {
     taskService.updateTaskResult(db, row.task_id, {
       video_generation_id: videoGenId,
-      video_url: videoUrl,
+      video_url: finalVideoUrl,
       status: 'completed',
+      post_warning: postWarning || undefined,
     });
   }
   log.info('Video generation completed' + (logLabel ? ` (${logLabel})` : ''), {
     id: videoGenId,
-    video_url: videoUrl,
+    video_url: finalVideoUrl,
     local_path: localPath,
+    post_warning: postWarning || undefined,
   });
 }
 
@@ -567,9 +610,12 @@ async function processVideoGeneration(db, log, videoGenId) {
 }
 
 function deleteById(db, log, id) {
-  const now = new Date().toISOString();
-  const result = db.prepare('UPDATE video_generations SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(now, Number(id));
-  return result.changes > 0;
+  const numId = Number(id);
+  const row = db.prepare('SELECT * FROM video_generations WHERE id = ? AND deleted_at IS NULL').get(numId);
+  if (!row) return false;
+  const { hardDeleteVideoGenerationRows, resolveStorageRoot } = require('./generatedAssetPurgeService');
+  const out = hardDeleteVideoGenerationRows(db, log, [row], resolveStorageRoot(require('../config').loadConfig()));
+  return out.rowsDeleted > 0;
 }
 
 module.exports = {

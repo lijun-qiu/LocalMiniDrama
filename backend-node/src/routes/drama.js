@@ -1,4 +1,5 @@
 const dramaService = require('../services/dramaService');
+const episodeClearService = require('../services/episodeClearService');
 const propService = require('../services/propService');
 const response = require('../response');
 const dramaExportService = require('../services/dramaExportService');
@@ -168,6 +169,41 @@ function downloadEpisodeVideo(db) {
   };
 }
 
+function clearEpisodeGenerated(db, log) {
+  return (req, res) => {
+    const episodeId = req.params.episode_id;
+    if (!episodeId) return response.badRequest(res, 'episode_id不能为空');
+    try {
+      const result = episodeClearService.clearEpisodeExceptScript(db, log, episodeId);
+      if (!result) return response.notFound(res, '剧集不存在');
+      response.success(res, result);
+    } catch (err) {
+      log.error('Clear episode generated content failed', { error: err.message, episode_id: episodeId });
+      response.internalError(res, err.message || '清空失败');
+    }
+  };
+}
+
+function clearEpisodeMedia(db, log) {
+  return (req, res) => {
+    const episodeId = req.params.episode_id;
+    if (!episodeId) return response.badRequest(res, 'episode_id不能为空');
+    const kind = (req.body && req.body.kind) || req.query?.kind;
+    if (!kind) return response.badRequest(res, 'kind 不能为空（narration_audio / images / videos）');
+    try {
+      const result = episodeClearService.clearEpisodeMedia(db, log, episodeId, kind);
+      if (!result) return response.notFound(res, '剧集不存在');
+      response.success(res, result);
+    } catch (err) {
+      if (err?.code === 'INVALID_CLEAR_KIND') {
+        return response.badRequest(res, err.message);
+      }
+      log.error('Clear episode media failed', { error: err.message, episode_id: episodeId, kind });
+      response.internalError(res, err.message || '清除失败');
+    }
+  };
+}
+
 function exportDrama(db, cfg, log) {
   return (req, res) => {
     try {
@@ -270,6 +306,8 @@ function generateStoryboard(db, log) {
         aspect_ratio: body.aspect_ratio,
         include_narration: body.include_narration,
         universal_omni_storyboard: body.universal_omni_storyboard,
+        full_narration_video_mode: body.full_narration_video_mode,
+        narration_chars_per_sec: body.narration_chars_per_sec,
       });
       response.success(res, resData);
     } catch (err) {
@@ -296,6 +334,8 @@ module.exports = function dramaRoutes(db, cfg, log) {
     listProps: listProps(db),
     finalizeEpisode: finalizeEpisode(db, log, cfg),
     downloadEpisodeVideo: downloadEpisodeVideo(db),
+    clearEpisodeGenerated: clearEpisodeGenerated(db, log),
+    clearEpisodeMedia: clearEpisodeMedia(db, log),
     generateStoryboard: generateStoryboard(db, log),
     exportDrama: exportDrama(db, cfg, log),
     importDrama: importDrama(db, cfg, log),

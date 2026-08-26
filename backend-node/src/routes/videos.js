@@ -29,7 +29,7 @@ function routes(db, log) {
           const baseLower = String(prompt || '').toLowerCase();
           const styleLower = style.toLowerCase();
           if (!baseLower.includes(styleLower)) {
-            prompt = prompt ? `${prompt}. Style: ${style}` : `Style: ${style}`;
+            prompt = prompt ? `${prompt}。风格：${style}` : `风格：${style}`;
           }
         }
         const model = body.model ?? null;

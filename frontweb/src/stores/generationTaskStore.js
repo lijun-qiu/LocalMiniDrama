@@ -303,6 +303,11 @@ export const useGenerationTaskStore = defineStore('generationTask', () => {
             }
             return resolve({ status: 'failed', error: errMsg })
           }
+          if (typeof options.onTick === 'function') {
+            try {
+              options.onTick(t)
+            } catch (_) {}
+          }
         } catch (pollErr) {
           console.warn('[generationTaskStore] poll attempt failed:', pollErr?.message)
         }

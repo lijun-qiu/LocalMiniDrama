@@ -17,6 +17,13 @@ const {
   unsafeDecodeKlingJwtPayload,
   jwtPartLengths,
 } = require('./klingJwt');
+const {
+  getApiKeyPool,
+  encodeAgnesTaskId,
+  resolveAgnesPollAuth,
+  parseAgnesTaskId,
+  AGNES_VIDEO_MIN_INTERVAL_MS,
+} = require('../utils/apiKeyPool');
 
 /**
  * ?? provider ??????????api_protocol ??????????
@@ -919,6 +926,34 @@ function parseKlingOmniPollVideoUrl(data) {
   return null;
 }
 
+function isAgnesVideoModelName(name) {
+  return /agnes-video/i.test(String(name || ''));
+}
+
+/** 官方 ID：agnes-video-2.5；兼容误写 agnes-video-v2.5 */
+function isAgnesVideo25Model(name) {
+  return /agnes-video-v?2\.5/i.test(String(name || ''));
+}
+
+/** 归一化为上游可识别的 Agnes 模型 ID */
+function normalizeAgnesVideoModel(model) {
+  const m = String(model || '').trim();
+  if (!m) return 'agnes-video-v2.0';
+  if (isAgnesVideo25Model(m)) return 'agnes-video-2.5';
+  if (/agnes-video-v?2\.0/i.test(m)) return 'agnes-video-v2.0';
+  return m;
+}
+
+function configLooksLikeAgnesVideo(config) {
+  if (!config) return false;
+  const proto = resolveVideoProtocol(config);
+  if (proto === 'agnes') return true;
+  const provider = String(config.provider || '').toLowerCase();
+  if (provider === 'agnes') return true;
+  const models = Array.isArray(config.model) ? config.model : config.model != null ? [config.model] : [];
+  return models.some((m) => isAgnesVideoModelName(m));
+}
+
 // ??????????????????listConfigs ?? is_default DESC, priority DESC ??
 function getDefaultVideoConfig(db, preferredModel) {
   const configs = aiConfigService.listConfigs(db, 'video');
@@ -928,6 +963,12 @@ function getDefaultVideoConfig(db, preferredModel) {
     for (const c of active) {
       const models = Array.isArray(c.model) ? c.model : (c.model != null ? [c.model] : []);
       if (models.includes(preferredModel)) return c;
+    }
+    // Agnes 2.0/2.5 可在同一 Agnes 配置上切换，即使 model 列表未收录该版本
+    if (isAgnesVideoModelName(preferredModel)) {
+      for (const c of active) {
+        if (configLooksLikeAgnesVideo(c)) return c;
+      }
     }
   }
   const defaultOne = active.find((c) => c.is_default);
@@ -989,7 +1030,7 @@ function isAgnesBuiltinQueryEndpoint(ep) {
  */
 function buildAgnesPollUrl(config, pollId) {
   const root = getAgnesApiRoot(config.base_url);
-  const id = String(pollId || '').trim();
+  const id = parseAgnesTaskId(pollId).taskId;
   const cfgEp = String(config.query_endpoint || '').trim();
 
   if (cfgEp && !isAgnesBuiltinQueryEndpoint(cfgEp)) {
@@ -1081,7 +1122,13 @@ function normalizeVolcModel(name) {
 
 function getModelFromConfig(config, preferredModel) {
   const models = Array.isArray(config.model) ? config.model : (config.model != null ? [config.model] : []);
-  if (preferredModel && models.includes(preferredModel)) return preferredModel;
+  if (preferredModel) {
+    if (models.includes(preferredModel)) return preferredModel;
+    // 允许在 Agnes 配置上直接指定 2.5 / 2.0（无需先写入 model 列表）
+    if (isAgnesVideoModelName(preferredModel) && configLooksLikeAgnesVideo(config)) {
+      return normalizeAgnesVideoModel(preferredModel);
+    }
+  }
   if (config.default_model && models.includes(config.default_model)) return config.default_model;
   return models[0] || '';
 }
@@ -2366,7 +2413,6 @@ async function callVeo3VideoApi(config, log, opts) {
 }
 
 /** Agnes Video V2.0：POST /videos JSON，轮询 GET /videos/{task_id} */
-const AGNES_ALLOWED_NUM_FRAMES = [81, 121, 161, 241, 441];
 
 /** 调试日志：base64 只记长度，http(s) URL 保留完整以便核对参考图 */
 function summarizeMediaValueForLog(value) {
@@ -2440,13 +2486,146 @@ function agnesDimensionsFromAspectRatio(ratio) {
   return map[ratio] || map['16:9'];
 }
 
-function agnesSnapNumFrames(durationSec, frameRate = 24) {
-  const target = Math.round((Number(durationSec) || 5) * frameRate);
-  let best = AGNES_ALLOWED_NUM_FRAMES[0];
-  for (const v of AGNES_ALLOWED_NUM_FRAMES) {
-    if (Math.abs(v - target) < Math.abs(best - target)) best = v;
+/** Agnes Video V2.0：num_frames 须 ≤441 且满足 8n+1（官方约束，非仅 5 档推荐值） */
+const AGNES_MAX_NUM_FRAMES = 441;
+const AGNES_FRAME_RATE_DEFAULT = 24;
+
+/** 将任意目标帧数向上取整到合法的 8n+1（且 ≤441） */
+function agnesCeilNumFrames(targetFrames) {
+  const t = Math.max(1, Math.round(Number(targetFrames) || 1));
+  const n = Math.ceil((t - 1) / 8);
+  return Math.min(AGNES_MAX_NUM_FRAMES, Math.max(9, 8 * n + 1));
+}
+
+/**
+ * 按时长取帧数：覆盖请求秒数的最小合法帧数（24fps 下约 3～10 秒一一对应）。
+ * 例：3→73、4→97、5→121、6→145、7→169、8→193、9→217、10→241
+ */
+function agnesSnapNumFrames(durationSec, frameRate = AGNES_FRAME_RATE_DEFAULT) {
+  const fps = Number(frameRate) > 0 ? Number(frameRate) : AGNES_FRAME_RATE_DEFAULT;
+  const sec = Math.max(1, Math.round(Number(durationSec) || 5));
+  return agnesCeilNumFrames(sec * fps);
+}
+
+/** Agnes 离散帧数对应的实际成片秒数（四舍五入，用于提示词与日志） */
+function agnesEffectiveDurationSec(durationSec, frameRate = AGNES_FRAME_RATE_DEFAULT) {
+  const fps = Number(frameRate) > 0 ? Number(frameRate) : AGNES_FRAME_RATE_DEFAULT;
+  const numFrames = agnesSnapNumFrames(durationSec, fps);
+  return Math.round(numFrames / fps);
+}
+
+/** 将提示词中的时长描述对齐为实际提交秒数（经典「时长：Xs」与全能「约Xs内」） */
+function rewritePromptDurationHints(prompt, durationSec) {
+  const sec = Math.max(1, Math.round(Number(durationSec) || 5));
+  const s = String(prompt || '');
+  if (!s) return s;
+  return s
+    .replace(/约(\d+)秒内/g, `约${sec}秒内`)
+    .replace(/时长：(\d+)秒/g, `时长：${sec}秒`);
+}
+
+/** Agnes 提交：明确不可重试的业务错误码（重试也不会成功） */
+const AGNES_SUBMIT_NON_RETRYABLE_CODES = new Set([
+  'invalid_api_key',
+  'unauthorized',
+  'authentication_error',
+  'insufficient_quota',
+  'insufficient_balance',
+  'quota_exceeded',
+  'billing_not_active',
+  'content_policy_violation',
+  'moderation_blocked',
+  'safety_violation',
+  'invalid_request',
+  'bad_request',
+  'invalid_parameter',
+  'invalid_image_url',
+  'image_download_failed',
+  'prompt_too_long',
+  'context_length_exceeded',
+]);
+
+function parseAgnesSubmitErrorPayload(raw) {
+  if (!raw) return null;
+  try {
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch (_) {
+    return null;
   }
-  return best;
+}
+
+function getAgnesSubmitErrorCode(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  const c = payload.code ?? payload.error?.code ?? payload.error?.type;
+  return String(c || '').toLowerCase();
+}
+
+function getAgnesSubmitErrorMessage(payload, raw) {
+  if (payload && typeof payload === 'object') {
+    const m = payload.message ?? payload.error?.message ?? payload.error;
+    if (typeof m === 'string') return m;
+    if (m && typeof m === 'object' && m.message) return String(m.message);
+  }
+  return String(raw || '').slice(0, 300);
+}
+
+/**
+ * Agnes 视频 POST 提交：仅可恢复错误才重试（成功拿到 task_id / video_url 不重试）。
+ * 覆盖日志与常见上游返回：队列满、限流、短暂不可用；排除鉴权/余额/参数/审核类错误。
+ */
+function isAgnesRetryableSubmitError(status, raw) {
+  const payload = parseAgnesSubmitErrorPayload(raw);
+  const code = getAgnesSubmitErrorCode(payload);
+  const msg = getAgnesSubmitErrorMessage(payload, raw).toLowerCase();
+  const combined = `${code} ${msg} ${String(raw || '').toLowerCase()}`;
+
+  if (status === 401 || status === 403 || status === 402) return false;
+  if (status === 400 || status === 422) return false;
+  if (AGNES_SUBMIT_NON_RETRYABLE_CODES.has(code)) return false;
+  if (
+    /invalid.*(api.?key|token|auth)|unauthorized|forbidden|insufficient|quota|balance|billing|payment|moderation|policy|content.?filter|safety|invalid.?request|invalid.?parameter|prompt.?too.?long|num_frames|frame.?count|image.*(invalid|unreachable|download)|unsupported.?model/.test(
+      combined
+    )
+  ) {
+    return false;
+  }
+
+  if (status === 429) return true;
+  if (code === 'video_queue_full' || code === 'rate_limit_exceeded' || code === 'too_many_requests') {
+    return true;
+  }
+  if (
+    /video_queue_full|queue is full|rate.?limit|too many requests|server.?busy|temporarily unavailable|service unavailable|try again later|overload|overloaded|memory overload/.test(
+      combined
+    )
+  ) {
+    return true;
+  }
+  if (status === 503 && /unavailable|overload|busy|queue/.test(combined)) return true;
+
+  return false;
+}
+
+function isAgnesRetryableNetworkError(err) {
+  const m = String(err?.message || err || '').toLowerCase();
+  return /econnreset|etimedout|socket hang up|fetch failed|network|timeout|aborted/.test(m);
+}
+
+function buildAgnesSubmitFailure(status, raw, fallbackPrefix) {
+  const payload = parseAgnesSubmitErrorPayload(raw);
+  const code = getAgnesSubmitErrorCode(payload);
+  let errMsg = `${fallbackPrefix || 'Agnes 视频请求失败'}: ${status}`;
+  const detail = getAgnesSubmitErrorMessage(payload, raw);
+  if (detail) errMsg += ' - ' + detail;
+  if (code === 'video_queue_full' || /queue is full/i.test(detail)) {
+    errMsg =
+      'Agnes 视频队列已满（video_queue_full），不是 Key 限流。平台全局排队拥堵，请稍后重试。原始：' +
+      errMsg;
+  }
+  return {
+    error: errMsg,
+    retryable: isAgnesRetryableSubmitError(status, raw),
+  };
 }
 
 /**
@@ -2484,6 +2663,116 @@ function buildAgnesVideoImagePayload({ useOmniReference, resolvedRefs, firstReso
   return { strategy: 'text_only' };
 }
 
+/** Agnes Video 2.5：时长字符串 "4"–"12" */
+function agnes25ClampSeconds(duration) {
+  const n = Math.round(Number(duration) || 5);
+  return String(Math.min(12, Math.max(4, n)));
+}
+
+const AGNES25_ASPECT_RATIOS = new Set(['21:9', '16:9', '4:3', '1:1', '3:4', '9:16']);
+
+function normalizeAgnes25AspectRatio(ratio) {
+  const r = normalizeAspectRatioForApi(ratio) || '16:9';
+  return AGNES25_ASPECT_RATIOS.has(r) ? r : '16:9';
+}
+
+/** 全能提示词里的 @图片N → Agnes 2.5 的 <Picture N> */
+function rewriteAgnes25ReferenceTags(prompt) {
+  return String(prompt || '')
+    .replace(/@图片\s*(\d+)/g, '<Picture $1>')
+    .replace(/@Image\s*(\d+)/gi, '<Picture $1>');
+}
+
+/**
+ * Agnes Video 2.5 请求体（与 V2.0 字段互斥：禁止 width/height/num_frames 等）。
+ * mode: text | keyframe | reference
+ */
+function buildAgnes25VideoBody({
+  prompt,
+  duration,
+  aspect_ratio,
+  useOmniReference,
+  resolvedRefs,
+  firstResolved,
+  lastResolved,
+  seed,
+}) {
+  const refs = Array.isArray(resolvedRefs) ? resolvedRefs.filter(Boolean) : [];
+  const body = {
+    model: 'agnes-video-2.5',
+    prompt: rewriteAgnes25ReferenceTags(prompt || ''),
+    seconds: agnes25ClampSeconds(duration),
+    size: '720P',
+    aspect_ratio: normalizeAgnes25AspectRatio(aspect_ratio),
+  };
+  if (seed != null && Number.isFinite(Number(seed))) {
+    body.seed = Number(seed);
+  }
+
+  if (useOmniReference && refs.length > 0) {
+    body.mode = 'reference';
+    body.images = refs.slice(0, 10);
+    return { body, strategy: 'v25_reference' };
+  }
+  if (firstResolved || lastResolved) {
+    body.mode = 'keyframe';
+    if (firstResolved) body.first_frame = firstResolved;
+    if (lastResolved && lastResolved !== firstResolved) body.last_frame = lastResolved;
+    return { body, strategy: 'v25_keyframe' };
+  }
+  body.mode = 'text';
+  return { body, strategy: 'v25_text' };
+}
+
+/** Agnes V2 原生音视频：允许 BGM/环境音，禁用人物说话/旁白/解说 */
+const AGNES_SILENT_NEGATIVE_PROMPT =
+  'speech, dialogue, voiceover, talking, narration, lip sync, lip movement, English speech, subtitle, vocals, singing, announcer';
+
+const AGNES_SILENT_SUFFIX =
+  '【音频约束】可有轻柔背景音乐与环境音；禁止人物开口、对白、旁白、解说配音；人物闭口无口型。';
+
+function isDramaFullNarrationVideoMode(db, dramaId) {
+  if (!db || !dramaId) return false;
+  try {
+    const row = db.prepare('SELECT metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(dramaId);
+    if (!row?.metadata) return false;
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata;
+    return !!(meta && meta.storyboard_full_narration_video_mode);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * 提交 Agnes 前剥离会触发原生配音的文案（解说/对白/旁白），并追加无对白约束（保留 BGM）。
+ * 全文解说模式下旁白由分镜视频后处理 IndexTTS 叠加，不应让 Agnes 朗读。
+ */
+function prepareAgnesVideoPrompt(rawPrompt, { forceSilent = false } = {}) {
+  let p = (rawPrompt || '').toString().trim();
+  if (!p) return { prompt: p, useSilentNegative: !!forceSilent };
+
+  const hadSpeechCue =
+    /解说旁白[：:]|对话[：:]|对白[：:]|台词[：:]|旁白（画面无声）|@人物\d+[：:]\s*[""「]/.test(p);
+
+  if (forceSilent || hadSpeechCue) {
+    p = p
+      .replace(/解说旁白[：:][^。]*。?/g, '')
+      .replace(/对话[：:][^。]*。?/g, '')
+      .replace(/对白[：:][^。]*。?/g, '')
+      .replace(/\s*台词[：:][^。]*。?/g, '')
+      .replace(/旁白（画面无声）[：:]\s*[""「][^""」]*[""」]/g, '')
+      .replace(/第\d+秒\s*@人物\d+[：:]\s*[""「][^""」]*[""」]/g, '')
+      .replace(/\[禁BGM\]/g, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    if (!p.includes('禁止人物开口')) {
+      p = p ? `${p} ${AGNES_SILENT_SUFFIX}` : AGNES_SILENT_SUFFIX;
+    }
+  }
+
+  return { prompt: p, useSilentNegative: !!(forceSilent || hadSpeechCue) };
+}
+
 async function callAgnesVideoApi(db, config, log, opts) {
   const {
     prompt,
@@ -2497,6 +2786,8 @@ async function callAgnesVideoApi(db, config, log, opts) {
     files_base_url,
     storage_local_path,
     video_gen_id,
+    silent_video,
+    seed,
   } = opts;
 
   const base = (config.base_url || 'https://apihub.agnes-ai.com/v1').replace(/\/$/, '');
@@ -2504,18 +2795,11 @@ async function callAgnesVideoApi(db, config, log, opts) {
   if (!ep.startsWith('/')) ep = '/' + ep;
   const url = base + ep;
 
-  const frameRate = 24;
-  const dims = agnesDimensionsFromAspectRatio(aspect_ratio || '16:9');
-  const numFrames = agnesSnapNumFrames(duration, frameRate);
+  const resolvedModel = normalizeAgnesVideoModel(model);
+  const useV25 = isAgnesVideo25Model(resolvedModel);
 
-  const body = {
-    model: model || 'agnes-video-v2.0',
-    prompt: prompt || '',
-    width: dims.width,
-    height: dims.height,
-    num_frames: numFrames,
-    frame_rate: frameRate,
-  };
+  const prepared = prepareAgnesVideoPrompt(prompt, { forceSilent: !!silent_video });
+  let agnesPrompt = prepared.prompt || '';
 
   const rawRefList = Array.isArray(reference_urls) ? reference_urls.filter(Boolean) : [];
   const resolvedRefs = [];
@@ -2557,21 +2841,77 @@ async function callAgnesVideoApi(db, config, log, opts) {
     };
   }
 
-  const imagePayload = buildAgnesVideoImagePayload({
-    useOmniReference,
-    resolvedRefs,
-    firstResolved,
-    lastResolved,
-  });
-  if (imagePayload.image != null) {
-    body.image = imagePayload.image;
-  }
-  if (imagePayload.extra_body) {
-    body.extra_body = imagePayload.extra_body;
+  let body;
+  let imageStrategy;
+
+  if (useV25) {
+    const requestedSec = Math.round(Number(duration) || 5);
+    const effectiveSec = Number(agnes25ClampSeconds(duration));
+    if (effectiveSec !== requestedSec) {
+      agnesPrompt = rewritePromptDurationHints(agnesPrompt, effectiveSec);
+      log.info('[Agnes] 2.5 时长钳制', {
+        video_gen_id,
+        requested_sec: requestedSec,
+        effective_sec: effectiveSec,
+      });
+    }
+    const built = buildAgnes25VideoBody({
+      prompt: agnesPrompt,
+      duration,
+      aspect_ratio,
+      useOmniReference,
+      resolvedRefs,
+      firstResolved,
+      lastResolved,
+      seed,
+    });
+    body = built.body;
+    imageStrategy = built.strategy;
+  } else {
+    const frameRate = 24;
+    const dims = agnesDimensionsFromAspectRatio(aspect_ratio || '16:9');
+    const requestedSec = Math.round(Number(duration) || 5);
+    const numFrames = agnesSnapNumFrames(duration, frameRate);
+    const effectiveSec = agnesEffectiveDurationSec(duration, frameRate);
+    if (effectiveSec !== requestedSec) {
+      agnesPrompt = rewritePromptDurationHints(agnesPrompt, effectiveSec);
+      log.info('[Agnes] 帧数档位调整时长', {
+        video_gen_id,
+        requested_sec: requestedSec,
+        effective_sec: effectiveSec,
+        num_frames: numFrames,
+        frame_rate: frameRate,
+      });
+    }
+    body = {
+      model: resolvedModel || 'agnes-video-v2.0',
+      prompt: agnesPrompt,
+      width: dims.width,
+      height: dims.height,
+      num_frames: numFrames,
+      frame_rate: frameRate,
+    };
+    if (prepared.useSilentNegative) {
+      body.negative_prompt = AGNES_SILENT_NEGATIVE_PROMPT;
+    }
+    const imagePayload = buildAgnesVideoImagePayload({
+      useOmniReference,
+      resolvedRefs,
+      firstResolved,
+      lastResolved,
+    });
+    imageStrategy = imagePayload.strategy;
+    if (imagePayload.image != null) {
+      body.image = imagePayload.image;
+    }
+    if (imagePayload.extra_body) {
+      body.extra_body = imagePayload.extra_body;
+    }
   }
 
   log.info('[Agnes] 参考图输入（解析前）', {
     video_gen_id,
+    model: body.model,
     use_omni_reference: useOmniReference,
     raw_ref_count: rawRefList.length,
     raw_refs: rawRefList.map((u, i) => ({ index: i, url: String(u) })),
@@ -2580,71 +2920,142 @@ async function callAgnesVideoApi(db, config, log, opts) {
   });
   log.info('[Agnes] 参考图解析结果', {
     video_gen_id,
+    model: body.model,
     resolved_ref_count: resolvedRefs.length,
     resolved_refs: resolvedRefs.map((u, i) => ({ index: i, url: u })),
     first_resolved: firstResolved,
     last_resolved: lastResolved,
-    image_strategy: imagePayload.strategy,
+    image_strategy: imageStrategy,
   });
 
   logVideoPostRequest(log, 'Agnes', url, body, video_gen_id, {
     model: body.model,
+    mode: body.mode || body.extra_body?.mode || null,
     width: body.width,
     height: body.height,
     num_frames: body.num_frames,
     frame_rate: body.frame_rate,
+    seconds: body.seconds,
+    size: body.size,
     duration_sec: duration,
-    aspect_ratio: aspect_ratio || '16:9',
-    image_strategy: imagePayload.strategy,
+    aspect_ratio: body.aspect_ratio || aspect_ratio || '16:9',
+    image_strategy: imageStrategy,
     extra_body_mode: body.extra_body?.mode || null,
     omni_reference: useOmniReference,
     prompt_len: (body.prompt || '').length,
   });
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: 'Bearer ' + (config.api_key || ''),
-    },
-    body: JSON.stringify(body),
-  });
-  const raw = await res.text();
-  log.info('[Agnes] raw response', { status: res.status, raw: raw.slice(0, 1000), video_gen_id });
+  /** @deprecated 使用 isAgnesRetryableSubmitError */
+  const isAgnesRetryableSubmit = isAgnesRetryableSubmitError;
 
-  if (!res.ok) {
-    let errMsg = 'Agnes 视频请求失败: ' + res.status;
+  const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Agnes 视频：每 Key 每分钟最多 1 次 POST（手动/流水线提交均受此上游限流）
+  const pool = getApiKeyPool(config.api_key, 1, AGNES_VIDEO_MIN_INTERVAL_MS);
+  const submitWithKey = async (apiKey, keyIndex, attempt) => {
+    let res;
+    let raw;
     try {
-      const errJson = JSON.parse(raw);
-      const msg = errJson.error?.message || errJson.message || errJson.error;
-      if (msg) errMsg += ' - ' + (typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 200));
-    } catch (_) {
-      if (raw) errMsg += ' - ' + raw.slice(0, 200);
+      res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + apiKey,
+        },
+        body: JSON.stringify(body),
+      });
+      raw = await res.text();
+    } catch (netErr) {
+      log.warn('[Agnes] 提交网络异常', {
+        video_gen_id,
+        key_index: keyIndex,
+        attempt,
+        error: netErr.message,
+      });
+      return {
+        error: 'Agnes 网络错误: ' + netErr.message,
+        retryable: isAgnesRetryableNetworkError(netErr),
+      };
     }
-    return { error: errMsg };
-  }
+    log.info('[Agnes] raw response', {
+      status: res.status,
+      raw: raw.slice(0, 1000),
+      video_gen_id,
+      key_index: keyIndex,
+      attempt,
+    });
 
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch (e) {
-    return { error: 'Agnes 响应解析失败: ' + e.message + ' | raw: ' + raw.slice(0, 200) };
-  }
+    if (!res.ok) {
+      return buildAgnesSubmitFailure(res.status, raw, 'Agnes 视频请求失败');
+    }
 
-  const directUrl = extractAgnesVideoUrl(data);
-  if (directUrl) {
-    log.info('[Agnes] 直接返回 video_url', { video_url: directUrl, video_gen_id });
-    return { video_url: directUrl };
-  }
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      return { error: 'Agnes 响应解析失败: ' + e.message + ' | raw: ' + raw.slice(0, 200), retryable: false };
+    }
 
-  const taskId = data.id || data.task_id || data.data?.id || data.data?.task_id;
-  if (taskId) {
-    log.info('[Agnes] 返回 task_id', { task_id: taskId, status: data.status, video_gen_id });
-    return { task_id: String(taskId), status: data.status || 'processing' };
-  }
+    const directUrl = extractAgnesVideoUrl(data);
+    if (directUrl) {
+      log.info('[Agnes] 直接返回 video_url', { video_url: directUrl, video_gen_id, key_index: keyIndex, attempt });
+      return { video_url: directUrl };
+    }
 
-  log.error('[Agnes] 无 task_id 或 video_url', { data: JSON.stringify(data).slice(0, 500), video_gen_id });
-  return { error: 'Agnes 未返回 task_id 或 video_url: ' + JSON.stringify(data).slice(0, 300) };
+    const upstreamTaskId = data.id || data.task_id || data.data?.id || data.data?.task_id;
+    const bodyStatus = String(data.status || '').toLowerCase();
+    if (!upstreamTaskId) {
+      if (bodyStatus === 'failed' || bodyStatus === 'error' || data.error || getAgnesSubmitErrorCode(data)) {
+        return buildAgnesSubmitFailure(res.status || 200, raw, 'Agnes 任务被拒绝');
+      }
+      log.error('[Agnes] 无 task_id 或 video_url', { data: JSON.stringify(data).slice(0, 500), video_gen_id });
+      return {
+        error: 'Agnes 未返回 task_id 或 video_url: ' + JSON.stringify(data).slice(0, 300),
+        retryable: false,
+      };
+    }
+
+    const task_id = encodeAgnesTaskId(keyIndex, String(upstreamTaskId));
+    log.info('[Agnes] 返回 task_id', {
+      task_id,
+      upstream_task_id: String(upstreamTaskId),
+      status: data.status,
+      video_gen_id,
+      key_index: keyIndex,
+      attempt,
+    });
+    return { task_id, status: data.status || 'processing' };
+  };
+
+  // 仅提交失败且上游标记可重试时才重试（成功拿到 task_id / video_url 立即返回，不重复调用）
+  const maxAttempts = 3; // 首次 1 次 + 报错后最多再试 2 次
+  const retryIntervalMs = 60_000;
+  let lastFail = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const result = pool
+      ? await pool.run((apiKey, keyIndex) => submitWithKey(apiKey, keyIndex, attempt))
+      : await submitWithKey(config.api_key || '', 0, attempt);
+    if (!result.error) return result;
+    lastFail = result;
+    if (!result.retryable) {
+      log.info('[Agnes] 提交失败且不可重试，不再消耗调用次数', {
+        video_gen_id,
+        attempt,
+        error: result.error,
+      });
+      break;
+    }
+    if (attempt >= maxAttempts) break;
+    log.warn('[Agnes] 提交可重试失败，等待后重试', {
+      video_gen_id,
+      attempt,
+      next_attempt: attempt + 1,
+      delay_ms: retryIntervalMs,
+      error: result.error,
+    });
+    await sleepMs(retryIntervalMs);
+  }
+  return { error: lastFail?.error || 'Agnes 视频提交失败' };
 }
 
 /**
@@ -3890,8 +4301,9 @@ async function callVideoApi(db, log, opts) {
     });
   }
 
-  // Agnes Video V2.0 (api_protocol = 'agnes')
+  // Agnes Video（api_protocol = 'agnes'；支持 agnes-video-2.5 / agnes-video-v2.0）
   if (protocol === 'agnes') {
+    const silentVideo = isDramaFullNarrationVideoMode(db, opts.drama_id);
     return callAgnesVideoApi(db, config, log, {
       prompt,
       model,
@@ -3904,6 +4316,8 @@ async function callVideoApi(db, log, opts) {
       files_base_url: opts.files_base_url,
       storage_local_path: opts.storage_local_path,
       video_gen_id: opts.video_gen_id,
+      silent_video: silentVideo,
+      seed: opts.seed,
     });
   }
 
@@ -4103,6 +4517,11 @@ async function pollVideoTask(db, log, videoGenId, taskId, config, maxAttempts = 
     return { error: 'Jimeng AI API 为同步返回视频地址，不应进入轮询' };
   }
   let pollTaskId = taskId;
+  let agnesPollAuth = null;
+  if (isAgnes) {
+    agnesPollAuth = resolveAgnesPollAuth(config.api_key, taskId);
+    pollTaskId = agnesPollAuth.taskId;
+  }
   /** Agnes：completed 后 remixed_from_video_id / metadata.url 偶发迟到，对齐 new-api 继续多查几轮 */
   let agnesCompletedWithoutUrl = 0;
   const AGNES_COMPLETED_URL_GRACE = 12;
@@ -4155,6 +4574,9 @@ async function pollVideoTask(db, log, videoGenId, taskId, config, maxAttempts = 
         if (!qep.startsWith('/')) qep = '/' + qep;
         url = viduBase + qep;
         headers = { Authorization: (isOfficialVidu ? 'Token ' : 'Bearer ') + (config.api_key || '') };
+      } else if (isAgnes) {
+        url = queryUrl();
+        headers = { Authorization: 'Bearer ' + (agnesPollAuth?.apiKey || config.api_key || '') };
       } else {
         url = queryUrl();
         headers = { Authorization: 'Bearer ' + (config.api_key || '') };
@@ -4465,7 +4887,20 @@ module.exports = {
   buildAgnesPollUrl,
   getAgnesApiRoot,
   buildAgnesVideoImagePayload,
+  buildAgnes25VideoBody,
+  agnes25ClampSeconds,
+  normalizeAgnesVideoModel,
+  isAgnesVideo25Model,
+  isAgnesVideoModelName,
+  rewriteAgnes25ReferenceTags,
   formatVideoPostBodyForLog,
+  prepareAgnesVideoPrompt,
+  agnesSnapNumFrames,
+  agnesEffectiveDurationSec,
+  rewritePromptDurationHints,
+  isAgnesRetryableSubmitError,
+  isAgnesRetryableNetworkError,
+  isDramaFullNarrationVideoMode,
   isSeedance2FamilyModel,
   normalizeVolcengineDuration,
   isMinimaxH3Model,

@@ -52,21 +52,14 @@ export function useCanvasEpisodeGenerate(deps) {
   }
 
   function buildStoryboardApiOptions() {
-    const meta = parseDramaMetadata(drama.value?.metadata)
     const gen = getDramaGenerationOptions(drama.value)
-    const ep = getEpisode()
-    const scriptLen = (ep?.script_content || '').trim().length
-    let videoDuration
-    if (meta.video_clip_duration) {
-      videoDuration = Number(meta.video_clip_duration)
-    } else if (scriptLen > 0) {
-      videoDuration = Math.max(10, Math.round(10 + (scriptLen / 600) * 60))
-    }
+    const meta = parseDramaMetadata(drama.value?.metadata)
     return {
       style: gen.style || undefined,
       aspect_ratio: gen.aspectRatio,
-      video_duration: videoDuration,
       include_narration: !!meta.storyboard_include_narration,
+      full_narration_video_mode: !!meta.storyboard_full_narration_video_mode,
+      narration_chars_per_sec: Number(meta.narration_chars_per_sec) || 5.5,
       universal_omni_storyboard: !!meta.storyboard_universal_omni,
     }
   }

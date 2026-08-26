@@ -9,6 +9,7 @@ const taskService = require('./taskService');
 const { loadConfig } = require('../config');
 const { postJSONWithTimeout } = require('./aiClient');
 const seedance2AssetGuards = require('../utils/seedance2AssetGuards');
+const { getApiKeyPool } = require('../utils/apiKeyPool');
 
 /** 图生 POST 使用 Node http(s)，默认 10 分钟，避免 undici fetch 大包体/慢链路下模糊失败 */
 const IMAGE_HTTP_TIMEOUT_MS = 600000;
@@ -1547,41 +1548,57 @@ async function callImageApi(db, log, opts) {
     original_size: size !== effectiveSize ? size : undefined,
     is_agnes: isAgnes,
   });
-  const openaiCompatHeaders = {
-    'Content-Type': 'application/json',
-    Authorization: 'Bearer ' + (config.api_key || ''),
-  };
-  let raw;
-  let httpStatus;
-  try {
-    const out = await postJSONWithTimeout(url, openaiCompatHeaders, body, IMAGE_HTTP_TIMEOUT_MS);
-    httpStatus = out.statusCode;
-    raw = out.raw;
-  } catch (e) {
-    log.error('Image API network error', { image_gen_id, error: e.message, url: url.slice(0, 80) });
-    return { error: e.message && e.message.includes('timeout')
-      ? e.message
-      : ('图片生成网络请求失败: ' + e.message) };
-  }
-  if (httpStatus < 200 || httpStatus >= 300) {
-    log.error('Image API failed', { status: httpStatus, body: raw.slice(0, 300) });
-    let errMsg = '图片生成请求失败: ' + httpStatus;
+
+  const requestWithKey = async (apiKey, keyIndex) => {
+    const openaiCompatHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer ' + apiKey,
+    };
+    let raw;
+    let httpStatus;
     try {
-      const errJson = JSON.parse(raw);
-      const msg = errJson.error?.message || errJson.message || errJson.error;
-      if (msg) errMsg += ' - ' + (typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 200));
-    } catch (_) {
-      if (raw && raw.length) errMsg += ' - ' + raw.slice(0, 200);
+      const out = await postJSONWithTimeout(url, openaiCompatHeaders, body, IMAGE_HTTP_TIMEOUT_MS);
+      httpStatus = out.statusCode;
+      raw = out.raw;
+    } catch (e) {
+      log.error('Image API network error', {
+        image_gen_id,
+        error: e.message,
+        url: url.slice(0, 80),
+        key_index: keyIndex,
+      });
+      return { error: e.message && e.message.includes('timeout')
+        ? e.message
+        : ('图片生成网络请求失败: ' + e.message) };
     }
-    return { error: errMsg };
-  }
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch (e) {
-    log.warn('Image API response parse error', { image_gen_id, raw_preview: raw.slice(0, 200) });
-    return { error: '图片生成返回格式异常' };
-  }
+    if (httpStatus < 200 || httpStatus >= 300) {
+      log.error('Image API failed', { status: httpStatus, body: raw.slice(0, 300), key_index: keyIndex });
+      let errMsg = '图片生成请求失败: ' + httpStatus;
+      try {
+        const errJson = JSON.parse(raw);
+        const msg = errJson.error?.message || errJson.message || errJson.error;
+        if (msg) errMsg += ' - ' + (typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 200));
+      } catch (_) {
+        if (raw && raw.length) errMsg += ' - ' + raw.slice(0, 200);
+      }
+      return { error: errMsg };
+    }
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      return { error: '图片响应解析失败: ' + e.message };
+    }
+    return { data, httpStatus, raw };
+  };
+
+  const pool = isAgnes ? getApiKeyPool(config.api_key, 1) : null;
+  const keyedResult = pool
+    ? await pool.run(requestWithKey)
+    : await requestWithKey(config.api_key || '', 0);
+
+  if (keyedResult.error) return keyedResult;
+  const { data } = keyedResult;
   // 兼容多种返回格式：OpenAI 风格 data[].url / b64_json，部分厂商 data[].image_url 或 data.output 等
   // Stable Diffusion WebUI（/sdapi/v1/txt2img|img2img）：顶层 images 为 PNG base64 字符串数组，无 data 数组
   const item = data.data && data.data[0];

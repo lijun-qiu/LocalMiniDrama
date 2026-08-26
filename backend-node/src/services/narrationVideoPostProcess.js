@@ -179,7 +179,8 @@ function alignNarrationToVideoDuration(narrMp3, videoDur, outPath, log) {
 
 function burnSubtitlesAndMux(mergedVideoPath, narrAlignedMp3, srtPath, outPath, log) {
   const sub = escapeSubtitlesPathForFfmpeg(srtPath);
-  const vf = `subtitles='${sub}':charenc=UTF-8`;
+  const forceStyle = "FontSize=24,Outline=2,Shadow=1,Bold=1,MarginV=48";
+  const vf = `subtitles='${sub}':charenc=UTF-8:force_style='${forceStyle}'`;
   const args = [
     '-y',
     '-i', mergedVideoPath,

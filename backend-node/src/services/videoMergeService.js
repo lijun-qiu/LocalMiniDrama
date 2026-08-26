@@ -1,6 +1,6 @@
 const path = require('path');
 const fs = require('fs');
-const { getFfmpegPath, getFfprobePath, hasLocalFfmpeg } = require('../utils/ffmpegPath');
+const { getFfmpegPath, getFfprobePath, hasLocalFfmpeg, hasLocalFfprobe } = require('../utils/ffmpegPath');
 const storageLayout = require('./storageLayout');
 
 function list(db, query) {
@@ -222,6 +222,8 @@ async function processVideoMerge(db, log, mergeId, baseUrl) {
   });
 
   let mergedRelativePath = null;
+  let postProcessWarning = null;
+  let postProcessError = null;
   if (localPaths.length > 0 && ffmpegAvailable && localPaths.length <= 100) {
     const projectSubdir = storageLayout.getProjectStorageSubdir(db, r.drama_id);
     const sub = projectSubdir && String(projectSubdir).trim();
@@ -249,8 +251,13 @@ async function processVideoMerge(db, log, mergeId, baseUrl) {
   const postNeed =
     !!mergeOpts.burn_narration_subtitles
     || !!mergeOpts.burn_dialogue_audio
+    || !!mergeOpts.use_indextts_narration
     || !!(mergeOpts.watermark_text && String(mergeOpts.watermark_text).trim());
   if (mergedRelativePath && ffmpegAvailable && postNeed) {
+    if (!hasLocalFfprobe()) {
+      postProcessError = '未找到 ffprobe，无法对齐音轨/字幕（请将 ffprobe.exe 与 ffmpeg 放在同一目录）';
+      log.warn('Video merge: ffprobe missing, post-process skipped', { merge_id: mergeId });
+    } else {
     const mergedAbsPath = path.join(storageRoot, mergedRelativePath.replace(/\//g, path.sep));
     if (fs.existsSync(mergedAbsPath)) {
       const mergedPP = require('./mergedEpisodePostProcess');
@@ -263,10 +270,13 @@ async function processVideoMerge(db, log, mergeId, baseUrl) {
       });
       if (post.ok && post.relativePath) {
         mergedRelativePath = post.relativePath;
+        postProcessWarning = post.warning || null;
         log.info('Video merge: merged episode post-process', { merge_id: mergeId, out: mergedRelativePath });
       } else if (post.error && post.error !== 'NO_POST_OPTS') {
+        postProcessError = post.error;
         log.warn('Video merge: post-process skipped', { merge_id: mergeId, err: post.error });
       }
+    }
     }
   }
 
@@ -275,12 +285,20 @@ async function processVideoMerge(db, log, mergeId, baseUrl) {
   }
 
   const finalMergedUrl = mergedRelativePath || mergedUrlFallback;
+  const mergeErrorMsg = postProcessError
+    || (postProcessWarning ? `后处理部分成功：${postProcessWarning}` : null);
   db.prepare(
     'UPDATE video_merges SET status = ?, merged_url = ?, duration = ?, completed_at = ?, error_msg = ? WHERE id = ?'
-  ).run('completed', finalMergedUrl, Math.round(totalDuration) || null, now, null, mergeId);
+  ).run('completed', finalMergedUrl, Math.round(totalDuration) || null, now, mergeErrorMsg, mergeId);
   db.prepare('UPDATE episodes SET video_url = ?, status = ?, updated_at = ? WHERE id = ?').run(finalMergedUrl, 'completed', now, episodeId);
   if (taskId) {
-    taskService.updateTaskResult(db, taskId, { merge_id: mergeId, video_url: finalMergedUrl, duration: Math.round(totalDuration) });
+    taskService.updateTaskResult(db, taskId, {
+      merge_id: mergeId,
+      video_url: finalMergedUrl,
+      duration: Math.round(totalDuration),
+      post_warning: postProcessWarning || undefined,
+      post_error: postProcessError || undefined,
+    });
   }
   if (!mergedRelativePath) {
     log.info('Video merge completed (first-clip fallback)', { merge_id: mergeId, episode_id: episodeId });

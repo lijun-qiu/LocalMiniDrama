@@ -85,7 +85,13 @@ function createStoryboard(db, log, req) {
 }
 
 function updateStoryboard(db, log, id, req) {
-  const row = db.prepare('SELECT id FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(Number(id));
+  const row = db.prepare(
+    `SELECT s.id, s.episode_id, s.narration, s.duration, d.metadata AS drama_metadata
+     FROM storyboards s
+     JOIN episodes e ON e.id = s.episode_id
+     JOIN dramas d ON d.id = e.drama_id
+     WHERE s.id = ? AND s.deleted_at IS NULL`
+  ).get(Number(id));
   if (!row) return null;
   const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'local_path', 'main_panel_idx', 'video_url', 'audio_local_path', 'narration_audio_local_path', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_local_path'];
   const updates = [];
@@ -99,6 +105,36 @@ function updateStoryboard(db, log, id, req) {
     params.push(jsonStr);
     parsedDramaCharIdsForSync = parseDramaCharacterIds(charactersValue) ?? [];
   }
+
+  // 全文解说：有旁白时 duration 一律跟旁白字数估算对齐（与页面「约 Xs」一致）
+  let dramaMeta = {};
+  try {
+    dramaMeta = typeof row.drama_metadata === 'string'
+      ? JSON.parse(row.drama_metadata || '{}')
+      : (row.drama_metadata || {});
+  } catch (_) {
+    dramaMeta = {};
+  }
+  const fullNarration =
+    dramaMeta.storyboard_full_narration_video_mode === true ||
+    dramaMeta.storyboard_full_narration_video_mode === 1 ||
+    String(dramaMeta.storyboard_full_narration_video_mode || '').toLowerCase() === 'true';
+  if (fullNarration) {
+    const nextNarration = req.narration !== undefined ? req.narration : row.narration;
+    const narrTrim = String(nextNarration || '').trim();
+    const shotNum = Number(
+      db.prepare('SELECT storyboard_number FROM storyboards WHERE id = ?').get(Number(id))?.storyboard_number
+    ) || 0;
+    if (shotNum === 1 && !narrTrim) {
+      req = { ...req, duration: 6 };
+    } else if (narrTrim) {
+      const { resolveFullNarrationLimits } = require('./fullNarrationConstants');
+      const { estimateDurationFromSpeechText } = require('./episodeStoryboardService');
+      const limits = resolveFullNarrationLimits(dramaMeta.narration_chars_per_sec);
+      req = { ...req, duration: estimateDurationFromSpeechText(narrTrim, limits) };
+    }
+  }
+
   for (const key of allowed) {
     if (key === 'characters') continue;
     if (req[key] !== undefined) {
@@ -133,11 +169,14 @@ function updateStoryboard(db, log, id, req) {
 }
 
 function deleteStoryboard(db, log, id) {
-  const now = new Date().toISOString();
-  const result = db.prepare('UPDATE storyboards SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(now, Number(id));
-  if (result.changes === 0) return false;
-  log.info('Storyboard deleted', { id });
-  return true;
+  const numId = Number(id);
+  const { hardDeleteStoryboardIds, resolveStorageRoot } = require('./generatedAssetPurgeService');
+  const out = hardDeleteStoryboardIds(db, log, [numId], resolveStorageRoot(require('../config').loadConfig()));
+  if (out.storyboards > 0) {
+    log.info('Storyboard deleted (hard)', { id: numId });
+    return true;
+  }
+  return false;
 }
 
 function getStoryboardById(db, id) {

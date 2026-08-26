@@ -118,4 +118,12 @@ describe('buildAgnesPollUrl (align new-api FetchTask)', () => {
     assert.equal(getAgnesApiRoot('https://apihub.agnes-ai.com/v1'), 'https://apihub.agnes-ai.com');
     assert.equal(getAgnesApiRoot('https://apihub.agnes-ai.com/v1/'), 'https://apihub.agnes-ai.com');
   });
+
+  it('strips agnesk key-index prefix when building poll URL', () => {
+    const url = buildAgnesPollUrl(
+      { base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'agnes' },
+      'agnesk:1:task_abc'
+    );
+    assert.equal(url, 'https://apihub.agnes-ai.com/v1/videos/task_abc');
+  });
 });

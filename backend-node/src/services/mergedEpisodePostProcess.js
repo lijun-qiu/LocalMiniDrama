@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { getFfmpegPath, getFfprobePath } = require('../utils/ffmpegPath');
+const { splitNarrationLines } = require('../utils/narrationLineSplit');
 
 function ffprobeDurationSec(filePath) {
   const probe = getFfprobePath();
@@ -63,6 +64,70 @@ function runFfmpeg(args, log, tag) {
     return false;
   }
   return true;
+}
+
+function resolveStorageAudioAbs(storageRoot, relPath) {
+  const rel = relPath && String(relPath).trim();
+  if (!rel) return null;
+  const abs = path.join(storageRoot, rel.replace(/\//g, path.sep));
+  return fs.existsSync(abs) ? abs : null;
+}
+
+/** 烧录字幕样式：描边保证可读 */
+const SUBTITLE_FORCE_STYLE = "FontSize=36,Outline=2,Shadow=1,Bold=1,MarginV=48";
+/** 全文解说旁白视频模式：字号略小，避免逐句字幕占屏过多 */
+const FULL_NARRATION_SUBTITLE_FORCE_STYLE = "FontSize=24,Outline=2,Shadow=1,Bold=1,MarginV=48";
+
+function resolveSubtitleForceStyle(db, episodeId) {
+  if (!db || !episodeId) return SUBTITLE_FORCE_STYLE;
+  try {
+    const ep = db.prepare('SELECT drama_id FROM episodes WHERE id = ?').get(episodeId);
+    const videoClient = require('./videoClient');
+    if (videoClient.isDramaFullNarrationVideoMode(db, ep?.drama_id)) {
+      return FULL_NARRATION_SUBTITLE_FORCE_STYLE;
+    }
+  } catch (_) { /* fall through */ }
+  return SUBTITLE_FORCE_STYLE;
+}
+
+function buildVideoFilterParts(srtPath, watermarkText, tempRoot, subtitleStyle = SUBTITLE_FORCE_STYLE) {
+  const vfParts = [];
+  if (srtPath && fs.existsSync(srtPath)) {
+    const simpleSrt = path.join(tempRoot, 'burn_subs.srt');
+    try { fs.copyFileSync(srtPath, simpleSrt); } catch (_) { /* use original */ }
+    const subEsc = escapeFfmpegPath(fs.existsSync(simpleSrt) ? simpleSrt : srtPath);
+    vfParts.push(`subtitles='${subEsc}':charenc=UTF-8:force_style='${subtitleStyle}'`);
+  }
+  if (watermarkText) {
+    const wmFile = path.join(tempRoot, 'watermark.txt');
+    fs.writeFileSync(wmFile, watermarkText, 'utf8');
+    const wmEsc = escapeFfmpegPath(wmFile);
+    const fontOpt = getDrawtextFontOption();
+    vfParts.push(
+      `drawtext=textfile='${wmEsc}':reload=1${fontOpt}:x=w-tw-16:y=h-th-16:fontsize=22:fontcolor=white@0.82:borderw=2:bordercolor=black@0.55`
+    );
+  }
+  let filterComplex = '';
+  if (vfParts.length === 1) {
+    filterComplex = `[0:v]${vfParts[0]}[vout]`;
+  } else if (vfParts.length === 2) {
+    filterComplex = `[0:v]${vfParts[0]}[vx];[vx]${vfParts[1]}[vout]`;
+  }
+  return filterComplex;
+}
+
+function muxVideoWithAudio(mergedAbsPath, alignedAudioPath, outAbs, filterComplex, log, tag) {
+  const args = ['-y', '-i', mergedAbsPath, '-i', alignedAudioPath];
+  if (filterComplex) {
+    args.push('-filter_complex', filterComplex, '-map', '[vout]', '-map', '1:a');
+  } else {
+    args.push('-map', '0:v', '-map', '1:a');
+  }
+  args.push(
+    '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', outAbs
+  );
+  return runFfmpeg(args, log, tag);
 }
 
 function writeSilenceMp3(slotSec, outPath, log) {
@@ -198,13 +263,158 @@ function getDrawtextFontOption() {
   return '';
 }
 
+function buildNarrationTtsOpts(mergeOpts) {
+  if (!mergeOpts?.use_indextts_narration) return {};
+  const opts = {
+    provider: 'indextts',
+    voice_id: mergeOpts.indextts_voice || 'gsv:008',
+    emotion_text: mergeOpts.indextts_emotion || '自然流畅的解说语气，情绪饱满',
+  };
+  if (mergeOpts.indextts_speed != null && mergeOpts.indextts_speed !== '') {
+    const s = Number(mergeOpts.indextts_speed);
+    if (Number.isFinite(s) && s > 0) opts.speed = s;
+  }
+  return opts;
+}
+
+function usePerLineNarration(mergeOpts) {
+  if (mergeOpts?.use_indextts_narration) return true;
+  return mergeOpts?.narration_subtitle_mode === 'per_line';
+}
+
 /**
- * @param {object} mergeOpts — burn_dialogue_audio, burn_narration_subtitles, watermark_text
+ * 逐句合成旁白并生成 SRT 行（一句一显）
+ * @returns {{ narrFitPath: string, srtEntries: Array<{ startMs: number, endMs: number, text: string }> }}
+ */
+async function synthesizeNarrationPerLine(db, log, opts) {
+  const {
+    narrText, slotSec, tempRoot, shotIndex, storageRoot, mergeOpts, shotStartMs,
+  } = opts;
+  const lines = splitNarrationLines(narrText);
+  const effectiveLines = lines.length ? lines : [narrText.trim()];
+  const ttsOpts = buildNarrationTtsOpts(mergeOpts);
+  const lineRawPaths = [];
+  const lineDurations = [];
+
+  for (let j = 0; j < effectiveLines.length; j++) {
+    const lineText = effectiveLines[j];
+    const rawPath = path.join(tempRoot, `narr_line_raw_${shotIndex}_${j}.mp3`);
+    let synth;
+    try {
+      synth = await require('./ttsService').synthesize(db, log, {
+        text: lineText,
+        storyboard_id: null,
+        storage_base: storageRoot,
+        ...ttsOpts,
+      });
+    } catch (e) {
+      throw new Error(`解说 TTS 失败（第 ${j + 1} 句）：${e.message}`);
+    }
+    const srcAbs = synth.abs_path || path.join(storageRoot, synth.local_path.replace(/\//g, path.sep));
+    if (!fs.existsSync(srcAbs)) throw new Error(`旁白 TTS 文件不存在：${lineText.slice(0, 20)}`);
+    try { fs.copyFileSync(srcAbs, rawPath); } catch (_) { throw new Error('复制旁白 TTS 失败'); }
+    lineRawPaths.push(rawPath);
+    const d = ffprobeDurationSec(rawPath);
+    lineDurations.push(Math.max(0.15, d || 0.5));
+  }
+
+  const naturalTotal = lineDurations.reduce((a, b) => a + b, 0);
+  const slotEps = 0.06;
+  const scale = naturalTotal > slotSec + slotEps ? slotSec / naturalTotal : 1;
+  const scaledDurations = lineDurations.map((d) => d * scale);
+
+  const srtEntries = [];
+  let offsetSec = 0;
+  const lineFitPaths = [];
+  for (let j = 0; j < effectiveLines.length; j++) {
+    const targetDur = scaledDurations[j];
+    const fitPath = path.join(tempRoot, `narr_line_fit_${shotIndex}_${j}.mp3`);
+    if (!fitAudioToSlot(lineRawPaths[j], targetDur, fitPath, log)) {
+      throw new Error(`旁白第 ${j + 1} 句时长对齐失败`);
+    }
+    lineFitPaths.push(fitPath);
+    const startMs = shotStartMs + Math.round(offsetSec * 1000);
+    const endMs = shotStartMs + Math.round((offsetSec + targetDur) * 1000);
+    srtEntries.push({ startMs, endMs, text: effectiveLines[j] });
+    offsetSec += targetDur;
+  }
+
+  const narrFit = path.join(tempRoot, `narr_fit_${shotIndex}.mp3`);
+  if (lineFitPaths.length === 1) {
+    try { fs.copyFileSync(lineFitPaths[0], narrFit); } catch (_) { throw new Error('旁白片段复制失败'); }
+  } else if (!concatMp3List(lineFitPaths, narrFit, log)) {
+    throw new Error('旁白逐句拼接失败');
+  }
+  if (offsetSec < slotSec - slotEps) {
+    const padded = path.join(tempRoot, `narr_fit_pad_${shotIndex}.mp3`);
+    if (!fitAudioToSlot(narrFit, slotSec, padded, log)) throw new Error('旁白补静音失败');
+    try { fs.copyFileSync(padded, narrFit); } catch (_) { throw new Error('旁白片段复制失败'); }
+  }
+
+  return { narrFitPath: narrFit, srtEntries };
+}
+
+/**
+ * 使用预生成旁白音频时，按逐句拆分与可读字权重分配字幕时间轴（不再重复 TTS）
+ */
+function buildSrtEntriesFromPrebuiltNarration(narrText, slotSec, shotStartMs = 0) {
+  const lines = splitNarrationLines(narrText);
+  const effectiveLines = lines.length ? lines : [String(narrText || '').trim()].filter(Boolean);
+  if (!effectiveLines.length || !Number.isFinite(slotSec) || slotSec <= 0) return [];
+
+  const weights = effectiveLines.map((line) => {
+    const readable = String(line).replace(/[^\u4e00-\u9fff\w]/g, '');
+    return Math.max(1, readable.length || String(line).length || 1);
+  });
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const srtEntries = [];
+  let offsetSec = 0;
+  for (let j = 0; j < effectiveLines.length; j++) {
+    const targetDur = slotSec * (weights[j] / totalWeight);
+    const startMs = shotStartMs + Math.round(offsetSec * 1000);
+    const endMs = shotStartMs + Math.round((offsetSec + targetDur) * 1000);
+    srtEntries.push({ startMs, endMs, text: effectiveLines[j] });
+    offsetSec += targetDur;
+  }
+  if (srtEntries.length) {
+    srtEntries[srtEntries.length - 1].endMs = shotStartMs + Math.round(slotSec * 1000);
+  }
+  return srtEntries;
+}
+
+async function synthesizeNarrationWhole(db, log, opts) {
+  const { narrText, slotSec, tempRoot, shotIndex, storageRoot, mergeOpts } = opts;
+  const segRaw = path.join(tempRoot, `narr_raw_${shotIndex}.mp3`);
+  const narrFit = path.join(tempRoot, `narr_fit_${shotIndex}.mp3`);
+  const ttsOpts = buildNarrationTtsOpts(mergeOpts);
+  let synth;
+  try {
+    synth = await require('./ttsService').synthesize(db, log, {
+      text: narrText,
+      storyboard_id: null,
+      storage_base: storageRoot,
+      ...ttsOpts,
+    });
+  } catch (e) {
+    throw new Error(`解说旁白 TTS 失败：${e.message}`);
+  }
+  const narrAbs = synth.abs_path || path.join(storageRoot, synth.local_path.replace(/\//g, path.sep));
+  if (!fs.existsSync(narrAbs)) throw new Error('旁白 TTS 文件不存在');
+  try { fs.copyFileSync(narrAbs, segRaw); } catch (_) { throw new Error('复制旁白 TTS 失败'); }
+  if (!fitAudioToSlot(segRaw, slotSec, narrFit, log)) {
+    throw new Error(`旁白时长对齐失败 #${shotIndex}`);
+  }
+  return { narrFitPath: narrFit, srtEntries: null };
+}
+
+/**
+ * @param {object} mergeOpts — burn_dialogue_audio, burn_narration_subtitles, watermark_text,
+ *   use_indextts_narration, indextts_voice, indextts_emotion, narration_subtitle_mode
  */
 async function runMergedEpisodePostProcess(db, log, opts) {
   const { mergedAbsPath, storageRoot, scenes, episodeId, mergeOpts = {} } = opts;
   const wantDial = !!mergeOpts.burn_dialogue_audio;
-  const wantNarr = !!mergeOpts.burn_narration_subtitles;
+  const wantNarr = !!mergeOpts.burn_narration_subtitles || !!mergeOpts.use_indextts_narration;
   const watermarkText = (mergeOpts.watermark_text && String(mergeOpts.watermark_text).trim())
     ? String(mergeOpts.watermark_text).trim().slice(0, 200)
     : '';
@@ -225,7 +435,6 @@ async function runMergedEpisodePostProcess(db, log, opts) {
 
   const tempRoot = path.join(require('os').tmpdir(), 'drama-merged-post', String(episodeId || 0), String(Date.now()));
   fs.mkdirSync(tempRoot, { recursive: true });
-  const ttsService = require('./ttsService');
 
   try {
     let alignedAudioPath = null;
@@ -246,11 +455,8 @@ async function runMergedEpisodePostProcess(db, log, opts) {
         ).get(sbId);
 
         const narrText = (row?.narration && String(row.narration).trim()) ? String(row.narration).trim() : '';
-        if (wantNarr && narrText) {
-          const durMs = Math.round(slotSec * 1000);
-          srtLines.push(String(srtIdx++), `${formatSrtTimestamp(tMs)} --> ${formatSrtTimestamp(tMs + durMs)}`, narrText, '');
-        }
-        tMs += Math.round(slotSec * 1000);
+        const perLine = usePerLineNarration(mergeOpts);
+        const shotStartMs = tMs;
 
         const diaFit = path.join(tempRoot, `dia_fit_${i}.mp3`);
         const narrFit = path.join(tempRoot, `narr_fit_${i}.mp3`);
@@ -269,37 +475,74 @@ async function runMergedEpisodePostProcess(db, log, opts) {
         }
 
         if (wantNarr) {
-          if (!narrText) {
+          const prebuiltNarrAbs = resolveStorageAudioAbs(storageRoot, row?.narration_audio_local_path);
+          if (!narrText && !prebuiltNarrAbs) {
             if (!writeSilenceMp3(slotSec, narrFit, log)) {
               return { ok: false, error: `旁白静音片段失败 #${i}` };
             }
-          } else {
-            const segRaw = path.join(tempRoot, `narr_raw_${i}.mp3`);
-            let synth;
+          } else if (prebuiltNarrAbs) {
+            if (perLine && narrText) {
+              const srtEntries = buildSrtEntriesFromPrebuiltNarration(narrText, slotSec, shotStartMs);
+              for (const entry of srtEntries) {
+                srtLines.push(
+                  String(srtIdx++),
+                  `${formatSrtTimestamp(entry.startMs)} --> ${formatSrtTimestamp(entry.endMs)}`,
+                  entry.text,
+                  ''
+                );
+              }
+            } else if (narrText) {
+              const durMs = Math.round(slotSec * 1000);
+              srtLines.push(String(srtIdx++), `${formatSrtTimestamp(shotStartMs)} --> ${formatSrtTimestamp(shotStartMs + durMs)}`, narrText, '');
+            }
+            if (!fitAudioToSlot(prebuiltNarrAbs, slotSec, narrFit, log)) {
+              return { ok: false, error: `旁白配音时长对齐失败 #${i}` };
+            }
+          } else if (perLine) {
             try {
-              synth = await ttsService.synthesize(db, log, {
-                text: narrText,
-                storyboard_id: null,
-                storage_base: storageRoot,
+              const { narrFitPath, srtEntries } = await synthesizeNarrationPerLine(db, log, {
+                narrText,
+                slotSec,
+                tempRoot,
+                shotIndex: i,
+                storageRoot,
+                mergeOpts,
+                shotStartMs,
               });
+              for (const entry of srtEntries) {
+                srtLines.push(
+                  String(srtIdx++),
+                  `${formatSrtTimestamp(entry.startMs)} --> ${formatSrtTimestamp(entry.endMs)}`,
+                  entry.text,
+                  ''
+                );
+              }
+              try { fs.copyFileSync(narrFitPath, narrFit); } catch (_) { return { ok: false, error: `旁白片段复制失败 #${i}` }; }
+            } catch (e) {
+              log.warn('merged post: per-line narration failed', { segment: i, error: e.message });
+              return { ok: false, error: e.message };
+            }
+          } else {
+            const durMs = Math.round(slotSec * 1000);
+            srtLines.push(String(srtIdx++), `${formatSrtTimestamp(shotStartMs)} --> ${formatSrtTimestamp(shotStartMs + durMs)}`, narrText, '');
+            try {
+              const { narrFitPath } = await synthesizeNarrationWhole(db, log, {
+                narrText,
+                slotSec,
+                tempRoot,
+                shotIndex: i,
+                storageRoot,
+                mergeOpts,
+              });
+              try { fs.copyFileSync(narrFitPath, narrFit); } catch (_) { return { ok: false, error: `旁白片段复制失败 #${i}` }; }
             } catch (e) {
               log.warn('merged post: narration TTS failed', { segment: i, error: e.message });
-              return { ok: false, error: `解说旁白 TTS 失败：${e.message}` };
-            }
-            const narrAbs = path.join(storageRoot, synth.local_path.replace(/\//g, path.sep));
-            if (!fs.existsSync(narrAbs)) {
-              return { ok: false, error: `旁白 TTS 文件不存在` };
-            }
-            try {
-              fs.copyFileSync(narrAbs, segRaw);
-            } catch (_) {
-              return { ok: false, error: '复制旁白 TTS 失败' };
-            }
-            if (!fitAudioToSlot(segRaw, slotSec, narrFit, log)) {
-              return { ok: false, error: `旁白时长对齐失败 #${i}` };
+              return { ok: false, error: e.message };
             }
           }
         }
+
+        tMs += Math.round(slotSec * 1000);
 
         if (wantDial && wantNarr) {
           if (!amixTwoTracks(diaFit, narrFit, slotSec, segOut, log)) {
@@ -343,45 +586,24 @@ async function runMergedEpisodePostProcess(db, log, opts) {
     const outAbs = path.join(path.dirname(mergedAbsPath), `${baseName}_post.mp4`);
 
     const hasSubs = !!(srtPath && fs.existsSync(srtPath));
-    const hasWm = !!watermarkText;
-
-    const vfParts = [];
-    if (hasSubs) {
-      const subEsc = escapeFfmpegPath(srtPath);
-      vfParts.push(`subtitles='${subEsc}':charenc=UTF-8`);
-    }
-    if (hasWm) {
-      const wmFile = path.join(tempRoot, 'watermark.txt');
-      fs.writeFileSync(wmFile, watermarkText, 'utf8');
-      const wmEsc = escapeFfmpegPath(wmFile);
-      const fontOpt = getDrawtextFontOption();
-      vfParts.push(
-        `drawtext=textfile='${wmEsc}':reload=1${fontOpt}:x=w-tw-16:y=h-th-16:fontsize=22:fontcolor=white@0.82:borderw=2:bordercolor=black@0.55`
-      );
-    }
-    let filterComplex = '';
-    if (vfParts.length === 1) {
-      filterComplex = `[0:v]${vfParts[0]}[vout]`;
-    } else if (vfParts.length === 2) {
-      filterComplex = `[0:v]${vfParts[0]}[vx];[vx]${vfParts[1]}[vout]`;
-    }
+    const subtitleStyle = resolveSubtitleForceStyle(db, episodeId);
+    const filterComplex = buildVideoFilterParts(hasSubs ? srtPath : null, watermarkText, tempRoot, subtitleStyle);
+    let subsBurnSkipped = false;
 
     if (needAudio) {
       if (!alignedAudioPath || !fs.existsSync(alignedAudioPath)) {
         return { ok: false, error: '内部错误：缺少对齐音轨' };
       }
-      const args = ['-y', '-i', mergedAbsPath, '-i', alignedAudioPath];
-      if (filterComplex) {
-        args.push('-filter_complex', filterComplex, '-map', '[vout]', '-map', '1:a');
-      } else {
-        args.push('-map', '0:v', '-map', '1:a');
-      }
-      args.push(
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-        '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', outAbs
-      );
-      if (!runFfmpeg(args, log, 'mux_av')) {
-        return { ok: false, error: '烧录字幕/水印或混音失败（请确认 ffmpeg 含 libx264）' };
+      if (!muxVideoWithAudio(mergedAbsPath, alignedAudioPath, outAbs, filterComplex, log, 'mux_av')) {
+        if (hasSubs && filterComplex) {
+          log.warn('merged post: subtitle burn failed, retrying audio-only mux');
+          if (!muxVideoWithAudio(mergedAbsPath, alignedAudioPath, outAbs, '', log, 'mux_audio_only')) {
+            return { ok: false, error: '混音失败（请确认 ffmpeg 含 libx264 与 ffprobe 可用）' };
+          }
+          subsBurnSkipped = true;
+        } else {
+          return { ok: false, error: '烧录字幕/水印或混音失败（请确认 ffmpeg 含 libx264 与 libass）' };
+        }
       }
     } else {
       if (!filterComplex) {
@@ -413,8 +635,12 @@ async function runMergedEpisodePostProcess(db, log, opts) {
       log.warn('merged post: could not remove intermediate', { error: e.message });
     }
 
-    log.info('merged post: done', { episode_id: episodeId, video: relFromRoot });
-    return { ok: true, relativePath: relFromRoot };
+    log.info('merged post: done', { episode_id: episodeId, video: relFromRoot, subs_burn_skipped: subsBurnSkipped });
+    return {
+      ok: true,
+      relativePath: relFromRoot,
+      warning: subsBurnSkipped ? '旁白/对白已混入，但字幕烧录失败（请使用含 libass 的 ffmpeg 完整版）' : undefined,
+    };
   } catch (e) {
     log.warn('merged post: exception', { error: e.message });
     return { ok: false, error: e.message || String(e) };
@@ -440,7 +666,128 @@ function ffprobeHasAudio(filePath) {
   return r.status === 0 && String(r.stdout || '').trim().length > 0;
 }
 
+/**
+ * 单镜视频后处理：全文解说模式下 IndexTTS 逐句旁白 + 烧录字幕
+ */
+async function runStoryboardNarrationPostProcess(db, log, opts) {
+  const { videoAbsPath, storageRoot, storyboardId, dramaId } = opts;
+  const videoClient = require('./videoClient');
+  if (!videoClient.isDramaFullNarrationVideoMode(db, dramaId)) {
+    return { ok: false, error: 'NOT_FULL_NARRATION' };
+  }
+  if (!videoAbsPath || !fs.existsSync(videoAbsPath)) {
+    return { ok: false, error: '无效视频路径' };
+  }
+
+  const sb = db.prepare(
+    'SELECT narration, duration, narration_audio_local_path FROM storyboards WHERE id = ? AND deleted_at IS NULL'
+  ).get(storyboardId);
+  const narrText = (sb?.narration && String(sb.narration).trim()) ? String(sb.narration).trim() : '';
+  if (!narrText) {
+    return { ok: false, error: 'NO_NARRATION' };
+  }
+
+  const videoDur = ffprobeDurationSec(videoAbsPath);
+  if (videoDur == null) {
+    return { ok: false, error: '无法读取视频时长' };
+  }
+
+  const mergeOpts = {
+    use_indextts_narration: true,
+    indextts_voice: 'gsv:008',
+    indextts_emotion: '自然流畅的解说语气，情绪饱满',
+  };
+
+  const tempRoot = path.join(require('os').tmpdir(), 'drama-sb-narr-post', String(storyboardId), String(Date.now()));
+  fs.mkdirSync(tempRoot, { recursive: true });
+
+  try {
+    const prebuiltNarrAbs = resolveStorageAudioAbs(storageRoot, sb?.narration_audio_local_path);
+    let narrFitPath;
+    let srtEntries;
+
+    if (prebuiltNarrAbs) {
+      narrFitPath = path.join(tempRoot, 'narr_prebuilt_fit.mp3');
+      if (!fitAudioToSlot(prebuiltNarrAbs, videoDur, narrFitPath, log)) {
+        return { ok: false, error: '预生成旁白配音时长对齐失败' };
+      }
+      srtEntries = buildSrtEntriesFromPrebuiltNarration(narrText, videoDur, 0);
+      log.info('sb narr post: using prebuilt narration audio', { storyboard_id: storyboardId });
+    } else {
+      const synthResult = await synthesizeNarrationPerLine(db, log, {
+        narrText,
+        slotSec: videoDur,
+        tempRoot,
+        shotIndex: 0,
+        storageRoot,
+        mergeOpts,
+        shotStartMs: 0,
+      });
+      narrFitPath = synthResult.narrFitPath;
+      srtEntries = synthResult.srtEntries;
+      log.info('sb narr post: synthesized narration (no prebuilt audio)', { storyboard_id: storyboardId });
+    }
+
+    if (!srtEntries || srtEntries.length === 0) {
+      return { ok: false, error: '旁白字幕为空' };
+    }
+
+    const srtLines = [];
+    let srtIdx = 1;
+    for (const e of srtEntries) {
+      srtLines.push(String(srtIdx++), `${formatSrtTimestamp(e.startMs)} --> ${formatSrtTimestamp(e.endMs)}`, e.text, '');
+    }
+
+    const baseName = path.basename(videoAbsPath, path.extname(videoAbsPath));
+    const srtPath = path.join(path.dirname(videoAbsPath), `${baseName}_narration.srt`);
+    fs.writeFileSync(srtPath, `\uFEFF${srtLines.join('\n')}\n`, 'utf8');
+
+    const outAbs = path.join(path.dirname(videoAbsPath), `${baseName}_narr.mp4`);
+    const filterComplex = buildVideoFilterParts(srtPath, '', tempRoot, FULL_NARRATION_SUBTITLE_FORCE_STYLE);
+    let subsBurnSkipped = false;
+
+    if (!muxVideoWithAudio(videoAbsPath, narrFitPath, outAbs, filterComplex, log, 'sb_narr_mux')) {
+      if (filterComplex && !muxVideoWithAudio(videoAbsPath, narrFitPath, outAbs, '', log, 'sb_narr_mux_audio')) {
+        return { ok: false, error: '旁白混音失败（请确认 ffmpeg 含 libx264 与 ffprobe 可用）' };
+      }
+      subsBurnSkipped = true;
+    }
+
+    if (!fs.existsSync(outAbs)) {
+      return { ok: false, error: '输出文件未生成' };
+    }
+
+    try {
+      if (fs.existsSync(videoAbsPath) && outAbs !== videoAbsPath) {
+        fs.unlinkSync(videoAbsPath);
+      }
+    } catch (e) {
+      log.warn('sb narr post: could not remove silent video', { error: e.message });
+    }
+
+    const relFromRoot = path.relative(storageRoot, outAbs).replace(/\\/g, '/');
+    log.info('sb narr post: done', { storyboard_id: storyboardId, video: relFromRoot, subs_burn_skipped: subsBurnSkipped });
+    return {
+      ok: true,
+      relativePath: relFromRoot,
+      warning: subsBurnSkipped ? '旁白已混入，但字幕烧录失败（请使用含 libass 的 ffmpeg 完整版）' : undefined,
+    };
+  } catch (e) {
+    log.warn('sb narr post: exception', { storyboard_id: storyboardId, error: e.message });
+    return { ok: false, error: e.message || String(e) };
+  } finally {
+    try {
+      for (const p of fs.readdirSync(tempRoot)) {
+        try { fs.unlinkSync(path.join(tempRoot, p)); } catch (_) {}
+      }
+      fs.rmdirSync(tempRoot);
+    } catch (_) {}
+  }
+}
+
 module.exports = {
   runMergedEpisodePostProcess,
+  runStoryboardNarrationPostProcess,
+  buildSrtEntriesFromPrebuiltNarration,
   ffprobeDurationSec,
 };

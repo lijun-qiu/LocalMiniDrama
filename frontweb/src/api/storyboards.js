@@ -164,4 +164,16 @@ export const storyboardsAPI = {
   resyncFullNarration(episodeId) {
     return request.post(`/episodes/${episodeId}/resync-full-narration`, {})
   },
+  /** 补全本集缺失的生图提示词（polished_prompt，跳过已有） */
+  completeMissingImagePrompts(episodeId) {
+    return request.post(`/episodes/${episodeId}/complete-missing-image-prompts`, {})
+  },
+  /** 补全本集缺失的视频提示词 */
+  completeMissingVideoPrompts(episodeId) {
+    return request.post(`/episodes/${episodeId}/complete-missing-video-prompts`, {})
+  },
+  /** 全文解说：按旁白配音时长刷新 duration 并 AI 生成生图+视频提示词 */
+  generatePromptsFromAudioDuration(episodeId, body = {}) {
+    return request.post(`/episodes/${episodeId}/generate-prompts-from-audio`, body)
+  },
 }

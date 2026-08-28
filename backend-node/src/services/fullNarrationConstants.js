@@ -1,10 +1,10 @@
-/** 中文解说朗读语速默认值：5.5 字/秒（不含标点） */
-const NARRATION_CHARS_PER_SEC_DEFAULT = 5.5;
+/** 中文解说朗读语速默认值：5 字/秒（不含标点；约 50 字 ≈ 10 秒） */
+const NARRATION_CHARS_PER_SEC_DEFAULT = 5;
 /**
  * 全文解说分段（统一规则）：
- * - 目标约 9 秒 / 50 字（= 语速 × 9）
- * - 硬上限 10 秒 / 55 字（= 语速 × 10）
- * - 只在句读符号处切开；即将超 55 字时退回上一符号
+ * - 目标约 9 秒 / 45 字（= 语速 × 9）
+ * - 硬上限 10 秒 / 50 字（= 语速 × 10）
+ * - 只在句读符号处切开；即将超上限字时退回上一符号
  */
 const FULL_NARRATION_TARGET_SEC = 9;
 const FULL_NARRATION_MAX_SEC = 10;

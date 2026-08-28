@@ -414,13 +414,29 @@ async function synthesizeNarrationWhole(db, log, opts) {
 async function runMergedEpisodePostProcess(db, log, opts) {
   const { mergedAbsPath, storageRoot, scenes, episodeId, mergeOpts = {} } = opts;
   const wantDial = !!mergeOpts.burn_dialogue_audio;
-  const wantNarr = !!mergeOpts.burn_narration_subtitles || !!mergeOpts.use_indextts_narration;
+  let wantNarr = !!mergeOpts.burn_narration_subtitles || !!mergeOpts.use_indextts_narration;
   const watermarkText = (mergeOpts.watermark_text && String(mergeOpts.watermark_text).trim())
     ? String(mergeOpts.watermark_text).trim().slice(0, 200)
     : '';
 
   if (!mergedAbsPath || !fs.existsSync(mergedAbsPath) || !Array.isArray(scenes) || scenes.length === 0) {
     return { ok: false, error: '无效合成参数' };
+  }
+
+  // 全文解说：单镜生成后已跑过 runStoryboardNarrationPostProcess（混旁白 + 烧字幕）。
+  // 成片再烧一遍会叠出「两层字幕」，旁白音轨也会重复；此处跳过旁白后处理。
+  if (wantNarr && episodeId) {
+    try {
+      const ep = db.prepare('SELECT drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL').get(Number(episodeId));
+      const { isDramaFullNarrationVideoMode } = require('./videoClient');
+      if (ep?.drama_id && isDramaFullNarrationVideoMode(db, ep.drama_id)) {
+        wantNarr = false;
+        log.info('merged post: skip narration burn/mix (already applied per storyboard)', {
+          episode_id: episodeId,
+          drama_id: ep.drama_id,
+        });
+      }
+    } catch (_) {}
   }
 
   const needAudio = wantDial || wantNarr;

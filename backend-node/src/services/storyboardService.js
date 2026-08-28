@@ -55,6 +55,13 @@ function syncStoryboardCharacterLinks(db, storyboardId, dramaCharacterIds) {
   }
 }
 
+/** 从 storyboards.characters 列读取并同步 storyboard_characters（分镜生成后调用） */
+function syncStoryboardCharacterLinksFromCharactersColumn(db, storyboardId) {
+  const row = db.prepare('SELECT characters FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(Number(storyboardId));
+  const ids = parseDramaCharacterIds(row?.characters) ?? [];
+  syncStoryboardCharacterLinks(db, storyboardId, ids);
+}
+
 function createStoryboard(db, log, req) {
   const now = new Date().toISOString();
   const episodeId = Number(req.episode_id);
@@ -307,4 +314,7 @@ module.exports = {
   getStoryboardById,
   getFramePrompts,
   saveFramePrompt,
+  parseDramaCharacterIds,
+  syncStoryboardCharacterLinks,
+  syncStoryboardCharacterLinksFromCharactersColumn,
 };

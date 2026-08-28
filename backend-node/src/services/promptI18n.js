@@ -461,10 +461,10 @@ function formatUserPrompt(cfg, key, ...args) {
       character_list_label: '【Available Character List】',
       scene_list_label: '【Extracted Scene Backgrounds】',
       task_instruction: 'Break down the novel script into storyboard shots based on **independent action units**.',
-      character_constraint: '**Important** — characters field rules:\n1. Only use character IDs (numbers) from the above character list. Do not invent IDs.\n2. Only include characters who **physically appear and act** in this specific shot. Do NOT list characters who are merely mentioned, offscreen, or appear in the overall scene but not in this shot.\n3. The number of characters listed must match who is described in the action/dialogue fields. If the action only describes one person, list only that one character.\n4. **Video/voice call or remote meeting**: use the **person who answers/receives the call** as the on-screen subject. characters must list only that receiver; the remote party may appear only on a phone/screen inset or as voice — never both people physically in the same frame.',
+      character_constraint: '**Important** — characters field rules:\n1. Only use character IDs (numbers) from the above character list. Do not invent IDs.\n2. Only include characters who **physically appear and act** in this specific shot. Do NOT list characters who are merely mentioned, offscreen, or appear in the overall scene but not in this shot.\n3. The number of characters listed must match who is described in the action/dialogue fields. If the action only describes one person, list only that one character.\n4. **MUST fill**: if action/dialogue/narration names a character from the list who is on screen, their ID **must** appear in characters — never leave characters as [] when someone is clearly in the shot.\n5. **Video/voice call or remote meeting**: use the **person who answers/receives the call** as the on-screen subject. characters must list only that receiver; the remote party may appear only on a phone/screen inset or as voice — never both people physically in the same frame.',
       scene_constraint: '**Important**: In the scene_id field, select the most matching background ID (number) from the above background list. If no suitable background exists, use null.',
       prop_list_label: '【Available Prop List】',
-      prop_constraint: '**Important** — props field rules:\n1. Only use prop IDs (numbers) from the above prop list. Do not invent IDs.\n2. Only include props that are **visually present and actively used or prominently featured** in this specific shot.\n3. If no props from the list appear in the shot, use an empty array [].',
+      prop_constraint: '**Important** — props field rules:\n1. Only use prop IDs (numbers) from the above prop list. Do not invent IDs.\n2. Only include props that are **visually present and actively used or prominently featured** in this specific shot.\n3. **MUST fill**: if action/dialogue/narration clearly shows a listed prop on screen, include its ID — do not default to [] out of caution.\n4. If no props from the list appear in the shot, use an empty array [].',
       frame_info: 'Shot information:\n%s\n\nPlease directly generate the image prompt for the first frame without any explanation:',
       key_frame_info: 'Shot information:\n%s\n\nPlease directly generate the image prompt for the key frame without any explanation:',
       last_frame_info: 'Shot information:\n%s\n\nPlease directly generate the image prompt for the last frame without any explanation:',
@@ -489,10 +489,10 @@ function formatUserPrompt(cfg, key, ...args) {
       character_list_label: '【本剧可用角色列表】',
       scene_list_label: '【本剧已提取的场景背景列表】',
       task_instruction: '将小说剧本按**独立动作单元**拆解为分镜头方案。',
-      character_constraint: '**重要** — characters字段填写规则：\n1. 只能使用上述角色列表中的角色ID（数字），不得自创ID。\n2. 只填写在**本镜头中实际出现并有具体行为**的角色。不要把"提到的"、"画面外的"、或整个场景里有但本镜头动作中未描述的角色也列进去。\n3. characters数量必须与action/dialogue中实际描写的人物数量一致。如果action只描述了一个人的动作，characters里就只填那一个人的ID。\n4. **视频电话/语音电话/远程会议**：以**接听方**为主镜构图，characters只填接听方一人；对方仅可在手机/屏幕小窗或画外音中出现，禁止两人实体同框。',
+      character_constraint: '**重要** — characters字段填写规则：\n1. 只能使用上述角色列表中的角色ID（数字），不得自创ID。\n2. 只填写在**本镜头中实际出现并有具体行为**的角色。不要把"提到的"、"画面外的"、或整个场景里有但本镜头动作中未描述的角色也列进去。\n3. characters数量必须与action/dialogue中实际描写的人物数量一致。如果action只描述了一个人的动作，characters里就只填那一个人的ID。\n4. **必须填写**：若 action/dialogue/narration 中点名且画面内出现列表中的角色，则 characters **必须**包含其ID，禁止在有人出镜时仍填空数组[]。\n5. **视频电话/语音电话/远程会议**：以**接听方**为主镜构图，characters只填接听方一人；对方仅可在手机/屏幕小窗或画外音中出现，禁止两人实体同框。',
       scene_constraint: '**重要**：在scene_id字段中，必须从上述背景列表中选择最匹配的背景ID（数字）。如果没有合适的背景，则填null。',
       prop_list_label: '【本集可用道具列表】',
-      prop_constraint: '**重要** — props字段填写规则：\n1. 只能使用上述道具列表中的道具ID（数字），不得自创ID。\n2. 只填写在**本镜头中视觉上出现并被使用或显著展示**的道具。\n3. 如果本镜头中没有列表中的道具出现，则填空数组[]。',
+      prop_constraint: '**重要** — props字段填写规则：\n1. 只能使用上述道具列表中的道具ID（数字），不得自创ID。\n2. 只填写在**本镜头中视觉上出现并被使用或显著展示**的道具。\n3. **必须填写**：若 action/dialogue/narration 明确写出列表中的道具出现在画面中，则 props **必须**包含其ID，禁止因保守而一律填[]。\n4. 如果本镜头中没有列表中的道具出现，则填空数组[]。',
       frame_info: '镜头信息：\n%s\n\n请直接生成首帧的图像提示词（JSON 的 prompt 字段必须全文中文），不要任何解释：',
       key_frame_info: '镜头信息：\n%s\n\n请直接生成关键帧的图像提示词（JSON 的 prompt 字段必须全文中文），不要任何解释：',
       last_frame_info: '镜头信息：\n%s\n\n请直接生成尾帧的图像提示词（JSON 的 prompt 字段必须全文中文），不要任何解释：',
@@ -714,7 +714,7 @@ ${ffScaleContract}
 1. 聚焦初始静态状态 - 动作发生之前的那一瞬间，禁止包含任何动作或运动描述
 2. 描述角色在画面中的位置（画面左/中/右）、朝向（面向/背对/侧面）、初始姿态和表情
 3. 【出场角色铁律】仅允许 CONTEXT 中「本分镜允许出场的角色」名单内的人物出现；名单外角色严禁写入 prompt（不得出现其名字、站位、动作、表情）
-4. 【角色外貌写法铁律 - 违反即失败】每个允许出场的角色在 prompt 中**只能**写为「角色名（参考图中的人物形象）」+ 画面位置 + 姿态 + 表情 + 手持道具；括号内及前后**严禁**写发型、发色、发长、五官、面容、眉眼、轮廓、肤质、妆容、气质等任何外貌词。**禁止**把锚点/appearance 里的外貌特征抄进 prompt（图生图由参考图锁定外貌）
+4. 【角色外貌写法铁律 - 违反即失败】每个允许出场的角色在 prompt 中**只能**写为「**真实角色名**（参考图中的人物形象）」+ 画面位置 + 姿态 + 表情 + 手持道具；**严禁**「角色A/B」「参照角色A」等匿名占位。括号内及前后**严禁**写发型、发色、发长、五官、面容、眉眼、轮廓、肤质、妆容、气质等任何外貌词。**禁止**把锚点/appearance 里的外貌特征抄进 prompt（图生图由参考图锁定外貌）
 5. 【场景描写铁律】「场景为…」「环境…」等空间/环境句**严禁**出现任何人物外貌描写，只写空间、道具、光线、氛围
 6. 如 CONTEXT 提供了角色视觉锚点，仅供理解身份，**不得**将锚点内容写入 prompt 正文
 
@@ -1411,7 +1411,8 @@ CRITICAL RULES:
 4. Length: 50–100 words
 5. Structure: [Shot framing] + [Scene/environment] + [Characters' frozen poses/expressions] + [Lighting at this exact instant] + [Atmosphere] + [Style tokens]
 6. Describe characters' POSE and EXPRESSION at peak moment — not their motion arc
-7. Preserve character names exactly as listed in ASSETS (they are reference image anchors)
+7. Preserve character names exactly as listed in ASSETS (they are reference image anchors). NEVER use anonymous placeholders like "Character A", "reference character B", or role numbers — when ASSETS lists real names, use those names verbatim.
+7b. **Asset lock (polish wording only):** Do NOT add/remove/replace scene, characters, or props vs the input shot. No inventing people/places/props absent from ASSETS and storyboard fields. Only improve phrasing and cinematic readability; cast and setting must stay identical.
 8. **Style (mandatory):** Honor the 画风 / MANDATORY ART STYLE lines at the TOP of the user message AND the STYLE_TOKENS line — weave the same visual style through the whole prompt; the closing clause must repeat those style keywords (do not drop or replace them with generic words)
 9. CONTINUITY: If PREV_CONTINUITY_STATE is provided, you MUST maintain consistency with the previous shot:
    - Match character clothing exactly (same outfit, same accessories)
@@ -1459,7 +1460,9 @@ CONTEXT_NEXT: <next shot summary — ignore for image, relevant only for mood>`;
    - 服装、穿着、配饰完全由参考图（ASSETS 中列出的角色参考图）决定，**文字提示词中绝不出现任何服装相关词汇**。
    - 只有当固定身份特征中本来就包含眼镜、疤痕、纹身等辨识标记时，才可极简提及；否则一律不提。
 
-6. 严格保留 ASSETS 列表中的角色名称（它们是参考图锚点），格式示例：“李娟（圆脸、高鼻梁、短发、面容略带疲惫）”。
+6. 严格保留 ASSETS 列表中的角色名称（它们是参考图锚点），格式示例：“李娟（圆脸、高鼻梁、短发、面容略带疲惫）”。**严禁**使用「参照角色A/B」「角色A」「男一号」等匿名占位；ASSETS 非空时必须逐字写出其中的真实姓名。
+
+6.5. **资产守恒（只润色文案，不改分镜绑定）**：不得增删、替换或改名本镜已给出的场景、角色、道具；不得引入 ASSETS/分镜字段未出现的人物、地点或道具。仅优化措辞、镜头语言与画面可读性，事实与出场名单与输入完全一致。
 
 7. **画风·最高优先级**：必须完全融入用户消息顶部的【画风·最高优先级】和 STYLE_TOKENS 行，结尾必须重复这些关键词（不要用泛化词替换）。
 
@@ -1554,6 +1557,7 @@ FULL-NARRATION RULES:
 4. **Title shot (empty narration)**: shot 1 = establishing/title mood; omit 「解说旁白：」 clause.
 5. **Dialogue field**: keep in 「对话：」 if present, but action still treats speech as silent (no mouth movement).
 6. **Fact conservation**: do not change duration seconds, =VideoRatio, angle English parentheticals, or invent plot.
+6b. **Asset lock (polish/generate wording only):** do NOT change the shot's bound scene, character roster, or props; do not add/remove/replace people, places, or props vs storyboard fields.
 7. **Dynamic video language**: camera motion and pacing must fit duration seconds.
 8. **Content moderation**: soften explicit romance/violence/harassment while keeping causality.
 9. Weave VISUAL_STYLE into 「风格：」 naturally.`;
@@ -1572,6 +1576,7 @@ FULL-NARRATION RULES:
 4. **片头镜（narration 为空）**：第 1 镜为标题/定场氛围镜，动作为慢运镜或象征性画面，**省略**「解说旁白：」分句。
 5. **对话字段**：若有 dialogue，保留在「对话：」分句（逐字），但动作描述仍按无声处理——人物不张口说话。
 6. **事实守恒**：不得删改场景、动作要点、结果、景别、镜头角度（含括号内完整英文技术描述）、运镜、**时长：Xs**、**=VideoRatio:**；禁止编造剧本与字段未写的情节。
+6.5. **资产守恒（只润色/生成文案）**：不得改变本镜绑定的场景、角色名单、道具；不得增删或替换出场人物/地点/道具。
 7. **动态视频语言**：运镜、切镜、节奏须与本镜 duration 秒数匹配；首帧参考图已锁定人物/场景外观，文案负责动效与节奏。
 8. **内容合规**：弱化露骨婚恋/性暗示/暴力/骚扰等敏感表述，保留剧情因果；USER_INSTRUCTION 优先。
 9. 自然融入 VISUAL_STYLE 至「风格：」分句；保留角色姓名。`;
@@ -1626,6 +1631,7 @@ HARD RULES:
 2. Preserve ALL factual beats from STORYBOARD_FIELDS / AUTO_COMPOSED / CURRENT_VIDEO_DRAFT: scene, action, dialogue verbatim in 「」, narration, result, shot size, angle (keep full English parenthetical if present), movement, atmosphere, BGM/SFX if any, emotion intensity numbers, duration seconds, =VideoRatio line.
 3. Do NOT change duration seconds or aspect ratio token.
 4. Do NOT invent plot absent from script + fields + draft.
+4b. Asset lock: polish wording only — do NOT change the shot's bound scene, character roster, or props; do not add/remove/replace people, places, or props.
 5. Dynamic video language allowed (camera motion, transitions, pacing) — unlike static image polish.
 6. If USER_INSTRUCTION is provided (e.g. remove sensitive wording, pass content moderation), follow it while keeping story meaning; soften explicit romance/harassment/violence triggers, use euphemistic phrasing, avoid sexualized crowd descriptions.
 7. Re-polish must rephrase noticeably vs CURRENT_VIDEO_DRAFT when user clicks again; same facts, new wording.
@@ -1640,6 +1646,7 @@ HARD RULES:
 1. **只输出成稿**，无任何解释、前言、JSON、代码块。
 2. **事实守恒**：不得删改 STORYBOARD_FIELDS / AUTO_COMPOSED / CURRENT_VIDEO_DRAFT 中的叙事要点——场景、动作、对白（须逐字保留「」内台词）、解说旁白、结果、景别、镜头角度（含括号内完整英文技术描述）、运镜、氛围、配乐/音效/情绪强度数值、**时长：Xs**、**=VideoRatio:** 画幅行。
 3. **禁止**改 duration 秒数与 =VideoRatio 值；禁止编造剧本与字段未写的情节。
+3.5. **资产守恒（只润色文案）**：不得改变本镜绑定的场景、角色名单、道具；不得增删或替换出场人物/地点/道具；仅优化表述与镜头语言。
 4. **允许**使用动态视频语言（运镜、切镜、节奏、声画暗示），与静态图 prompt 不同。
 5. **内容合规（USER_INSTRUCTION 优先）**：若用户要求去掉敏感描述、防止审核失败，须在保留剧情含义前提下：弱化露骨婚恋/性暗示/群体骚扰等表述，用含蓄中性措辞；避免暴力、仇恨、未成年相关敏感描写；不改变人物关系与事件因果。
 6. **多次润色**：与 CURRENT_VIDEO_DRAFT 相比须明显换表述，不得仅改标点。

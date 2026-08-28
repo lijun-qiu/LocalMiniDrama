@@ -7,6 +7,12 @@ export const aiVoicesAPI = {
   indexttsEnsure() {
     return request.post('/ai-voices/indextts/ensure')
   },
+  indexttsLoad() {
+    return request.post('/ai-voices/indextts/load')
+  },
+  indexttsUnload() {
+    return request.post('/ai-voices/indextts/unload')
+  },
   listCloneVoices() {
     return request.get('/ai-voices/clone/voices')
   },

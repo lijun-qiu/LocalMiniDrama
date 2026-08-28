@@ -970,7 +970,7 @@ input_reference = (图片文件，可选)</pre>
             <li><b>文本/对话</b>：Agnes 2.0 Flash（agnes-2.0-flash）— 生成故事剧本</li>
             <li><b>文本生成图片</b>：Agnes Image 2.1 Flash — 角色/场景/道具图</li>
             <li><b>分镜图片生成</b>：Agnes Image 2.1 Flash — 支持参考图编辑</li>
-            <li><b>视频生成</b>：Agnes Video 2.0（agnes-video-v2.0，默认）/ 2.5（agnes-video-2.5）— 生成视频片段</li>
+            <li><b>视频生成</b>：Agnes Video 2.5 Flash（agnes-video-2.5-flash，默认，限时免费）/ 2.5 / 2.0 — 生成视频片段</li>
           </ul>
         </div>
         <div class="one-key-section">
@@ -1351,7 +1351,7 @@ const providerConfigs = {
     },
     { id: 'openai', name: 'OpenAI', models: ['sora-2', 'sora-2-pro'] },
     { id: 'xai', name: 'xAI Grok Imagine', models: ['grok-imagine-video'] },
-    { id: 'agnes', name: 'Agnes AI', models: ['agnes-video-v2.0', 'agnes-video-2.5'] },
+    { id: 'agnes', name: 'Agnes AI', models: ['agnes-video-v2.0', 'agnes-video-2.5', 'agnes-video-2.5-flash'] },
   ],
   tts: [
     { id: 'minimax', name: 'MiniMax T2A', models: ['speech-02-hd', 'speech-02-turbo'] },
@@ -1700,7 +1700,7 @@ const AGNES_CONFIGS = [
   { service_type: 'text', name: 'Agnes 文本', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-2.0-flash'] },
   { service_type: 'image', name: 'Agnes 文本生图', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-image-2.1-flash'] },
   { service_type: 'storyboard_image', name: 'Agnes 分镜图', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-image-2.1-flash'] },
-  { service_type: 'video', name: 'Agnes 视频', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'agnes', endpoint: '/videos', query_endpoint: '/videos/{taskId}', model: ['agnes-video-v2.0', 'agnes-video-2.5'] },
+  { service_type: 'video', name: 'Agnes 视频', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'agnes', endpoint: '/videos', query_endpoint: '/videos/{taskId}', model: ['agnes-video-2.5-flash', 'agnes-video-2.5', 'agnes-video-v2.0'] },
 ]
 
 function serviceTypeLabel(t) {

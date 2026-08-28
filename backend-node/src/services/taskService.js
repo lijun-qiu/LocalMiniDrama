@@ -94,16 +94,39 @@ function cancelTask(db, log, taskId, reason) {
 
 /**
  * 进程内 setImmediate 任务在重启后会丢失；启动时将遗留的 pending/processing 标为失败，避免前端无限轮询。
+ * 例外：video_generations 已持久化 provider_task_id 的，恢复 async_task 为 processing，由 resumeProcessingVideoGenerations 续轮询。
  */
 function failOrphanedAsyncTasksOnStartup(db, log) {
-  const rows = db.prepare(
-    `SELECT id, type, status, resource_id FROM async_tasks
-     WHERE status IN ('pending', 'processing') AND deleted_at IS NULL`
-  ).all();
+  const resumableVideoTasks = db
+    .prepare(
+      `SELECT DISTINCT vg.task_id
+       FROM video_generations vg
+       WHERE vg.status = 'processing' AND vg.deleted_at IS NULL
+         AND vg.task_id IS NOT NULL AND TRIM(vg.task_id) != ''
+         AND vg.provider_task_id IS NOT NULL AND TRIM(vg.provider_task_id) != ''`
+    )
+    .all();
+  const recoveredTaskIds = new Set(
+    resumableVideoTasks.map((r) => r.task_id).filter((id) => id && String(id).trim())
+  );
+  for (const taskId of recoveredTaskIds) {
+    updateTaskStatus(db, taskId, 'processing', 50, '服务重启后继续轮询上游视频任务…');
+    log.info('Recovered video async task after startup', { task_id: taskId });
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT id, type, status, resource_id FROM async_tasks
+       WHERE status IN ('pending', 'processing') AND deleted_at IS NULL`
+    )
+    .all();
   if (!rows.length) return 0;
-  log.warn('Failing orphaned async tasks after startup', { count: rows.length });
+
+  let failed = 0;
   for (const row of rows) {
+    if (recoveredTaskIds.has(row.id)) continue;
     updateTaskError(db, row.id, ORPHAN_ASYNC_TASK_MSG);
+    failed += 1;
     log.info('Orphaned async task marked failed', {
       task_id: row.id,
       type: row.type,
@@ -111,7 +134,14 @@ function failOrphanedAsyncTasksOnStartup(db, log) {
       previous_status: row.status,
     });
   }
-  return rows.length;
+  if (failed > 0) {
+    log.warn('Failing orphaned async tasks after startup', {
+      failed,
+      recovered_video_tasks: recoveredTaskIds.size,
+      total_pending: rows.length,
+    });
+  }
+  return failed;
 }
 
 module.exports = {

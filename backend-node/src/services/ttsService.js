@@ -145,6 +145,7 @@ async function synthesize(db, log, {
   provider: providerOverride,
   emotion_text,
   output_format,
+  auto_load_indextts,
 }) {
   if (!text || !text.trim()) throw new Error('text 不能为空');
   const aiConfigService = require('./aiConfigService');
@@ -174,6 +175,7 @@ async function synthesize(db, log, {
       emotionText,
       storage_base,
       log,
+      autoLoad: auto_load_indextts === true,
     });
     if (output_format === 'wav') {
       log.info('[TTS] IndexTTS 合成完成', { storyboard_id, local_path: wavOut.local_path });

@@ -11,6 +11,7 @@ function createTestDb() {
     CREATE TABLE episodes (
       id INTEGER PRIMARY KEY, drama_id INTEGER, episode_number INTEGER, title TEXT, script_content TEXT,
       description TEXT, duration INTEGER, video_url TEXT, thumbnail TEXT, status TEXT,
+      full_narration_audio_local_path TEXT,
       created_at TEXT, updated_at TEXT, deleted_at TEXT
     );
     CREATE TABLE characters (id INTEGER PRIMARY KEY, drama_id INTEGER, name TEXT, deleted_at TEXT);
@@ -117,12 +118,22 @@ describe('clearEpisodeMedia', () => {
     const sb = db.prepare('SELECT * FROM storyboards WHERE id = 400').get();
     assert.equal(sb.video_url, null);
     assert.equal(sb.image_url, 'img.png');
+    assert.equal(sb.local_path, 'img/local.png');
     assert.equal(sb.narration_audio_local_path, 'audio/n.wav');
     const ep = db.prepare('SELECT video_url, duration FROM episodes WHERE id = 10').get();
     assert.equal(ep.video_url, null);
     assert.equal(ep.duration, 0);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM video_generations').get().n, 0);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM image_generations').get().n, 1);
+  });
+
+  it('clears video local_path when overwritten by video generation', () => {
+    const db = createTestDb();
+    db.prepare('UPDATE storyboards SET local_path = ? WHERE id = 400').run('videos/clip.mp4');
+    clearEpisodeMedia(db, { info() {} }, 10, 'videos');
+    const sb = db.prepare('SELECT local_path, video_url FROM storyboards WHERE id = 400').get();
+    assert.equal(sb.video_url, null);
+    assert.equal(sb.local_path, null);
   });
 
   it('rejects invalid kind', () => {

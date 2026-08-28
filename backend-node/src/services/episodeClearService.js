@@ -17,6 +17,13 @@ function getStorageRoot() {
   return resolveStorageRoot(loadConfig());
 }
 
+/** 分镜行 local_path 是否为视频文件（生视频完成时会覆盖 local_path） */
+function isVideoRelPath(rel) {
+  const s = String(rel || '').trim();
+  if (!s) return false;
+  return /\.(mp4|webm|mov|m4v)(\?|$)/i.test(s);
+}
+
 function collectEntityMediaPaths(row) {
   const out = [];
   for (const v of [row?.local_path, row?.image_url, row?.ref_image]) {
@@ -212,6 +219,15 @@ function clearEpisodeMedia(db, log, episodeId, kind) {
     const ph = placeholders(sbIds.length);
 
     if (type === 'narration_audio') {
+      const epRow = db.prepare('SELECT full_narration_audio_local_path FROM episodes WHERE id = ?').get(episodeId);
+      if (epRow?.full_narration_audio_local_path) {
+        if (deleteLocalRelPath(storageRoot, epRow.full_narration_audio_local_path, log, `ep${episodeId}:full-narr`)) {
+          stats.files += 1;
+        }
+        db.prepare(
+          'UPDATE episodes SET full_narration_audio_local_path = NULL, updated_at = ? WHERE id = ?'
+        ).run(now, episodeId);
+      }
       const audioRows = db
         .prepare(
           `SELECT id, narration_audio_local_path, audio_local_path FROM storyboards
@@ -284,14 +300,25 @@ function clearEpisodeMedia(db, log, episodeId, kind) {
     stats.videos = vid.rowsDeleted;
     stats.files += vid.files;
     const sbVidRows = db.prepare(`SELECT id, video_url, local_path FROM storyboards WHERE id IN (${ph})`).all(...sbIds);
+    const sbIdsVideoLocalPath = [];
     for (const sb of sbVidRows) {
-      if (deleteLocalRelPath(storageRoot, sb.local_path, log, `sb_video:${sb.id}`)) stats.files += 1;
+      if (isVideoRelPath(sb.local_path)) {
+        sbIdsVideoLocalPath.push(sb.id);
+        if (deleteLocalRelPath(storageRoot, sb.local_path, log, `sb_video:${sb.id}`)) stats.files += 1;
+      }
       if (deleteLocalRelPath(storageRoot, sb.video_url, log, `sb_video_url:${sb.id}`)) stats.files += 1;
     }
     db.prepare(
       `UPDATE storyboards SET video_url = NULL, updated_at = ?
        WHERE id IN (${ph}) AND deleted_at IS NULL`
     ).run(now, ...sbIds);
+    if (sbIdsVideoLocalPath.length > 0) {
+      const vph = placeholders(sbIdsVideoLocalPath.length);
+      db.prepare(
+        `UPDATE storyboards SET local_path = NULL, updated_at = ?
+         WHERE id IN (${vph}) AND deleted_at IS NULL`
+      ).run(now, ...sbIdsVideoLocalPath);
+    }
     db.prepare(
       `UPDATE episodes SET video_url = NULL, thumbnail = NULL, duration = 0, updated_at = ? WHERE id = ?`
     ).run(now, epId);

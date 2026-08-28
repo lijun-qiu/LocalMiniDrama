@@ -27,6 +27,18 @@ const INDEX_TTS_REQUIRED_MODEL_FILES = ['gpt.pth', 's2mel.pth', 'config.yaml'];
 let cachedHealth = null;
 let cachedHealthAt = 0;
 let ensurePromise = null;
+/** 用户显式加载后视为「模型已加载」；卸载或进程退出后清零 */
+let indexTtsModelLoaded = false;
+/** 跟踪进行中的 CLI 子进程，卸载时可终止以释放 GPU */
+const activeIndexTtsChildren = new Set();
+/** IndexTTS CLI 每次启动都会占满 GPU，必须串行执行，否则多路并发会卡死 */
+let indexTtsCliChain = Promise.resolve();
+
+function enqueueIndexTtsCli(taskFn) {
+  const run = indexTtsCliChain.then(() => taskFn());
+  indexTtsCliChain = run.catch(() => {});
+  return run;
+}
 
 function listMissingIndexTtsModelFiles(modelDir = INDEX_TTS_MODEL_DIR) {
   return INDEX_TTS_REQUIRED_MODEL_FILES.filter((f) => !fs.existsSync(path.join(modelDir, f)));
@@ -50,6 +62,10 @@ function invalidateIndexTtsHealthCache() {
 }
 
 function runIndexTtsCli(args, timeoutMs = INDEX_TTS_TIMEOUT_MS) {
+  return enqueueIndexTtsCli(() => runIndexTtsCliInner(args, timeoutMs));
+}
+
+function runIndexTtsCliInner(args, timeoutMs = INDEX_TTS_TIMEOUT_MS) {
   const python = fs.existsSync(INDEX_TTS_PYTHON) ? INDEX_TTS_PYTHON : 'python';
   return new Promise((resolve, reject) => {
     const child = spawn(python, ['-m', 'indextts.cli_v2', ...args], {
@@ -69,8 +85,14 @@ function runIndexTtsCli(args, timeoutMs = INDEX_TTS_TIMEOUT_MS) {
       child.kill('SIGTERM');
       reject(new Error(`IndexTTS2 超时（${timeoutMs}ms）`));
     }, timeoutMs);
-    child.on('error', (err) => { clearTimeout(timer); reject(err); });
+    activeIndexTtsChildren.add(child);
+    child.on('error', (err) => {
+      activeIndexTtsChildren.delete(child);
+      clearTimeout(timer);
+      reject(err);
+    });
     child.on('close', (code) => {
+      activeIndexTtsChildren.delete(child);
       clearTimeout(timer);
       resolve({ code: code ?? 1, stdout, stderr });
     });
@@ -120,6 +142,36 @@ async function ensureIndexTtsReady(log) {
     ensurePromise = null;
   });
   return ensurePromise;
+}
+
+function isIndexTtsModelLoaded() {
+  return indexTtsModelLoaded;
+}
+
+/**
+ * 显式加载配音模型（校验环境/缺模型则下载，标记为已加载）。
+ */
+async function loadIndexTtsModel(log) {
+  const health = await ensureIndexTtsReady(log);
+  indexTtsModelLoaded = true;
+  log?.info?.('[IndexTTS] 模型已加载');
+  return { ...health, loaded: true };
+}
+
+/**
+ * 卸载配音模型：终止进行中的 CLI 并清除 loaded 标记。
+ */
+async function unloadIndexTtsModel(log) {
+  indexTtsModelLoaded = false;
+  invalidateIndexTtsHealthCache();
+  for (const child of [...activeIndexTtsChildren]) {
+    try {
+      if (child && !child.killed) child.kill('SIGTERM');
+    } catch (_) {}
+  }
+  activeIndexTtsChildren.clear();
+  log?.info?.('[IndexTTS] 模型已卸载');
+  return { ok: true, loaded: false };
 }
 
 async function ensureIndexTtsReadyInner(log) {
@@ -196,7 +248,14 @@ async function generateIndexTtsTTS(text, voiceId, options = {}) {
   const trimmed = String(text || '').trim();
   if (!trimmed) throw new Error('配音文本为空');
 
-  await ensureIndexTtsReady(options.log);
+  const autoLoad = options.autoLoad === true;
+  if (!indexTtsModelLoaded) {
+    if (autoLoad) {
+      await loadIndexTtsModel(options.log);
+    } else {
+      throw new Error('配音模型未加载，请先点击「加载模型」');
+    }
+  }
 
   const voicePath = await resolveVoiceRefPathAsync(voiceId);
   const emotionText = String(options.emotionText || '自然流畅的解说语气，情绪饱满').trim();
@@ -238,6 +297,9 @@ module.exports = {
   IDX_VOICE_PREFIX,
   checkIndexTtsHealth,
   ensureIndexTtsReady,
+  loadIndexTtsModel,
+  unloadIndexTtsModel,
+  isIndexTtsModelLoaded,
   getIndexTtsConfigSummary,
   generateIndexTtsTTS,
   resolveVoiceRefPathAsync,

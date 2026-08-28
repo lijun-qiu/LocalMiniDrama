@@ -216,6 +216,9 @@ function setupRouter(cfg, db, log) {
   // 之前可能有部分路由指向了 storyboards.episodeStoryboardsGenerate，这可能导致参数解析不一致
   r.post('/episodes/:episode_id/storyboards', drama.generateStoryboard);
   r.post('/episodes/:episode_id/resync-full-narration', storyboards.resyncFullNarration);
+  r.post('/episodes/:episode_id/complete-missing-image-prompts', storyboards.completeMissingImagePrompts);
+  r.post('/episodes/:episode_id/complete-missing-video-prompts', storyboards.completeMissingVideoPrompts);
+  r.post('/episodes/:episode_id/generate-prompts-from-audio', storyboards.generatePromptsFromAudioDuration);
   r.post('/episodes/:episode_id/props/extract', prop.extractProps);
   r.post('/episodes/:episode_id/characters/extract', stub.episodeCharactersExtract);
   r.get('/episodes/:episode_id/storyboards', storyboards.episodeStoryboardsGet);
@@ -303,10 +306,14 @@ function setupRouter(cfg, db, log) {
   // ---------- audio ----------
   r.post('/audio/extract', audio.extract);
   r.post('/audio/extract/batch', audio.extractBatch);
+  r.post('/episodes/:episode_id/narration-audio/synthesize-full', audio.synthesizeEpisodeFullNarration);
+  r.post('/episodes/:episode_id/narration-audio/split-to-storyboards', audio.splitEpisodeFullNarration);
 
   // ---------- ai-voices (IndexTTS 克隆音色) ----------
   r.get('/ai-voices/indextts/health', aiVoices.indexttsHealth);
   r.post('/ai-voices/indextts/ensure', aiVoices.indexttsEnsure);
+  r.post('/ai-voices/indextts/load', aiVoices.indexttsLoad);
+  r.post('/ai-voices/indextts/unload', aiVoices.indexttsUnload);
   r.get('/ai-voices/clone/voices', aiVoices.listCloneVoices);
   r.post('/ai-voices/clone/voices', aiVoices.saveCloneVoice);
   r.delete('/ai-voices/clone/voices/:id', aiVoices.deleteCloneVoice);

@@ -6,7 +6,10 @@ const episodeStoryboardService = require('../services/episodeStoryboardService')
 const framePromptService = require('../services/framePromptService');
 const aiClient = require('../services/aiClient');
 const promptI18n = require('../services/promptI18n');
-const { polishStoryboardImagePrompt } = require('../services/storyboardImagePromptBundle');
+const {
+  polishStoryboardImagePrompt,
+  batchPolishStoryboardImagePromptsForEpisode,
+} = require('../services/storyboardImagePromptBundle');
 const angleService = require('../services/angleService');
 const { buildUniversalSegmentUserPromptBundle } = require('../services/universalSegmentPromptBundle');
 const { normalizeUniversalSegmentShotDurations } = require('../services/universalSegmentDurationNormalize');
@@ -253,11 +256,60 @@ function routes(db, log) {
         const result = await episodeStoryboardService.resyncFullNarrationForEpisodeAsync(db, log, episodeId);
         response.success(res, {
           ...result,
-          message: `已按剧本重新同步 ${result.segment_count} 镜解说旁白，并 AI 重建视频提示词`,
+          message: `已按剧本重新同步 ${result.segment_count} 镜解说旁白（未自动生成提示词，请配音后点「按配音时长生成提示词」）`,
         });
       } catch (err) {
         log.error('episode resync full narration', { error: err.message, episode_id: req.params.episode_id });
         response.badRequest(res, err.message || '同步旁白失败');
+      }
+    },
+
+    /** 补全本集缺失的生图提示词（polished_prompt，跳过已有） */
+    completeMissingImagePrompts: async (req, res) => {
+      try {
+        const episodeId = Number(req.params.episode_id);
+        if (!episodeId) return response.badRequest(res, '缺少 episode_id');
+        const result = await batchPolishStoryboardImagePromptsForEpisode(db, log, episodeId, { force: false });
+        response.success(res, result);
+      } catch (err) {
+        log.error('episode complete missing image prompts', { error: err.message, episode_id: req.params.episode_id });
+        response.internalError(res, err.message || '补全生图提示词失败');
+      }
+    },
+
+    /** 补全本集缺失的视频提示词（全文解说经典时同时补 polished_prompt） */
+    completeMissingVideoPrompts: async (req, res) => {
+      try {
+        const episodeId = Number(req.params.episode_id);
+        if (!episodeId) return response.badRequest(res, '缺少 episode_id');
+        const result = await episodeStoryboardService.completeMissingVideoPromptsForEpisode(db, log, episodeId);
+        response.success(res, result);
+      } catch (err) {
+        log.error('episode complete missing video prompts', { error: err.message, episode_id: req.params.episode_id });
+        response.internalError(res, err.message || '补全视频提示词失败');
+      }
+    },
+
+    /** 全文解说经典：按旁白配音实际时长刷新各镜 duration 并 AI 生成 polished + video 提示词 */
+    generatePromptsFromAudioDuration: async (req, res) => {
+      try {
+        const episodeId = Number(req.params.episode_id);
+        if (!episodeId) return response.badRequest(res, '缺少 episode_id');
+        const force = req.body?.force !== false;
+        const result = await episodeStoryboardService.generateStoryboardPromptsFromAudioDurationAsync(
+          db,
+          log,
+          episodeId,
+          { force }
+        );
+        const synced = result.duration_sync?.updated ?? 0;
+        response.success(res, {
+          ...result,
+          message: `已生成 ${result.rebuilt ?? 0} 镜提示词（${synced} 镜 duration 已按配音时长更新）`,
+        });
+      } catch (err) {
+        log.error('episode generate prompts from audio', { error: err.message, episode_id: req.params.episode_id });
+        response.badRequest(res, err.message || '按配音时长生成提示词失败');
       }
     },
 

@@ -21,11 +21,13 @@ function segN(n, ch = '一') {
 }
 
 describe('estimateDurationFromSpeechText', () => {
-  it('uses 5.5 chars/sec, ceil on overflow, clamps to 4–10s', () => {
+  it('uses 5 chars/sec, ceil on overflow, clamps to 4–10s', () => {
     const { estimateDurationFromSpeechText } = require('../src/services/episodeStoryboardService');
-    assert.equal(estimateDurationFromSpeechText('一'.repeat(22)), 4);
+    assert.equal(estimateDurationFromSpeechText('一'.repeat(20)), 4);
+    assert.equal(estimateDurationFromSpeechText('一'.repeat(21)), 5);
+    assert.equal(estimateDurationFromSpeechText('一'.repeat(45)), 9);
+    assert.equal(estimateDurationFromSpeechText('一'.repeat(46)), 10);
     assert.equal(estimateDurationFromSpeechText('一'.repeat(50)), 10);
-    assert.equal(estimateDurationFromSpeechText('一'.repeat(55)), 10);
     assert.equal(estimateDurationFromSpeechText('一'.repeat(15)), 4);
     assert.equal(
       estimateDurationFromSpeechText(
@@ -53,10 +55,10 @@ describe('resolveFullNarrationLimits', () => {
 });
 
 describe('splitScriptIntoNarrationSegments', () => {
-  it('uses target ~50 / hard max 55 by default', () => {
-    assert.equal(TARGET, 50);
-    assert.equal(MAX, 55);
-    assert.equal(MIN, 44);
+  it('uses target ~45 / hard max 50 by default (5 chars/sec)', () => {
+    assert.equal(TARGET, 45);
+    assert.equal(MAX, 50);
+    assert.equal(MIN, 40);
   });
 
   it('uses 6 chars/sec limits (54 target / 60 max)', () => {
@@ -85,7 +87,7 @@ describe('splitScriptIntoNarrationSegments', () => {
     }
   });
 
-  it('packs toward ~50 chars and backs up before exceeding 55', () => {
+  it('packs toward ~45 chars and backs up before exceeding 50', () => {
     const script =
       '夏天晒得满身疮，可你从不敢有半句怨言——因为这已经是活命的代价。十六岁那年，你的身子渐渐长开，心底也多了一份说不清道不明的情绪。府里那位俊俏的少爷常引得姑娘们脸红心跳，你却心如止水。';
     const segs = splitScriptIntoNarrationSegments(script);
@@ -99,7 +101,7 @@ describe('splitScriptIntoNarrationSegments', () => {
     }
   });
 
-  it('never exceeds hard max 55 speech chars per segment', () => {
+  it('never exceeds hard max 50 speech chars per segment', () => {
     const script =
       segN(80) +
       '。' +
@@ -117,7 +119,7 @@ describe('splitScriptIntoNarrationSegments', () => {
   });
 
   it('splits last over-max remainder into two shots', () => {
-    // 一段无标点超长 + 尾部短句：末段规则仍保证 ≤55
+    // 一段无标点超长 + 尾部短句：末段规则仍保证 ≤硬上限
     const script = segN(60) + '。' + segN(30, '尾') + '。';
     const segs = splitScriptIntoNarrationSegments(script);
     assert.equal(normalizeNarrationCoverageText(segs.join('')), normalizeNarrationCoverageText(script));
@@ -213,5 +215,22 @@ describe('enforceFullNarrationSegments', () => {
     const out = enforceFullNarrationSegments(boards, segs, { warn() {}, info() {} }, 't3');
     assert.equal(out.length, 2);
     assert.equal(out[1].narration, segs[0]);
+  });
+
+  it('propagates characters/props from donor shot to all shots when AI only filled shot 2', () => {
+    const segs = ['旁白一足够长度用于测试。', '旁白二足够长度用于测试。'];
+    const boards = [
+      { shot_number: 1, characters: [], props: [] },
+      { shot_number: 2, scene_id: 5, characters: [{ id: 1, name: '甲' }], props: [9] },
+      { shot_number: 3, characters: [], props: [] },
+      { shot_number: 4, characters: [], props: [] },
+    ];
+    const out = enforceFullNarrationSegments(boards, segs, { warn() {}, info() {} }, 't4');
+    assert.equal(out.length, 3);
+    assert.deepEqual(out[0].characters, [{ id: 1, name: '甲' }]);
+    assert.deepEqual(out[1].characters, [{ id: 1, name: '甲' }]);
+    assert.deepEqual(out[2].characters, [{ id: 1, name: '甲' }]);
+    assert.deepEqual(out[0].props, [9]);
+    assert.deepEqual(out[2].props, [9]);
   });
 });

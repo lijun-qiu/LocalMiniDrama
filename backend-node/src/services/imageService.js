@@ -61,7 +61,6 @@ const uploadService = require('./uploadService');
 const storageLayout = require('./storageLayout');
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
-const { isRemoteCallScene, extractCallReceiverName } = require('../utils/storyboardCallReceiver');
 
 const LAST_FRAME_TYPES = new Set(['last', 'storyboard_last', 'tail', 'last_frame']);
 
@@ -85,6 +84,52 @@ function rowUseFirstFrameLayoutLock(row) {
   const v = row.use_first_frame_layout_lock;
   if (v === 0 || v === false) return false;
   return true;
+}
+
+/** 分镜参考图：用户上传 ref_image 优先，其次 local_path / image_url（与 resolveEntityImageSource 一致） */
+function pickStoryboardEntityRef(entity) {
+  if (!entity) return null;
+  const refImage = entity.ref_image && String(entity.ref_image).trim();
+  if (refImage) return refImage;
+  const localPath = entity.local_path && String(entity.local_path).trim();
+  if (localPath) return localPath;
+  const imageUrl = entity.image_url && String(entity.image_url).trim();
+  if (imageUrl) return imageUrl;
+  return null;
+}
+
+function sceneRefLabelSuffix(scene, isPanel) {
+  if (isPanel) return ' (establishing wide shot from history panel)';
+  if (scene?.ref_image && String(scene.ref_image).trim()) return ' (user-uploaded scene reference)';
+  return ' (current scene image)';
+}
+
+function characterRefLabelSuffix({ isUserRef, isPanel }) {
+  if (isPanel) return ' (front full-body view from history panel)';
+  if (isUserRef) return ' (user-uploaded character reference)';
+  return ' (current character image)';
+}
+
+/** 角色参考图：ref_image 优先，无主图时降级 quad_panel_1 历史面板 */
+function pickCharacterRefWithPanelFallback(db, characterId, row) {
+  const charRef = pickStoryboardEntityRef(row);
+  const isUserRef = !!(row?.ref_image && String(row.ref_image).trim());
+  let isPanel = false;
+  if (!charRef && db && characterId != null) {
+    const charPanel = db.prepare(
+      `SELECT local_path, image_url FROM image_generations
+       WHERE character_id = ? AND frame_type = 'quad_panel_1' AND status = 'completed'
+       ORDER BY id DESC LIMIT 1`
+    ).get(Number(characterId));
+    if (charPanel && (charPanel.local_path || charPanel.image_url)) {
+      return {
+        charRef: charPanel.local_path || charPanel.image_url,
+        isPanel: true,
+        isUserRef: false,
+      };
+    }
+  }
+  return { charRef, isPanel, isUserRef };
 }
 
 /**
@@ -793,12 +838,10 @@ async function processImageGeneration(db, log, imageGenId) {
         const refs = [];
         const refLabels = [];
         if (sb.scene_id) {
-          const scene = db.prepare('SELECT image_url, local_path, location FROM scenes WHERE id = ? AND deleted_at IS NULL').get(sb.scene_id);
+          const scene = db.prepare('SELECT image_url, local_path, ref_image, location FROM scenes WHERE id = ? AND deleted_at IS NULL').get(sb.scene_id);
           if (scene) {
             const locationName = scene.location || 'scene';
-            // 优先使用 scenes 表当前主图（image_url / local_path），只有当前字段为空才降级使用历史 quad_panel_0 面板
-            // 这样“重新生成场景图”后，分镜图生成能立即取到最新图片
-            let sceneRef = scene.local_path || scene.image_url;
+            let sceneRef = pickStoryboardEntityRef(scene);
             let isPanel = false;
             if (!sceneRef) {
               const scenePanel = db.prepare(
@@ -813,7 +856,7 @@ async function processImageGeneration(db, log, imageGenId) {
             }
             if (sceneRef && imageClient.canAddStoryboardObjectRef(refLabels, refLimits)) {
               refs.push(sceneRef);
-              refLabels.push(`Image ${refs.length}: scene background reference for "${locationName}"${isPanel ? ' (establishing wide shot from history panel)' : ' (current scene image)'} `);
+              refLabels.push(`Image ${refs.length}: scene background reference for "${locationName}"${sceneRefLabelSuffix(scene, isPanel)} `);
             }
           }
         }
@@ -838,25 +881,12 @@ async function processImageGeneration(db, log, imageGenId) {
           for (const item of charListParsed) {
             if (!imageClient.canAddStoryboardCharacterRef(refLabels, refLimits)) break;
             const cid = typeof item === 'object' && item != null ? item.id : item;
-            const c = db.prepare('SELECT image_url, local_path, name FROM characters WHERE id = ? AND deleted_at IS NULL').get(Number(cid));
+            const c = db.prepare('SELECT image_url, local_path, ref_image, name FROM characters WHERE id = ? AND deleted_at IS NULL').get(Number(cid));
             if (!c) continue;
-            // 优先使用 characters 表当前主图（image_url / local_path），只有当前字段为空才降级使用历史 quad_panel_1 面板
-            let charRef = c.local_path || c.image_url;
-            let isPanel = false;
-            if (!charRef) {
-              const charPanel = db.prepare(
-                `SELECT local_path, image_url FROM image_generations
-                 WHERE character_id = ? AND frame_type = 'quad_panel_1' AND status = 'completed'
-                 ORDER BY id DESC LIMIT 1`
-              ).get(Number(cid));
-              if (charPanel && (charPanel.local_path || charPanel.image_url)) {
-                charRef = charPanel.local_path || charPanel.image_url;
-                isPanel = true;
-              }
-            }
+            const { charRef, isPanel, isUserRef } = pickCharacterRefWithPanelFallback(db, cid, c);
             if (charRef) {
               refs.push(charRef);
-              refLabels.push(`Image ${refs.length}: character appearance reference for "${c.name || 'character'}"${isPanel ? ' (front full-body view from history panel)' : ' (current character image)'}`);
+              refLabels.push(`Image ${refs.length}: character appearance reference for "${c.name || 'character'}"${characterRefLabelSuffix({ isUserRef, isPanel })}`);
             }
           }
         }
@@ -892,6 +922,14 @@ async function processImageGeneration(db, log, imageGenId) {
           }
         }
         const restrictLibToExplicitSelection = explicitDramaCharIds !== null;
+        const coveredCharNamesFromLabels = new Set(
+          refLabels
+            .map((l) => {
+              const m = l.match(/for\s+"([^"]+)"/i);
+              return m ? m[1].trim().toLowerCase() : null;
+            })
+            .filter(Boolean)
+        );
         try {
           const libLinks = db.prepare('SELECT character_id FROM storyboard_characters WHERE storyboard_id = ?').all(row.storyboard_id);
           const coveredNames = new Set();
@@ -905,6 +943,8 @@ async function processImageGeneration(db, log, imageGenId) {
               const ln = String(lib.name || '').trim().toLowerCase();
               if (!ln || !allowedLibNamesLower.has(ln)) continue;
             }
+            const libNameLower = String(lib.name || '').trim().toLowerCase();
+            if (libNameLower && coveredCharNamesFromLabels.has(libNameLower)) continue;
             if (coveredNames.has(lib.name)) continue;
             // 优先使用角色库当前主图（four_view_image_url → image_url → local_path），只有当前字段为空才降级使用历史 quad_panel_1 面板
             // 这样“重新生成角色四视图/主图”后，分镜图生成能立即取到最新图片
@@ -962,25 +1002,12 @@ async function processImageGeneration(db, log, imageGenId) {
               if (!scanText.includes(dChar.name.toLowerCase())) continue;
               if (!imageClient.canAddStoryboardCharacterRef(refLabels, refLimits)) break;
               const dCharRow = db.prepare(
-                'SELECT image_url, local_path FROM characters WHERE id = ? AND deleted_at IS NULL'
+                'SELECT image_url, local_path, ref_image FROM characters WHERE id = ? AND deleted_at IS NULL'
               ).get(Number(dChar.id));
-              // 优先使用 characters 表当前主图（image_url / local_path），只有当前字段为空才降级使用历史 quad_panel_1 面板
-              let charRef = dCharRow?.local_path || dCharRow?.image_url;
-              let isPanel = false;
-              if (!charRef) {
-                const charPanel = db.prepare(
-                  `SELECT local_path, image_url FROM image_generations
-                   WHERE character_id = ? AND frame_type = 'quad_panel_1' AND status = 'completed'
-                   ORDER BY id DESC LIMIT 1`
-                ).get(Number(dChar.id));
-                if (charPanel && (charPanel.local_path || charPanel.image_url)) {
-                  charRef = charPanel.local_path || charPanel.image_url;
-                  isPanel = true;
-                }
-              }
+              const { charRef, isPanel, isUserRef } = pickCharacterRefWithPanelFallback(db, dChar.id, dCharRow);
               if (charRef && !imageClient.refListHasCanonical(refs, charRef)) {
                 refs.push(charRef);
-                refLabels.push(`Image ${refs.length}: character appearance reference for "${dChar.name}"${isPanel ? ' (front full-body view from history panel)' : ' (character image)'}`);
+                refLabels.push(`Image ${refs.length}: character appearance reference for "${dChar.name}"${characterRefLabelSuffix({ isUserRef, isPanel })}`);
                 coveredCharNames.add(dChar.name.toLowerCase());
                 log.info('[图生] Step2.1 文本补扫到未关联角色，已添加参考图', { id: imageGenId, name: dChar.name });
                 // 同步回写到 storyboards.characters，避免下次重复扫描
@@ -1620,22 +1647,16 @@ function upload(db, log, req) {
 }
 
 /**
- * 纯文本字符匹配：扫描分镜文本字段，补全 storyboards.characters 中漏掉的角色。
- * 无 AI 调用，速度极快，可在分镜生成后批量调用。
- * @param {object} db
- * @param {object} log
- * @param {number} storyboardId
- * @returns {{ added: string[] }} 本次新增的角色名列表
+ * 分镜入库后按台词/动作补全漏掉的角色（只增不减，不修改 scene_id / props）。
  */
 function syncStoryboardCharacters(db, log, storyboardId) {
   const added = [];
   try {
     const sb = db.prepare(
-      'SELECT id, episode_id, characters, action, dialogue, result, description FROM storyboards WHERE id = ? AND deleted_at IS NULL'
+      'SELECT id, episode_id, characters, action, dialogue, narration, result, description FROM storyboards WHERE id = ? AND deleted_at IS NULL'
     ).get(Number(storyboardId));
     if (!sb) return { added };
 
-    // 获取剧集对应的 drama_id
     let dramaId = null;
     try {
       const ep = db.prepare('SELECT drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL').get(sb.episode_id);
@@ -1643,60 +1664,102 @@ function syncStoryboardCharacters(db, log, storyboardId) {
     } catch (_) {}
     if (!dramaId) return { added };
 
-    // 构造扫描文本
-    const contextText = [sb.action, sb.result, sb.description].filter(Boolean).join(' ');
-    const scanText = [contextText, sb.dialogue].filter(Boolean).join(' ').toLowerCase();
+    const scanText = [sb.action, sb.dialogue, sb.narration, sb.result, sb.description]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
     if (!scanText) return { added };
 
-    // 解析已关联角色
     let charList = [];
-    try { charList = JSON.parse(sb.characters || '[]'); } catch (_) { charList = []; }
+    try {
+      charList = JSON.parse(sb.characters || '[]');
+    } catch (_) {
+      charList = [];
+    }
     const coveredIds = new Set(charList.map((c) => Number(typeof c === 'object' && c != null ? c.id : c)));
 
-    // 与剧集全角色做文本匹配
-    const allChars = db.prepare('SELECT id, name FROM characters WHERE drama_id = ? AND deleted_at IS NULL').all(Number(dramaId));
-    const allNames = allChars.map((c) => c.name).filter(Boolean);
-    const callScene = isRemoteCallScene(contextText);
-    const callReceiver = callScene ? extractCallReceiverName(contextText, allNames) : null;
-    const callReceiverChar = callReceiver
-      ? allChars.find((c) => c.name === callReceiver)
-      : null;
-
+    const allChars = db
+      .prepare('SELECT id, name FROM characters WHERE drama_id = ? AND deleted_at IS NULL')
+      .all(Number(dramaId));
     let updated = false;
     for (const ch of allChars) {
       if (!ch.name) continue;
       if (coveredIds.has(ch.id)) continue;
-      if (callReceiverChar && ch.id !== callReceiverChar.id) continue;
-      if (!scanText.includes(ch.name.toLowerCase())) continue;
-      if (callScene && !callReceiverChar) continue;
+      if (!scanText.includes(String(ch.name).toLowerCase())) continue;
       charList.push({ id: ch.id, name: ch.name });
       coveredIds.add(ch.id);
       added.push(ch.name);
       updated = true;
     }
 
-    if (callReceiverChar) {
-      const hasReceiver = charList.some((c) => Number(typeof c === 'object' && c != null ? c.id : c) === callReceiverChar.id);
-      const filtered = charList.filter(
-        (c) => Number(typeof c === 'object' && c != null ? c.id : c) === callReceiverChar.id
-      );
-      if (!hasReceiver) {
-        filtered.push({ id: callReceiverChar.id, name: callReceiverChar.name });
-        added.push(callReceiverChar.name);
-      }
-      if (filtered.length !== charList.length || !hasReceiver) {
-        charList = filtered.length ? filtered : [{ id: callReceiverChar.id, name: callReceiverChar.name }];
-        updated = true;
-      }
-    }
-
     if (updated) {
-      db.prepare('UPDATE storyboards SET characters = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL')
-        .run(JSON.stringify(charList), new Date().toISOString(), Number(storyboardId));
+      db.prepare('UPDATE storyboards SET characters = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
+        JSON.stringify(charList),
+        new Date().toISOString(),
+        Number(storyboardId)
+      );
       if (log) log.info('[分镜角色补全] 补全完成', { storyboard_id: storyboardId, added });
     }
   } catch (err) {
     if (log) log.warn('[分镜角色补全] 异常', { storyboard_id: storyboardId, error: err.message });
+  }
+  return { added };
+}
+
+/**
+ * 分镜入库后按台词/动作/旁白补全漏掉的道具（只增不减）。
+ * 与角色补全同策略：文本出现道具名则写入 storyboard_props。
+ */
+function syncStoryboardProps(db, log, storyboardId) {
+  const added = [];
+  try {
+    const sb = db.prepare(
+      'SELECT id, episode_id, action, dialogue, narration, result, description, title FROM storyboards WHERE id = ? AND deleted_at IS NULL'
+    ).get(Number(storyboardId));
+    if (!sb) return { added };
+
+    let dramaId = null;
+    try {
+      const ep = db.prepare('SELECT drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL').get(sb.episode_id);
+      dramaId = ep?.drama_id ?? null;
+    } catch (_) {}
+    if (!dramaId) return { added };
+
+    const scanText = [sb.action, sb.dialogue, sb.narration, sb.result, sb.description, sb.title]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    if (!scanText) return { added };
+
+    let existingIds = [];
+    try {
+      existingIds = db
+        .prepare('SELECT prop_id FROM storyboard_props WHERE storyboard_id = ?')
+        .all(Number(storyboardId))
+        .map((r) => Number(r.prop_id))
+        .filter(Number.isFinite);
+    } catch (_) {
+      existingIds = [];
+    }
+    const covered = new Set(existingIds);
+
+    const allProps = db
+      .prepare('SELECT id, name FROM props WHERE drama_id = ? AND deleted_at IS NULL')
+      .all(Number(dramaId));
+    const ins = db.prepare('INSERT OR IGNORE INTO storyboard_props (storyboard_id, prop_id) VALUES (?, ?)');
+    for (const p of allProps) {
+      const name = String(p.name || '').trim();
+      if (!name || covered.has(Number(p.id))) continue;
+      if (!scanText.includes(name.toLowerCase())) continue;
+      ins.run(Number(storyboardId), Number(p.id));
+      covered.add(Number(p.id));
+      added.push(name);
+    }
+    if (added.length && log) {
+      log.info('[分镜道具补全] 补全完成', { storyboard_id: storyboardId, added });
+    }
+  } catch (err) {
+    if (log) log.warn('[分镜道具补全] 异常', { storyboard_id: storyboardId, error: err.message });
   }
   return { added };
 }
@@ -1711,4 +1774,5 @@ module.exports = {
   processImageGeneration,
   aspectRatioToSize,
   syncStoryboardCharacters,
+  syncStoryboardProps,
 };

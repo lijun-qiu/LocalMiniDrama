@@ -49,7 +49,9 @@ export async function runImageStep(drama, sb, genOpts) {
 export async function runVideoStep(drama, sb, genOpts) {
   const useFirstLast = dramaUsesFirstLastFrame(drama)
   const imagesBySbId = genOpts?.imagesBySbId || {}
-  const { first, last } = sbVideoFirstLastUrls(sb, imagesBySbId, useFirstLast)
+  const { first, last } = sbVideoFirstLastUrls(sb, imagesBySbId, useFirstLast, {
+    storyboards: genOpts?.storyboards,
+  })
   const imgPath = first || storyboardImageUrl(sb)
   if (!imgPath && !sb.video_prompt && !last) {
     throw new Error(`分镜 #${sb.storyboard_number ?? sb.id} 缺少分镜图，无法生成视频`)

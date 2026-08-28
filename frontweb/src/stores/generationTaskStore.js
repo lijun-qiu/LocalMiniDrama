@@ -22,9 +22,12 @@ export const GEN_RESOURCE = {
 }
 
 /** 超过此时间仍为 running 且无进展则自动清理（毫秒） */
-const STALE_TASK_MS = 30 * 60 * 1000
-/** 后端任务 updated_at 长时间不变，视为重启后僵尸任务（毫秒） */
-const ORPHAN_PROCESSING_MS = 10 * 60 * 1000
+const STALE_TASK_MS = 45 * 60 * 1000
+/** 后端任务 updated_at 长时间不变，视为僵尸任务（毫秒）；视频上游轮询默认最长约 30 分钟 */
+const ORPHAN_PROCESSING_MS = 35 * 60 * 1000
+/** 分镜视频轮询：与后端 generation_timeout_minutes（默认 30）对齐，略留余量 */
+export const VIDEO_POLL_MAX_ATTEMPTS = 960
+export const VIDEO_POLL_INTERVAL_MS = 2000
 
 const LAST_FRAME_TYPES = new Set(['last', 'storyboard_last', 'tail', 'last_frame'])
 const FIRST_FRAME_TYPES = new Set(['first', 'storyboard_first', 'head', 'first_frame'])
@@ -57,7 +60,15 @@ function isOrphanedProcessingTask(remote, staleMs = ORPHAN_PROCESSING_MS) {
   if (!remote || !isActiveTaskStatus(remote.status)) return false
   const updatedAt = remote.updated_at ? new Date(remote.updated_at).getTime() : 0
   if (!updatedAt) return false
-  return Date.now() - updatedAt > staleMs
+  let limit = staleMs
+  const msg = (remote.message || '').toString()
+  if (
+    remote.type === 'video_generation' ||
+    /上游视频|继续轮询|轮询上游/.test(msg)
+  ) {
+    limit = Math.max(limit, ORPHAN_PROCESSING_MS)
+  }
+  return Date.now() - updatedAt > limit
 }
 
 const ORPHAN_TASK_MSG = '任务长时间无进展，可能因服务重启而中断，请重新操作'
@@ -315,7 +326,9 @@ export const useGenerationTaskStore = defineStore('generationTask', () => {
           setTimeout(tick, interval)
         } else {
           const timeoutMsg = options.timeoutMessage
-            || '生成任务已超时（超过15分钟），请刷新页面查看是否已完成'
+            || (maxAttempts >= VIDEO_POLL_MAX_ATTEMPTS
+              ? '视频生成查询超时（超过32分钟），请刷新或在分镜处点「继续查询」'
+              : '生成任务已超时（超过15分钟），请刷新页面查看是否已完成')
           markFailed(key, timeoutMsg)
           if (showTimeoutToast && options.ElMessage) {
             options.ElMessage.warning(timeoutMsg)

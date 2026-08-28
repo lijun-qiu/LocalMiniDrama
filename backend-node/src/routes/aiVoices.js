@@ -3,6 +3,9 @@ const response = require('../response');
 const {
   checkIndexTtsHealth,
   ensureIndexTtsReady,
+  loadIndexTtsModel,
+  unloadIndexTtsModel,
+  isIndexTtsModelLoaded,
   getIndexTtsConfigSummary,
 } = require('../services/indexTtsService');
 const {
@@ -31,7 +34,11 @@ function routes(db, log, cfg) {
     indexttsHealth: async (req, res) => {
       try {
         const health = await checkIndexTtsHealth({ force: true });
-        response.success(res, { ...health, ...getIndexTtsConfigSummary() });
+        response.success(res, {
+          ...health,
+          loaded: isIndexTtsModelLoaded(),
+          ...getIndexTtsConfigSummary(),
+        });
       } catch (err) {
         log.warn('ai-voices indextts health', { error: err.message });
         response.internalError(res, err.message);
@@ -44,6 +51,26 @@ function routes(db, log, cfg) {
         response.success(res, { ...health, ...getIndexTtsConfigSummary(), started: true });
       } catch (err) {
         log.warn('ai-voices indextts ensure', { error: err.message });
+        response.badRequest(res, err.message);
+      }
+    },
+
+    indexttsLoad: async (req, res) => {
+      try {
+        const health = await loadIndexTtsModel(log);
+        response.success(res, { ...health, ...getIndexTtsConfigSummary() });
+      } catch (err) {
+        log.warn('ai-voices indextts load', { error: err.message });
+        response.badRequest(res, err.message);
+      }
+    },
+
+    indexttsUnload: async (req, res) => {
+      try {
+        const result = await unloadIndexTtsModel(log);
+        response.success(res, { ...result, ...getIndexTtsConfigSummary() });
+      } catch (err) {
+        log.warn('ai-voices indextts unload', { error: err.message });
         response.badRequest(res, err.message);
       }
     },
@@ -122,6 +149,7 @@ function routes(db, log, cfg) {
           provider: 'indextts',
           voice_id: voiceId,
           emotion_text: emotionText,
+          auto_load_indextts: true,
         });
         response.success(res, { local_path: synth.local_path, audio_url: `/static/${synth.local_path}` });
       } catch (err) {

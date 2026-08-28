@@ -316,6 +316,7 @@ async function pollProviderTaskAndFinalize(db, log, videoGenId, row, rowForAspec
     1,
     Math.ceil((generationTimeoutMinutes * 60 * 1000) / POLL_INTERVAL_MS)
   );
+  const asyncTaskId = row.task_id && String(row.task_id).trim() ? String(row.task_id).trim() : null;
   const pollResult = await videoClient.pollVideoTask(
     db,
     log,
@@ -323,7 +324,21 @@ async function pollProviderTaskAndFinalize(db, log, videoGenId, row, rowForAspec
     providerTaskId,
     config,
     pollMaxAttempts,
-    POLL_INTERVAL_MS
+    POLL_INTERVAL_MS,
+    {
+      onPollRound: (round, maxRounds) => {
+        if (!asyncTaskId) return;
+        const pct = Math.min(95, 10 + Math.floor((round / Math.max(1, maxRounds)) * 85));
+        taskService.updateTaskStatus(
+          db,
+          asyncTaskId,
+          'processing',
+          pct,
+          `上游视频生成中（第 ${round}/${maxRounds} 次查询）…`
+        );
+      },
+      model: row.model,
+    }
   );
   const now = new Date().toISOString();
   const polledVideo = resolveRemoteVideoUrl(pollResult.video_url, pollResult.error);

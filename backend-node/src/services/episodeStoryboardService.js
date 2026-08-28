@@ -2,7 +2,8 @@
 const taskService = require('./taskService');
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
-const { syncStoryboardCharacters } = require('./imageService');
+const { syncStoryboardCharacters, syncStoryboardProps } = require('./imageService');
+const { syncStoryboardCharacterLinksFromCharactersColumn } = require('./storyboardService');
 const safeJson = require('../utils/safeJson');
 const { safeParseAIJSON, extractJsonCandidate, repairTruncatedJsonArray, extractFirstArray } = safeJson;
 const loadConfig = require('../config').loadConfig;
@@ -220,9 +221,9 @@ function normalizeStoryboardListShotNumbers(storyboards) {
 /**
  * 按旁白字数估算单镜视频时长（秒）。
  * 公式：朗读所需秒数 = ceil(字数 ÷ 语速)；超出整秒容量时向上取整补全到下一秒。
- * 默认语速 5.5 字/秒；时长限制在 [durationMinSec, maxSec]（默认 4～10 秒）。
+ * 默认语速 5 字/秒；时长限制在 [durationMinSec, maxSec]（默认 4～10 秒）。
  * 分段仍尽量合并到 8～10 秒字数；短孤儿段按时长真实字数估，不再硬抬到 8 秒。
- * 例（5.5 字/秒）：22字→4秒；44字→8秒；45字→9秒；55字→10秒。
+ * 例（5 字/秒）：21字→5秒；45字→9秒；46字→10秒；50字→10秒。
  */
 function estimateDurationFromSpeechText(text, limitsOrOpts = {}) {
   const opts = limitsOrOpts && limitsOrOpts.NARRATION_CHARS_PER_SEC != null
@@ -360,6 +361,20 @@ function getStoryboardsForEpisode(db, episodeId) {
       'SELECT * FROM storyboards WHERE episode_id = ? AND deleted_at IS NULL ORDER BY storyboard_number ASC, id ASC'
     ).all(episodeId)
   );
+  const propMap = {};
+  try {
+    const sbIds = rows.map((r) => r.id).filter(Boolean);
+    if (sbIds.length > 0) {
+      const placeholders = sbIds.map(() => '?').join(',');
+      const spRows = db
+        .prepare(`SELECT storyboard_id, prop_id FROM storyboard_props WHERE storyboard_id IN (${placeholders})`)
+        .all(...sbIds);
+      for (const row of spRows) {
+        if (!propMap[row.storyboard_id]) propMap[row.storyboard_id] = [];
+        propMap[row.storyboard_id].push(Number(row.prop_id));
+      }
+    }
+  } catch (_) {}
   return rows.map((r) => {
     let background = null;
     if (r.scene_id != null) {
@@ -399,6 +414,7 @@ function getStoryboardsForEpisode(db, episodeId) {
         if (typeof r.characters !== 'string') return Array.isArray(r.characters) ? r.characters : [];
         try { return JSON.parse(r.characters); } catch (_) { return []; }
       })(),
+      prop_ids: propMap[r.id] || [],
       composed_image: r.composed_image,
       video_url: r.video_url,
       audio_local_path: r.audio_local_path ?? null,
@@ -557,8 +573,16 @@ function deriveStoryboardFieldsFromAi(sb, style, videoRatio, opts = {}) {
   const skipRuleVideoPrompt = opts.fullNarrationMode && !universalOmni;
   const videoPrompt = skipRuleVideoPrompt ? '' : generateVideoPrompt(sbWithAngles, style, videoRatio);
   const sceneId = sb.scene_id != null ? Number(sb.scene_id) : null;
-  const charactersJson = Array.isArray(sb.characters) ? JSON.stringify(sb.characters) : (sb.characters ? JSON.stringify([].concat(sb.characters)) : '[]');
-  const propIds = Array.isArray(sb.props) ? sb.props.map(Number).filter(Number.isFinite) : [];
+  // 与 7b6c1a7 一致：原样保留 AI 的 characters；同时兼容 id / {id,name} / 纯数字字符串
+  const charactersJson = Array.isArray(sb.characters)
+    ? JSON.stringify(sb.characters)
+    : (sb.characters ? JSON.stringify([].concat(sb.characters)) : '[]');
+  // props 兼容 [1,2] 与 [{id:1},{id:2}]（后者若直接 Number() 会变成 NaN 导致道具全丢）
+  const propIds = Array.isArray(sb.props)
+    ? sb.props
+      .map((p) => Number(typeof p === 'object' && p != null ? p.id : p))
+      .filter(Number.isFinite)
+    : [];
   let universalSegmentText = '';
   if (sb.universal_segment_text != null && String(sb.universal_segment_text).trim()) {
     universalSegmentText = String(sb.universal_segment_text).trim().replace(/\r?\n/g, ' ');
@@ -615,6 +639,26 @@ function deriveStoryboardFieldsFromAi(sb, style, videoRatio, opts = {}) {
 
 /** 用最终解析的分镜对象覆盖已存在的行（修正流式增量先入库时缺 narration 等字段的问题） */
 function updateStoryboardRowFromDerived(db, existingId, episodeIdNum, d, sb, now) {
+  let charactersJson = d.charactersJson;
+  let propIds = Array.isArray(d.propIds) ? [...d.propIds] : [];
+  try {
+    const existingRow = db.prepare('SELECT characters FROM storyboards WHERE id = ?').get(existingId);
+    const existingChars = normalizeStoryboardCharactersField(existingRow?.characters);
+    const incomingChars = normalizeStoryboardCharactersField(charactersJson);
+    if (incomingChars.length === 0 && existingChars.length > 0) {
+      charactersJson = JSON.stringify(existingChars);
+    }
+    const existingPropLinks = db
+      .prepare('SELECT prop_id FROM storyboard_props WHERE storyboard_id = ?')
+      .all(existingId);
+    const existingPropIds = existingPropLinks
+      .map((p) => Number(p.prop_id))
+      .filter(Number.isFinite);
+    if (propIds.length === 0 && existingPropIds.length > 0) {
+      propIds = existingPropIds;
+    }
+  } catch (_) {}
+
   db.prepare(
     `UPDATE storyboards SET
       scene_id = ?, title = ?, description = ?, location = ?, time = ?, duration = ?,
@@ -639,7 +683,7 @@ function updateStoryboardRowFromDerived(db, existingId, episodeIdNum, d, sb, now
     sb.atmosphere ?? null,
     d.imagePrompt,
     d.videoPrompt,
-    d.charactersJson,
+    charactersJson,
     d.shotType || null,
     d.angle,
     d.angleH,
@@ -657,10 +701,10 @@ function updateStoryboardRowFromDerived(db, existingId, episodeIdNum, d, sb, now
     episodeIdNum
   );
   try {
-    db.prepare('DELETE FROM storyboard_props WHERE storyboard_id = ?').run(existingId);
-    if (d.propIds.length > 0) {
+    if (propIds.length > 0) {
+      db.prepare('DELETE FROM storyboard_props WHERE storyboard_id = ?').run(existingId);
       const insProp = db.prepare('INSERT OR IGNORE INTO storyboard_props (storyboard_id, prop_id) VALUES (?, ?)');
-      for (const pid of d.propIds) insProp.run(existingId, pid);
+      for (const pid of propIds) insProp.run(existingId, pid);
     }
   } catch (_) {}
 }
@@ -942,8 +986,8 @@ function saveStoryboards(db, log, episodeId, storyboards, cfg, styleOverride, sk
 
 /**
  * 将剧本正文按标点拆分为全文解说段落。
- * 统一规则：目标约 9 秒 / 50 字；在当前符号处切开；即将超 55 字则退回上一符号；
- * 末段 ≤55 保留，>55 再拆成两镜（仍只在标点处切）。
+ * 统一规则：目标约 9 秒 / 语速×9 字；在当前符号处切开；即将超 语速×10 字则退回上一符号；
+ * 末段 ≤上限保留，>上限再拆成两镜（仍只在标点处切）。
  */
 function splitScriptIntoNarrationSegments(script, limits = DEFAULT_NARRATION_LIMITS) {
   const text = String(script || '').trim();
@@ -966,7 +1010,7 @@ function tokenizeNarrationAtoms(text, limits = DEFAULT_NARRATION_LIMITS) {
     const primaryParts = block.split(NARRATION_PRIMARY_PUNCT_RE).map((s) => s.trim()).filter(Boolean);
     for (const part of primaryParts) {
       if (countNarrationSpeechChars(part) <= cap) {
-        // 句内再拆成逗号级单元，便于装到约 50 字
+        // 句内再拆成逗号级单元，便于装到约目标字数
         const secondaryParts = part.split(NARRATION_SECONDARY_PUNCT_RE).map((s) => s.trim()).filter(Boolean);
         if (secondaryParts.length > 1) {
           for (const sub of secondaryParts) {
@@ -1064,14 +1108,14 @@ function packNarrationUnitsByTarget(units, limits = DEFAULT_NARRATION_LIMITS) {
     const bufLen = speechLen(buf);
 
     if (nextLen > max) {
-      // 超出 55：退回上一符号，本单元开新镜
+      // 超出硬上限：退回上一符号，本单元开新镜
       flush();
       buf = unit;
       continue;
     }
 
     if (bufLen >= target) {
-      // 已达约 50 字：在当前符号处切开，不再硬拼
+      // 已达约目标字数：在当前符号处切开，不再硬拼
       flush();
       buf = unit;
       continue;
@@ -1081,7 +1125,7 @@ function packNarrationUnitsByTarget(units, limits = DEFAULT_NARRATION_LIMITS) {
   }
   flush();
 
-  // 末段及任何超上限段：再拆（只在标点处），保证每镜 ≤55
+  // 末段及任何超上限段：再拆（只在标点处），保证每镜 ≤硬上限
   return finalizeNarrationSegmentsMax(segments, max);
 }
 
@@ -1244,6 +1288,179 @@ ${lines}`;
 ${lines}`;
 }
 
+function normalizeStoryboardCharactersField(chars) {
+  if (chars == null) return [];
+  if (Array.isArray(chars)) return chars;
+  if (typeof chars === 'string') {
+    const t = chars.trim();
+    if (!t || t === '[]') return [];
+    try {
+      const parsed = JSON.parse(t);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function isEmptyStoryboardCharactersField(chars) {
+  return normalizeStoryboardCharactersField(chars).length === 0;
+}
+
+function normalizeStoryboardPropIdsField(props) {
+  if (!Array.isArray(props)) return [];
+  return props
+    .map((p) => Number(typeof p === 'object' && p != null ? p.id : p))
+    .filter(Number.isFinite);
+}
+
+/** 从 AI 分镜列表中选取「有角色/道具/场景」的捐赠镜，避免用最后一镜（常为空）作模板 */
+function pickFullNarrationAssetDonor(ordered) {
+  if (!Array.isArray(ordered) || !ordered.length) return {};
+  const contentShots = ordered.length > 1 ? ordered.slice(1) : ordered;
+  for (const sb of contentShots) {
+    if (!isEmptyStoryboardCharactersField(sb?.characters)) return sb;
+  }
+  for (const sb of contentShots) {
+    if (normalizeStoryboardPropIdsField(sb?.props).length > 0) return sb;
+  }
+  for (const sb of contentShots) {
+    if (sb?.scene_id) return sb;
+  }
+  return contentShots[0] || ordered[0] || {};
+}
+
+/** 目标镜缺少资产字段时，从捐赠镜补全（只补空，不覆盖已有） */
+function inheritStoryboardAssetFields(target, donor) {
+  if (!target || !donor) return target;
+  if (!target.scene_id && donor.scene_id) target.scene_id = donor.scene_id;
+  if (!target.location && donor.location) target.location = donor.location;
+  if (!target.time && donor.time) target.time = donor.time;
+  if (!target.scene_description && donor.scene_description) {
+    target.scene_description = donor.scene_description;
+  }
+  if (isEmptyStoryboardCharactersField(target.characters) && !isEmptyStoryboardCharactersField(donor.characters)) {
+    target.characters = normalizeStoryboardCharactersField(donor.characters);
+  }
+  const targetProps = normalizeStoryboardPropIdsField(target.props);
+  const donorProps = normalizeStoryboardPropIdsField(donor.props);
+  if (!targetProps.length && donorProps.length) {
+    target.props = donorProps;
+  }
+  return target;
+}
+
+/** 全文解说：各镜统一继承捐赠镜的角色/道具/场景（AI 常只填第 2 镜） */
+function propagateFullNarrationAssetsAcrossShots(storyboards) {
+  if (!Array.isArray(storyboards) || storyboards.length < 2) return storyboards;
+  const ordered = normalizeStoryboardListShotNumbers(storyboards);
+  const donor = pickFullNarrationAssetDonor(ordered);
+  for (let i = 0; i < storyboards.length; i += 1) {
+    const sb = storyboards[i];
+    inheritStoryboardAssetFields(sb, i === 0 ? (storyboards[1] || donor) : donor);
+  }
+  enrichFullNarrationTitleShotFields(storyboards[0], storyboards[1]);
+  return storyboards;
+}
+
+/** 入库后：将捐赠镜的角色/道具写入本集仍为空的分镜 */
+function propagateFullNarrationAssetsInDb(db, log, episodeIdNum) {
+  const rows = db
+    .prepare(
+      `SELECT id, storyboard_number, scene_id, location, time, characters
+       FROM storyboards WHERE episode_id = ? AND deleted_at IS NULL
+       ORDER BY storyboard_number ASC, id ASC`
+    )
+    .all(episodeIdNum);
+  if (rows.length < 2) return { characters_updated: 0, props_added: 0 };
+
+  let donor = null;
+  let donorProps = [];
+  for (const row of rows) {
+    if (Number(row.storyboard_number) === 1) continue;
+    const chars = normalizeStoryboardCharactersField(row.characters);
+    let propIds = [];
+    try {
+      propIds = db
+        .prepare('SELECT prop_id FROM storyboard_props WHERE storyboard_id = ?')
+        .all(row.id)
+        .map((p) => Number(p.prop_id))
+        .filter(Number.isFinite);
+    } catch (_) {}
+    if (chars.length || propIds.length || row.scene_id) {
+      donor = row;
+      donorProps = propIds;
+      if (chars.length || propIds.length) break;
+    }
+  }
+  if (!donor) return { characters_updated: 0, props_added: 0 };
+
+  const donorCharsJson = JSON.stringify(normalizeStoryboardCharactersField(donor.characters));
+  const now = new Date().toISOString();
+  let charactersUpdated = 0;
+  let propsAdded = 0;
+  const insProp = db.prepare('INSERT OR IGNORE INTO storyboard_props (storyboard_id, prop_id) VALUES (?, ?)');
+
+  for (const row of rows) {
+    const chars = normalizeStoryboardCharactersField(row.characters);
+    const updates = [];
+    const params = [];
+    if (isEmptyStoryboardCharactersField(chars) && !isEmptyStoryboardCharactersField(donor.characters)) {
+      updates.push('characters = ?');
+      params.push(donorCharsJson);
+    }
+    if (!row.scene_id && donor.scene_id) {
+      updates.push('scene_id = ?');
+      params.push(donor.scene_id);
+    }
+    if (!row.location && donor.location) {
+      updates.push('location = ?');
+      params.push(donor.location);
+    }
+    if (!row.time && donor.time) {
+      updates.push('time = ?');
+      params.push(donor.time);
+    }
+    if (updates.length) {
+      updates.push('updated_at = ?');
+      params.push(now);
+      params.push(row.id);
+      db.prepare(`UPDATE storyboards SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+      charactersUpdated += 1;
+    }
+    if (donorProps.length) {
+      let existingProps = [];
+      try {
+        existingProps = db
+          .prepare('SELECT prop_id FROM storyboard_props WHERE storyboard_id = ?')
+          .all(row.id)
+          .map((p) => Number(p.prop_id))
+          .filter(Number.isFinite);
+      } catch (_) {}
+      if (!existingProps.length) {
+        for (const pid of donorProps) {
+          insProp.run(row.id, pid);
+          propsAdded += 1;
+        }
+      }
+    }
+    try {
+      syncStoryboardCharacterLinksFromCharactersColumn(db, row.id);
+    } catch (_) {}
+  }
+
+  if ((charactersUpdated > 0 || propsAdded > 0) && log?.info) {
+    log.info('[分镜] 全文解说资产字段已跨镜继承', {
+      episode_id: episodeIdNum,
+      donor_storyboard_id: donor.id,
+      characters_updated: charactersUpdated,
+      props_added: propsAdded,
+    });
+  }
+  return { characters_updated: charactersUpdated, props_added: propsAdded };
+}
+
 /** 片头镜从第 2 镜继承场景/角色/物品（内存对象，enforce 阶段） */
 function enrichFullNarrationTitleShotFields(titleShot, contentShot) {
   if (!titleShot || !contentShot) return;
@@ -1331,9 +1548,9 @@ function enrichFullNarrationTitleShotInDb(db, log, episodeIdNum) {
     for (const p of contentProps) ins.run(title.id, p.prop_id);
   }
   try {
-    syncStoryboardCharacters(db, log, title.id);
+    syncStoryboardCharacterLinksFromCharactersColumn(db, title.id);
   } catch (e) {
-    log.warn('[分镜] 片头镜角色补全失败', { storyboard_id: title.id, error: e.message });
+    log.warn('[分镜] 片头镜角色库链接同步失败', { storyboard_id: title.id, error: e.message });
   }
 }
 
@@ -1356,7 +1573,7 @@ async function recoverFullNarrationFromPartial(db, log, episodeIdNum, taskId, fu
 /** 全文解说模式：第 1 镜片头（无旁白），第 2 镜起绑定预切分原文 */
 function enforceFullNarrationSegments(storyboards, segments, log, taskId, limits = DEFAULT_NARRATION_LIMITS) {
   if (!Array.isArray(storyboards) || !segments?.length) return storyboards;
-  // 入库/同步时的 segments 已按 50/55 规则切好；此处只保证不超硬上限，不再强行并短段
+  // 入库/同步时的 segments 已按目标/硬上限规则切好；此处只保证不超硬上限，不再强行并短段
   const safeSegments = finalizeNarrationSegmentsMax(
     (segments || []).map((s) => String(s || '').trim()).filter(Boolean),
     limits.FULL_NARRATION_MAX_CHARS
@@ -1382,13 +1599,14 @@ function enforceFullNarrationSegments(storyboards, segments, log, taskId, limits
     });
   }
 
-  const template = ordered[ordered.length - 1] || ordered[0] || {};
-  const titleBase = ordered[0] || template;
+  const assetDonor = pickFullNarrationAssetDonor(ordered);
+  const structuralTemplate = ordered[0] || assetDonor || {};
+  const titleBase = ordered[0] || structuralTemplate;
   const contentBases = ordered.length > 1 ? ordered.slice(1) : ordered;
 
   const rebuilt = [];
   rebuilt.push({
-    ...template,
+    ...structuralTemplate,
     ...titleBase,
     shot_number: 1,
     storyboard_number: 1,
@@ -1399,20 +1617,20 @@ function enforceFullNarrationSegments(storyboards, segments, log, taskId, limits
   });
 
   for (let i = 0; i < segCount; i++) {
-    const base = contentBases[i] || contentBases[contentBases.length - 1] || template;
+    const base = contentBases[i] || contentBases[contentBases.length - 1] || assetDonor || structuralTemplate;
     rebuilt.push({
-      ...template,
+      ...structuralTemplate,
       ...base,
       shot_number: i + 2,
       storyboard_number: i + 2,
-      title: base.title || (template.title ? `${template.title}·解说${i + 1}` : `解说${i + 1}`),
+      title: base.title || (structuralTemplate.title ? `${structuralTemplate.title}·解说${i + 1}` : `解说${i + 1}`),
       dialogue: base.dialogue != null ? base.dialogue : '',
       narration: safeSegments[i],
       duration: estimateDurationFromSpeechText(safeSegments[i], limits),
     });
   }
 
-  enrichFullNarrationTitleShotFields(rebuilt[0], rebuilt[1]);
+  propagateFullNarrationAssetsAcrossShots(rebuilt);
 
   storyboards.length = 0;
   storyboards.push(...rebuilt);
@@ -1443,22 +1661,34 @@ async function resyncFullNarrationForEpisodeAsync(db, log, episodeId) {
   const existingRows = getStoryboardsForEpisode(db, episodeIdNum);
   if (!existingRows.length) throw new Error('当前集尚无分镜，请先生成分镜');
 
-  const storyboards = existingRows.map((row) => ({
-    id: row.id,
-    shot_number: row.storyboard_number,
-    storyboard_number: row.storyboard_number,
-    title: row.title,
-    location: row.location,
-    time: row.time,
-    scene_id: row.scene_id,
-    dialogue: row.dialogue,
-    action: row.action,
-    atmosphere: row.atmosphere,
-    creation_mode: row.creation_mode,
-    universal_segment_text: row.universal_segment_text,
-    narration: row.narration,
-    duration: row.duration,
-  }));
+  const storyboards = existingRows.map((row) => {
+    let propIds = [];
+    try {
+      propIds = db
+        .prepare('SELECT prop_id FROM storyboard_props WHERE storyboard_id = ?')
+        .all(row.id)
+        .map((p) => Number(p.prop_id))
+        .filter(Number.isFinite);
+    } catch (_) {}
+    return {
+      id: row.id,
+      shot_number: row.storyboard_number,
+      storyboard_number: row.storyboard_number,
+      title: row.title,
+      location: row.location,
+      time: row.time,
+      scene_id: row.scene_id,
+      dialogue: row.dialogue,
+      action: row.action,
+      atmosphere: row.atmosphere,
+      creation_mode: row.creation_mode,
+      universal_segment_text: row.universal_segment_text,
+      narration: row.narration,
+      duration: row.duration,
+      characters: row.characters,
+      props: propIds,
+    };
+  });
 
   enforceFullNarrationSegments(storyboards, segments, log, `resync-${episodeIdNum}`, narrationLimits);
 
@@ -1520,34 +1750,9 @@ async function resyncFullNarrationForEpisodeAsync(db, log, episodeId) {
     }
   }
 
-  let videoPromptsRebuilt = 0;
-  let videoPromptRebuildFailed = 0;
-  for (const id of keptIds) {
-    try {
-      await rebuildFullNarrationDualPromptsForStoryboardAsync(db, log, id);
-      videoPromptsRebuilt += 1;
-      const row = db.prepare(
-        'SELECT universal_segment_text, duration FROM storyboards WHERE id = ? AND deleted_at IS NULL'
-      ).get(id);
-      if (row?.universal_segment_text) {
-        const { rewritePromptDurationHints } = require('./videoClient');
-        const patched = rewritePromptDurationHints(row.universal_segment_text, row.duration);
-        if (patched !== row.universal_segment_text) {
-          db.prepare('UPDATE storyboards SET universal_segment_text = ?, updated_at = ? WHERE id = ?').run(
-            patched,
-            now,
-            id
-          );
-        }
-      }
-    } catch (err) {
-      videoPromptRebuildFailed += 1;
-      log.warn('[分镜] 重新同步后重建 video_prompt 失败', { storyboard_id: id, error: err.message });
-    }
-  }
-
   const saved = getStoryboardsForEpisode(db, episodeIdNum);
   enrichFullNarrationTitleShotInDb(db, log, episodeIdNum);
+  propagateFullNarrationAssetsInDb(db, log, episodeIdNum);
   const totalDuration = saved.reduce((s, sb) => s + (Number(sb.duration) || 0), 0);
   db.prepare('UPDATE episodes SET duration = ?, updated_at = ? WHERE id = ?').run(
     Math.ceil((totalDuration + 59) / 60),
@@ -1555,12 +1760,16 @@ async function resyncFullNarrationForEpisodeAsync(db, log, episodeId) {
     episodeIdNum
   );
 
+  try {
+    require('./narrationAudioService').clearEpisodeFullNarrationAudio(db, log, episodeIdNum, storageRoot);
+  } catch (err) {
+    log.warn('[分镜] 重新同步后清除整段旁白配音失败', { episode_id: episodeIdNum, error: err.message });
+  }
+
   log.info('[分镜] 全文解说旁白已重新同步', {
     episode_id: episodeIdNum,
     segment_count: n,
     removed_storyboards: removed,
-    video_prompts_rebuilt: videoPromptsRebuilt,
-    video_prompt_rebuild_failed: videoPromptRebuildFailed,
   });
 
   return {
@@ -1569,8 +1778,6 @@ async function resyncFullNarrationForEpisodeAsync(db, log, episodeId) {
     total_duration: totalDuration,
     segment_count: n,
     removed_storyboards: removed,
-    video_prompts_rebuilt: videoPromptsRebuilt,
-    video_prompt_rebuild_failed: videoPromptRebuildFailed,
   };
 }
 
@@ -1636,6 +1843,176 @@ ${lastCtx}
 
 原始剧本与任务说明：
 ${originalUserPrompt}`;
+}
+
+/**
+ * 全文解说经典：仅按规则切分旁白入库，不调用 AI 生成分镜结构，不写 polished/video 提示词。
+ */
+async function processFullNarrationRulesStoryboardGeneration(
+  db, log, cfg, taskId, episodeId, style, fullNarrationSegments, narrationLimits, episodeRow
+) {
+  const episodeIdNum = Number(episodeId);
+  const limits = narrationLimits || DEFAULT_NARRATION_LIMITS;
+  const segments = fullNarrationSegments || [];
+  if (!segments.length) {
+    throw new Error('剧本正文无法切分为解说段落');
+  }
+
+  const streamStyle = (style && String(style).trim()) || cfg?.style?.default_style || '';
+  const streamVideoRatio = cfg?.style?.default_video_ratio || '16:9';
+  const deriveOpts = {
+    universalOmni: false,
+    targetClipDuration: null,
+    fullNarrationMode: true,
+    narrationLimits: limits,
+  };
+
+  try {
+    taskService.updateTaskStatus(db, taskId, 'processing', 15, '正在按规则切分旁白分镜...');
+
+    purgeAllEpisodeStoryboards(db, log, episodeIdNum, resolveStorageRoot(loadConfig()));
+
+    const dramaId = episodeRow?.drama_id;
+    const defaultScene = dramaId
+      ? db.prepare(
+        'SELECT id, location, time FROM scenes WHERE drama_id = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1'
+      ).get(dramaId)
+      : null;
+
+    const template = {
+      title: '片头',
+      location: defaultScene?.location || '',
+      time: defaultScene?.time || '',
+      scene_id: defaultScene?.id || null,
+      action: '',
+      atmosphere: '',
+      dialogue: '',
+      characters: [],
+    };
+
+    const storyboards = [{ ...template }];
+    enforceFullNarrationSegments(storyboards, segments, log, taskId, limits);
+
+    taskService.updateTaskStatus(db, taskId, 'processing', 50, '正在保存分镜头...');
+    const saved = saveStoryboards(db, log, episodeId, storyboards, cfg, streamStyle, new Set(), deriveOpts);
+
+    cleanupGhostStoryboardRows(db, log, episodeIdNum);
+    enrichFullNarrationTitleShotInDb(db, log, episodeIdNum);
+    propagateFullNarrationAssetsInDb(db, log, episodeIdNum);
+
+    taskService.updateTaskStatus(db, taskId, 'processing', 75, '正在校验分镜角色与道具关联...');
+    let totalCharAdded = 0;
+    let totalPropAdded = 0;
+    for (const sb of saved) {
+      if (!sb?.id) continue;
+      const { added } = syncStoryboardCharacters(db, log, sb.id);
+      totalCharAdded += added.length;
+      const propSync = syncStoryboardProps(db, log, sb.id);
+      totalPropAdded += propSync.added.length;
+      try {
+        syncStoryboardCharacterLinksFromCharactersColumn(db, sb.id);
+      } catch (_) {}
+    }
+    if (totalCharAdded > 0 || totalPropAdded > 0) {
+      log.info('[分镜] 规则分镜角色/道具补全完成', {
+        episode_id: episodeId,
+        total_char_added: totalCharAdded,
+        total_prop_added: totalPropAdded,
+      });
+    }
+
+    const savedWithPrompts = getStoryboardsForEpisode(db, episodeIdNum);
+    const totalDuration = savedWithPrompts.reduce((sum, sb) => sum + (Number(sb.duration) || 0), 0);
+
+    taskService.updateTaskStatus(db, taskId, 'processing', 90, '正在更新剧集时长...');
+    db.prepare('UPDATE episodes SET duration = ?, updated_at = ? WHERE id = ?').run(
+      Math.ceil((totalDuration + 59) / 60),
+      new Date().toISOString(),
+      episodeIdNum
+    );
+
+    taskService.updateTaskResult(db, taskId, {
+      storyboards: savedWithPrompts,
+      total: savedWithPrompts.length,
+      total_duration: totalDuration,
+      duration_minutes: Math.ceil((totalDuration + 59) / 60),
+      truncated: false,
+      rules_only: true,
+    });
+    log.info('Full-narration rules storyboard generation completed', {
+      task_id: taskId,
+      episode_id: episodeId,
+      count: savedWithPrompts.length,
+    });
+  } catch (err) {
+    log.error('Full-narration rules storyboard generation failed', { error: err.message, task_id: taskId });
+    taskService.updateTaskError(db, taskId, err.message || '规则分镜生成失败');
+  }
+}
+
+/** 按旁白配音实际时长刷新 duration 后，AI 批量生成 polished_prompt + video_prompt */
+async function generateStoryboardPromptsFromAudioDurationAsync(db, log, episodeId, opts = {}) {
+  const episodeIdNum = Number(episodeId);
+  if (!Number.isFinite(episodeIdNum) || episodeIdNum <= 0) {
+    throw new Error('episode_id 无效');
+  }
+
+  const ep = db.prepare('SELECT id, drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL').get(episodeIdNum);
+  if (!ep) throw new Error('剧集不存在');
+
+  const { isDramaFullNarrationVideoMode } = require('./videoClient');
+  if (!isDramaFullNarrationVideoMode(db, ep.drama_id)) {
+    throw new Error('仅全文解说经典模式支持按配音时长生成提示词');
+  }
+
+  const storageRoot = resolveStorageRoot(loadConfig());
+  const { syncStoryboardDurationsFromNarrationAudio } = require('./narrationAudioService');
+  const durationSync = syncStoryboardDurationsFromNarrationAudio(db, log, episodeIdNum, storageRoot);
+
+  const rows = db
+    .prepare(
+      `SELECT id FROM storyboards
+       WHERE episode_id = ? AND deleted_at IS NULL
+         AND (creation_mode IS NULL OR creation_mode != 'universal')
+       ORDER BY storyboard_number ASC`
+    )
+    .all(episodeIdNum);
+  if (!rows.length) throw new Error('当前集尚无分镜');
+
+  const force = opts.force !== false;
+  let promptResult;
+  if (force) {
+    promptResult = await batchRebuildFullNarrationDualPromptsForEpisode(db, log, episodeIdNum, {
+      taskId: opts.taskId,
+      concurrency: opts.concurrency,
+    });
+  } else {
+    promptResult = await completeMissingVideoPromptsForEpisode(db, log, episodeIdNum, opts);
+  }
+
+  propagateFullNarrationAssetsInDb(db, log, episodeIdNum);
+  for (const row of rows) {
+    try {
+      syncStoryboardProps(db, log, row.id);
+      syncStoryboardCharacterLinksFromCharactersColumn(db, row.id);
+    } catch (_) {}
+  }
+
+  const saved = getStoryboardsForEpisode(db, episodeIdNum);
+  const totalDuration = saved.reduce((s, sb) => s + (Number(sb.duration) || 0), 0);
+  db.prepare('UPDATE episodes SET duration = ?, updated_at = ? WHERE id = ?').run(
+    Math.ceil((totalDuration + 59) / 60),
+    new Date().toISOString(),
+    episodeIdNum
+  );
+
+  return {
+    ...promptResult,
+    duration_sync: durationSync,
+    total_duration: totalDuration,
+    storyboard_count: saved.length,
+    storyboards: saved,
+  };
 }
 
 async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, model, style, userPrompt, systemPrompt, includeNarration, universalOmni, targetClipDurationSec = null, fullNarrationSegments = null, narrationLimits = DEFAULT_NARRATION_LIMITS) {
@@ -1869,28 +2246,33 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
     if (fullNarrationMode) {
       cleanupGhostStoryboardRows(db, log, episodeIdNum);
       enrichFullNarrationTitleShotInDb(db, log, episodeIdNum);
+      propagateFullNarrationAssetsInDb(db, log, episodeIdNum);
     }
 
-    // ── 分镜角色补全（字符串匹配，无 AI，极快）──────────────────────────────────
-    taskService.updateTaskStatus(db, taskId, 'processing', 75, '正在校验分镜角色关联...');
+    // ── 分镜角色/道具补全（字符串匹配，无 AI，只增不减；对齐 7b6c1a7 角色补全，并同样补道具）──
+    taskService.updateTaskStatus(db, taskId, 'processing', 75, '正在校验分镜角色与道具关联...');
     let totalCharAdded = 0;
+    let totalPropAdded = 0;
     for (const sb of saved) {
       if (!sb?.id) continue;
       const { added } = syncStoryboardCharacters(db, log, sb.id);
       totalCharAdded += added.length;
+      const propSync = syncStoryboardProps(db, log, sb.id);
+      totalPropAdded += propSync.added.length;
+      try {
+        syncStoryboardCharacterLinksFromCharactersColumn(db, sb.id);
+      } catch (_) {}
     }
-    if (totalCharAdded > 0) {
-      log.info('[分镜] 角色补全完成', { episode_id: episodeId, total_added: totalCharAdded });
+    if (totalCharAdded > 0 || totalPropAdded > 0) {
+      log.info('[分镜] 角色/道具补全完成', {
+        episode_id: episodeId,
+        total_char_added: totalCharAdded,
+        total_prop_added: totalPropAdded,
+      });
     }
 
-    // 全文解说经典：一次 AI 同时写 polished_prompt + video_prompt；其它模式仅写图片提示词
-    if (fullNarrationMode && !universalOmni) {
-      taskService.updateTaskStatus(db, taskId, 'processing', 76, '正在 AI 生成各镜图+视频提示词 0/0...');
-      await batchRebuildFullNarrationDualPromptsForEpisode(db, log, episodeIdNum, {
-        taskId,
-        concurrency: BATCH_VIDEO_PROMPT_CONCURRENCY,
-      });
-    } else if (!fullNarrationMode) {
+    // 全文解说经典：提示词改由「按配音时长生成」按钮单独触发，生成分镜时不跑 AI
+    if (!fullNarrationMode) {
       taskService.updateTaskStatus(db, taskId, 'processing', 76, '正在 AI 生成各镜图片提示词 0/0...');
       await batchPolishStoryboardImagePromptsForEpisode(db, log, episodeIdNum, {
         taskId,
@@ -1899,7 +2281,7 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
       });
     }
 
-    // 回读分镜，带上入库后写入的 polished_prompt
+    // 回读分镜，带上入库后写入的 polished_prompt（全文解说此时仍为空，待后续按钮生成）
     const savedWithPrompts = getStoryboardsForEpisode(db, episodeIdNum);
 
     taskService.updateTaskStatus(db, taskId, 'processing', 90, '正在更新剧集时长...');
@@ -2235,9 +2617,11 @@ The user enabled narrator voice-over for the whole episode. Every shot object MU
     // 传入 imageRatio 同时覆盖 default_video_ratio 和 default_image_ratio，
     // 确保分镜图/视频提示词、场景提取提示词都使用项目设定的比例
     const runCfg = { ...cfg, style: { ...(cfg?.style || {}), default_video_ratio: imageRatio, default_image_ratio: imageRatio } };
-    // 如果 model 为 null，则传 undefined，让 generateText 内部去兜底找默认配置
     const clipSec =
       videoClipDuration && Number(videoClipDuration) > 0 ? Number(videoClipDuration) : null;
+    // 全文解说经典也走 AI 分镜（对齐 7b6c1a7）：由模型填写 scene_id / characters / props，
+    // 入库后再用 enforceFullNarrationSegments 锁定旁白切段；不再用「空角色空道具」的纯规则壳。
+    // 如果 model 为 null，则传 undefined，让 generateText 内部去兜底找默认配置
     processStoryboardGeneration(
       db,
       log,
@@ -2605,6 +2989,67 @@ async function batchRebuildClassicVideoPromptsForEpisode(db, log, episodeId, opt
   return { rebuilt: succeeded, failed, total };
 }
 
+const SB_PROMPT_MIN_POLISHED_LEN = 10;
+const SB_PROMPT_MIN_VIDEO_LEN = 12;
+
+/** 仅为缺少 video_prompt（全文解说经典时含 polished_prompt）的分镜补全提示词 */
+async function completeMissingVideoPromptsForEpisode(db, log, episodeId, opts = {}) {
+  const episodeIdNum = Number(episodeId);
+  if (!Number.isFinite(episodeIdNum) || episodeIdNum <= 0) {
+    return { rebuilt: 0, failed: 0, skipped: 0, total: 0, targets: 0 };
+  }
+
+  const { isFullNarrationClassicStoryboard } = require('./classicVideoPromptBundle');
+  const rows = db
+    .prepare(
+      `SELECT s.*, e.drama_id
+       FROM storyboards s
+       JOIN episodes e ON e.id = s.episode_id AND e.deleted_at IS NULL
+       WHERE s.episode_id = ? AND s.deleted_at IS NULL
+         AND (s.creation_mode IS NULL OR s.creation_mode != 'universal')
+       ORDER BY s.storyboard_number ASC`
+    )
+    .all(episodeIdNum);
+
+  const targets = rows.filter((row) => {
+    const vp = String(row.video_prompt || '').trim();
+    const needVideo = vp.length < SB_PROMPT_MIN_VIDEO_LEN;
+    const needPolished =
+      isFullNarrationClassicStoryboard(db, row) &&
+      String(row.polished_prompt || '').trim().length < SB_PROMPT_MIN_POLISHED_LEN;
+    return needVideo || needPolished;
+  });
+
+  const skipped = rows.length - targets.length;
+  if (!targets.length) {
+    return { rebuilt: 0, failed: 0, skipped, total: rows.length, targets: 0 };
+  }
+
+  const concurrency = Math.max(1, Number(opts.concurrency) || BATCH_VIDEO_PROMPT_CONCURRENCY);
+  const { succeeded, failed } = await runConcurrentPool(
+    targets,
+    concurrency,
+    async (row) => {
+      if (isFullNarrationClassicStoryboard(db, row)) {
+        return rebuildFullNarrationDualPromptsForStoryboardAsync(db, log, row.id, opts);
+      }
+      return rebuildVideoPromptForStoryboardAsync(db, log, row.id, opts);
+    }
+  );
+
+  if (log?.info) {
+    log.info('[分镜] 补全缺失视频提示词完成', {
+      episode_id: episodeIdNum,
+      rebuilt: succeeded,
+      failed,
+      skipped,
+      targets: targets.length,
+    });
+  }
+
+  return { rebuilt: succeeded, failed, skipped, total: rows.length, targets: targets.length };
+}
+
 function copyStoryboardAssetLinks(db, fromSbId, toSbId) {
   const from = Number(fromSbId);
   const to = Number(toSbId);
@@ -2842,6 +3287,8 @@ module.exports = {
   rebuildVideoPromptForStoryboardAsync,
   batchRebuildClassicVideoPromptsForEpisode,
   batchRebuildFullNarrationDualPromptsForEpisode,
+  completeMissingVideoPromptsForEpisode,
+  generateStoryboardPromptsFromAudioDurationAsync,
   rebuildFullNarrationDualPromptsForStoryboardAsync,
   splitStoryboardByAudio,
   splitStoryboardByAudioAsync,

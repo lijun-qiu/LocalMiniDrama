@@ -1,5 +1,5 @@
-import { assetImageUrl } from './mediaUrl'
-import { parseDramaMetadata } from './canvasLayout'
+import { assetImageUrl } from './mediaUrl.js'
+import { parseDramaMetadata } from './canvasLayout.js'
 
 export function dramaUsesFirstLastFrame(drama) {
   const meta = parseDramaMetadata(drama?.metadata)
@@ -87,6 +87,39 @@ export function imageRecordUrl(record) {
   return assetImageUrl(record)
 }
 
+export function findNextStoryboard(storyboards, storyboardId) {
+  if (!Array.isArray(storyboards) || storyboardId == null) return null
+  const sorted = [...storyboards].sort((a, b) => {
+    const na = Number(a.storyboard_number ?? a.id)
+    const nb = Number(b.storyboard_number ?? b.id)
+    if (na !== nb) return na - nb
+    return Number(a.id) - Number(b.id)
+  })
+  const idx = sorted.findIndex((s) => Number(s.id) === Number(storyboardId))
+  if (idx < 0 || idx >= sorted.length - 1) return null
+  return sorted[idx + 1]
+}
+
+/** 下一镜分镜图 URL（经典首尾帧尾帧兜底，与 FilmCreate.getNextStoryboardFrameUrl 一致） */
+export function resolveNextStoryboardFrameUrl(nextSb, imagesBySbId) {
+  if (!nextSb) return ''
+  const fromFirst = imageRecordUrl(resolveSbFirstImageRecord(nextSb, imagesBySbId))
+  if (fromFirst) return fromFirst
+  const fromMain = imageRecordUrl(resolveSbMainImageRecord(nextSb, imagesBySbId))
+  if (fromMain) return fromMain
+  if (nextSb.composed_image || nextSb.image_url) {
+    return assetImageUrl({
+      image_url: nextSb.composed_image || nextSb.image_url,
+      local_path: nextSb.local_path,
+    })
+  }
+  const lp = String(nextSb.local_path || '').trim()
+  if (lp && !/\.(mp4|webm|mov|m4v)(\?|$)/i.test(lp)) {
+    return assetImageUrl({ local_path: lp })
+  }
+  return ''
+}
+
 /** 当前分镜视频（优先匹配 storyboard.video_url） */
 export function resolveSbVideoRecord(sb, videosBySbId) {
   if (!sb) return null
@@ -121,7 +154,7 @@ export function videoRecordUrl(record) {
   return ''
 }
 
-export function sbVideoFirstLastUrls(sb, imagesBySbId, useFirstLast) {
+export function sbVideoFirstLastUrls(sb, imagesBySbId, useFirstLast, options = {}) {
   const universal = sb?.creation_mode === 'universal'
   let first = ''
   let last = undefined
@@ -132,7 +165,14 @@ export function sbVideoFirstLastUrls(sb, imagesBySbId, useFirstLast) {
   if (useFirstLast && !universal) {
     const lastRec = resolveSbLastImageRecord(sb, imagesBySbId)
     const lu = imageRecordUrl(lastRec)
-    if (lu) last = lu
+    if (lu) {
+      last = lu
+    } else {
+      const nextSb = options.nextStoryboard
+        ?? (options.storyboards ? findNextStoryboard(options.storyboards, sb.id) : null)
+      const nextUrl = resolveNextStoryboardFrameUrl(nextSb, imagesBySbId)
+      if (nextUrl) last = nextUrl
+    }
   }
   return { first: first || undefined, last }
 }

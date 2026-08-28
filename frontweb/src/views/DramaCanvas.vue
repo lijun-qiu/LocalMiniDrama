@@ -493,9 +493,12 @@ async function onCreateSubmit(form) {
 }
 
 function getCanvasGenerationOptions() {
+  const epId = filterEpisodeId.value
+  const ep = (drama.value?.episodes || []).find((e) => Number(e.id) === Number(epId))
   return {
     ...getDramaGenerationOptions(drama.value),
     imagesBySbId: imagesBySbId.value,
+    storyboards: ep?.storyboards || [],
   }
 }
 

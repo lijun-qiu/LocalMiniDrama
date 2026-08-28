@@ -23,6 +23,12 @@ function routes(db, log, cfg) {
       const s = Number(body.speed);
       if (Number.isFinite(s) && s > 0) opts.speed = s;
     }
+    const provider = String(body?.provider || opts.provider || '').toLowerCase();
+    if (provider === 'indextts' && body?.auto_load_indextts !== false) {
+      opts.auto_load_indextts = true;
+    } else if (body?.auto_load_indextts === true) {
+      opts.auto_load_indextts = true;
+    }
     return opts;
   }
 
@@ -126,6 +132,47 @@ function routes(db, log, cfg) {
         }
       }
       response.success(res, results);
+    },
+
+    /** 整集旁白一次 IndexTTS 合成（写入 episodes.full_narration_audio_local_path） */
+    synthesizeEpisodeFullNarration: async (req, res) => {
+      const episodeId = Number(req.params.episode_id);
+      if (!Number.isFinite(episodeId) || episodeId <= 0) {
+        return response.badRequest(res, 'episode_id 无效');
+      }
+      try {
+        const narrationAudioService = require('../services/narrationAudioService');
+        const storagePath = getStoragePath();
+        const body = req.body || {};
+        const result = await narrationAudioService.synthesizeEpisodeFullNarration(db, log, episodeId, {
+          storage_base: storagePath,
+          provider: body.provider || 'indextts',
+          voice_id: body.voice_id,
+          emotion_text: body.emotion_text,
+          speed: body.speed,
+        });
+        response.success(res, result);
+      } catch (err) {
+        log.error('audio synthesize full narration', { episode_id: episodeId, error: err.message });
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 将整段旁白按各镜 narration 字数比例剪切到分镜 */
+    splitEpisodeFullNarration: async (req, res) => {
+      const episodeId = Number(req.params.episode_id);
+      if (!Number.isFinite(episodeId) || episodeId <= 0) {
+        return response.badRequest(res, 'episode_id 无效');
+      }
+      try {
+        const narrationAudioService = require('../services/narrationAudioService');
+        const storagePath = getStoragePath();
+        const result = narrationAudioService.splitFullNarrationToStoryboards(db, log, episodeId, storagePath);
+        response.success(res, result);
+      } catch (err) {
+        log.error('audio split full narration', { episode_id: episodeId, error: err.message });
+        response.internalError(res, err.message);
+      }
     },
   };
 }

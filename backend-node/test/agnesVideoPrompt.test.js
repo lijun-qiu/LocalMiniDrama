@@ -1,6 +1,10 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const { prepareAgnesVideoPrompt } = require('../src/services/videoClient');
+const {
+  prepareAgnesVideoPrompt,
+  buildAgnes25VideoBody,
+  applyAgnesSilentNegativePrompt,
+} = require('../src/services/videoClient');
 
 describe('prepareAgnesVideoPrompt', () => {
   it('strips 解说旁白 and appends silent constraint', () => {
@@ -30,5 +34,31 @@ describe('prepareAgnesVideoPrompt', () => {
     });
     assert.equal(useSilentNegative, true);
     assert.ok(prompt.includes('禁止人物开口'));
+  });
+});
+
+describe('applyAgnesSilentNegativePrompt', () => {
+  it('does not add negative_prompt for Agnes 2.5 Flash (API rejects the field)', () => {
+    const prepared = prepareAgnesVideoPrompt('场景：街道。动作：行走。', { forceSilent: true });
+    const { body } = buildAgnes25VideoBody({
+      model: 'agnes-video-v2.5-flash',
+      prompt: prepared.prompt,
+      duration: 5,
+      aspect_ratio: '16:9',
+      useOmniReference: false,
+      resolvedRefs: [],
+      firstResolved: null,
+      lastResolved: null,
+    });
+    applyAgnesSilentNegativePrompt(body, prepared.useSilentNegative, { model: 'agnes-video-2.5-flash' });
+    assert.equal(body.negative_prompt, undefined);
+    assert.ok(body.prompt.includes('禁止人物开口'));
+  });
+
+  it('adds negative_prompt for Agnes V2.0 only', () => {
+    const body = { model: 'agnes-video-v2.0', prompt: 'test' };
+    applyAgnesSilentNegativePrompt(body, true, { model: 'agnes-video-v2.0' });
+    assert.ok(body.negative_prompt);
+    assert.match(body.negative_prompt, /speech, dialogue, voiceover/);
   });
 });

@@ -414,6 +414,7 @@
             type="primary"
             :loading="pipelineRunning && !pipelinePaused"
             :disabled="!currentEpisodeId || pipelineRunning"
+            title="提取角色/场景/道具 → 分镜 → 配音 → 生成提示词 → 生图 → 生视频 → 合成整集（步骤 1–9）"
             @click="startOneClickPipeline"
           >
             一键成片带图片视频
@@ -421,7 +422,7 @@
           <el-button
             :loading="pipelineRunning && !pipelinePaused"
             :disabled="!currentEpisodeId || pipelineRunning"
-            title="提取角色、场景、道具，生成分镜脚本与角色/场景/道具/分镜图（步骤 1–8，生图 7 路并发），不生成分镜视频与成片"
+            title="提取→分镜→配音→提示词→生图（步骤 1–7），不含分镜视频与成片"
             @click="startStoryboardScriptPipeline"
           >
             一键生成分镜脚本
@@ -956,7 +957,7 @@
         <div v-if="storyboardIncludeNarration" class="sb-dubbing-block">
           <template v-if="storyboardFullNarrationVideoMode">
             <p class="sb-full-narration-hint">
-              开启本模式后，默认同时打开：首尾帧参考图、字幕（合成整集）、IndexTTS 旁白配音。第 1 镜为片头（无旁白）；旁白从第 2 镜起按剧本原文逐字拆段。建议流程：<strong>先配置下方配音并一键生成</strong>（旁白下方可试听）→ 再生成分镜视频 → 成片自动混入旁白并烧录逐句字幕（不再重复跑 IndexTTS）；尾帧默认可用下一镜分镜图。
+              开启本模式后，默认同时打开：首尾帧参考图、字幕（合成整集）、IndexTTS 旁白配音。第 1 镜为片头（无旁白）；旁白从第 2 镜起按剧本原文逐字拆段（<strong>规则切分，不生图/视频提示词</strong>）。建议流程：<strong>生成分镜（规则切分）</strong> → 一键生成配音 → <strong>按配音时长生成提示词</strong> → 再生成分镜视频 → 成片自动混入旁白并烧录字幕。
             </p>
             <div class="sb-full-narration-speed-row">
               <span class="sb-full-narration-speed-label">朗读语速</span>
@@ -972,8 +973,28 @@
           <div class="sb-dubbing-config">
             <div class="sb-dubbing-config-head">
               <span class="sb-dubbing-config-title">旁白配音配置</span>
-              <el-tag v-if="indexttsAvailable" type="success" size="small">IndexTTS2 已就绪</el-tag>
+              <el-tag v-if="indexttsModelLoaded" type="success" size="small">模型已加载</el-tag>
+              <el-tag v-else-if="indexttsInstallOk" type="info" size="small">模型未加载</el-tag>
               <el-tag v-else type="warning" size="small">IndexTTS2 未就绪</el-tag>
+              <el-button
+                size="small"
+                type="primary"
+                :loading="indexttsLoading"
+                :disabled="indexttsModelLoaded || !videoIndexTtsNarration"
+                @click="onLoadIndexTtsModel"
+              >
+                加载模型
+              </el-button>
+              <el-button
+                size="small"
+                plain
+                type="danger"
+                :loading="indexttsUnloading"
+                :disabled="!indexttsModelLoaded"
+                @click="onUnloadIndexTtsModel"
+              >
+                卸载模型
+              </el-button>
             </div>
             <div class="indextts-controls">
               <el-form-item label="IndexTTS 旁白" class="indextts-main-item">
@@ -1025,7 +1046,7 @@
                   <el-select v-model="indexttsSpeed" placeholder="语速" style="width: 120px">
                     <el-option v-for="opt in indexttsSpeedOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
                   </el-select>
-                  <span class="video-option-hint">生成旁白配音时的语速，默认 1.2 倍</span>
+                  <span class="video-option-hint">生成旁白配音时的语速，默认 1.1 倍</span>
                 </el-form-item>
               </template>
             </div>
@@ -1058,28 +1079,8 @@
             </div>
           </div>
 
-          <div v-if="storyboards.length > 0" class="sb-dubbing-actions">
+          <div v-if="storyboardFullNarrationVideoMode" class="sb-dubbing-resync-row">
             <el-button
-              type="primary"
-              size="small"
-              :disabled="!currentEpisodeId || !videoIndexTtsNarration"
-              :loading="batchNarrationTtsRunning"
-              @click="onBatchGenerateNarrationTts"
-            >
-              一键生成配音
-            </el-button>
-            <el-button
-              size="small"
-              plain
-              type="primary"
-              :disabled="!currentEpisodeId || !videoIndexTtsNarration || remainingNarrationTtsCount === 0"
-              :loading="batchNarrationTtsRunning"
-              @click="onCompleteRemainingNarrationTts"
-            >
-              补全剩余配音{{ remainingNarrationTtsCount > 0 ? `（${remainingNarrationTtsCount}）` : '' }}
-            </el-button>
-            <el-button
-              v-if="storyboardFullNarrationVideoMode"
               class="sb-export-srt-btn"
               size="small"
               plain
@@ -1089,17 +1090,6 @@
               @click="onResyncFullNarration"
             >
               重新同步旁白分段
-            </el-button>
-            <el-button
-              size="small"
-              plain
-              type="danger"
-              :disabled="!currentEpisodeId || clearingMediaKind !== '' || pipelineRunning"
-              :loading="clearingMediaKind === 'narration_audio'"
-              title="清除本集全部分镜旁白/对白配音文件引用（不删分镜文本）"
-              @click="onClearEpisodeMedia('narration_audio')"
-            >
-              清除配音
             </el-button>
           </div>
         </div>
@@ -1148,113 +1138,364 @@
             {{ storyboardCopyBatchOptions.length > 1 ? `复制描述词 (${storyboardCopyBatchLabel})` : `一键复制描述词（${storyboardPromptCopyCount}）` }}
           </el-button>
         </div>
-        <div class="asset-actions sb-batch-actions">
-          <div class="flex">
-            <el-button
-              type="primary"
-              size="large"
-              :loading="storyboardGenerating || universalOmniPolishRunning"
-              :disabled="!currentEpisodeId || storyboardGenerating || universalOmniPolishRunning"
-              @click="onGenerateStoryboard()"
-            >
-              {{ storyboards.length > 0 ? '重新生成分镜' : 'AI 生成分镜' }}
-            </el-button>
-            <el-tooltip content="固定生成 7 条分镜，用于快速测试流程" placement="top">
+        <div class="sb-workflow">
+          <!-- 1. 分镜 -->
+          <div class="sb-workflow-step">
+            <div class="sb-workflow-step-head">
+              <span class="sb-workflow-step-num">1</span>
+              <span class="sb-workflow-step-title">分镜</span>
+              <span v-if="storyboards.length > 0" class="sb-workflow-step-status sb-workflow-step-status--ok">
+                共 {{ storyboards.length }} 镜
+              </span>
+              <span v-else class="sb-workflow-step-status">待生成</span>
+            </div>
+            <div class="sb-workflow-step-actions">
               <el-button
-                plain
-                size="large"
+                type="primary"
+                size="small"
                 :loading="storyboardGenerating || universalOmniPolishRunning"
                 :disabled="!currentEpisodeId || storyboardGenerating || universalOmniPolishRunning"
-                @click="onGenerateTestStoryboard"
+                @click="onGenerateStoryboard()"
               >
-                测试生成分镜（7镜）
+                {{ storyboards.length > 0 ? '重新生成分镜' : 'AI 生成分镜' }}
               </el-button>
-            </el-tooltip>
-            <ElButton type="info" plain size="large" @click="onAddSingleStoryboard">
-            添加一个分镜
-            </ElButton>
-          </div>
-          <template v-if="storyboards.length > 0">
-            <div class="sb-batch-right">
-              <el-button
-                type="success"
-                plain
-                size="large"
-                :loading="batchImageRunning"
-                :disabled="!currentEpisodeId || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
-                @click="startBatchImageGeneration"
-              >
-                批量生成分镜图
-              </el-button>
-              <el-button
-                type="danger"
-                plain
-                size="large"
-                :loading="clearingMediaKind === 'images'"
-                :disabled="!currentEpisodeId || clearingMediaKind !== '' || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
-                title="清除本集全部分镜图（含首尾帧历史图），保留分镜文案"
-                @click="onClearEpisodeMedia('images')"
-              >
-                清除分镜图
-              </el-button>
-              <el-button
-                type="warning"
-                plain
-                size="large"
-                :loading="batchVideoRunning"
-                :disabled="!currentEpisodeId || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
-                @click="startBatchVideoGeneration"
-              >
-                批量生成分镜视频
-              </el-button>
-              <el-button
-                type="danger"
-                plain
-                size="large"
-                :loading="clearingMediaKind === 'videos'"
-                :disabled="!currentEpisodeId || clearingMediaKind !== '' || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
-                title="清除本集全部分镜视频与成片，保留分镜文案与图片"
-                @click="onClearEpisodeMedia('videos')"
-              >
-                清除视频
-              </el-button>
-              <el-button v-if="batchImageRunning" size="large" type="danger" plain @click="batchImageStopping = true">停止图片</el-button>
-              <el-button v-if="batchVideoRunning" size="large" type="danger" plain @click="batchVideoStopping = true">停止视频</el-button>
-            </div>
-            <div class="batch-video-options" style="margin-top:8px;display:flex;align-items:center;gap:8px;font-size:13px;flex-wrap:wrap;">
-              <span style="color:#606266">视频模型</span>
-              <el-select
-                v-model="defaultVideoModel"
-                size="small"
-                style="width: 168px"
-                @change="onDefaultVideoModelChange"
-              >
-                <el-option
-                  v-for="opt in AGNES_VIDEO_MODEL_OPTIONS"
-                  :key="opt.value"
-                  :label="opt.label"
-                  :value="opt.value"
-                />
-              </el-select>
-              <el-checkbox v-model="videoFrameContiguity" size="small">
-                连贯帧模式（自动衔接相邻视频帧）
-              </el-checkbox>
-              <el-tooltip placement="top" :show-after="100">
-                <template #content>
-                  <div style="max-width:320px;line-height:1.7">
-                    <div style="font-weight:600;margin-bottom:4px">连贯帧模式说明</div>
-                    <div>启用后批量视频<strong>串行</strong>生成，每条视频的<b>末帧</b>截取并作为下一条的<b>首帧</b>。与上方「首尾帧参考图」（本镜图+下一镜图、可 7 路并发）不同。</div>
-                    <div style="margin-top:6px">若已开「首尾帧参考图」，将优先用本镜/下一镜图片，并保持并发，不再走视频末帧衔接。</div>
-                    <div style="margin-top:8px;font-weight:600">⚠️ 需要模型支持图生视频（i2v）</div>
-                    <div style="margin-top:4px">
-                      ✅ 支持：kling-video、kling-omni-video、wan2.2-kf2v-flash、wan2.6-i2v-flash<br/>
-                      ❌ 不支持（末帧将被忽略）：wan2.6-t2v、wan2.6-r2v-flash、wanx2.1-vace-plus 等纯文生视频模型
-                    </div>
-                    <div style="margin-top:8px;color:#faad14">如当前视频模型不支持 i2v，启用此选项不会报错，但末帧衔接不会生效。</div>
-                  </div>
-                </template>
-                <el-icon style="color:#9ca3af;cursor:help"><QuestionFilled /></el-icon>
+              <el-tooltip content="固定生成 7 条分镜，用于快速测试流程" placement="top">
+                <el-button
+                  plain
+                  size="small"
+                  :loading="storyboardGenerating || universalOmniPolishRunning"
+                  :disabled="!currentEpisodeId || storyboardGenerating || universalOmniPolishRunning"
+                  @click="onGenerateTestStoryboard"
+                >
+                  测试（7镜）
+                </el-button>
               </el-tooltip>
+              <el-button type="info" plain size="small" @click="onAddSingleStoryboard">
+                添加分镜
+              </el-button>
+            </div>
+          </div>
+
+          <template v-if="storyboards.length > 0">
+            <!-- 2. 配音 -->
+            <div class="sb-workflow-step">
+              <div class="sb-workflow-step-head">
+                <span class="sb-workflow-step-num">2</span>
+                <span class="sb-workflow-step-title">配音</span>
+                <span
+                  v-if="storyboardNarrationCoverage.total > 0"
+                  class="sb-workflow-step-status"
+                  :class="{ 'sb-workflow-step-status--ok': storyboardNarrationCoverage.dubbed >= storyboardNarrationCoverage.total }"
+                >
+                  {{ storyboardNarrationCoverage.dubbed }}/{{ storyboardNarrationCoverage.total }}
+                </span>
+                <span v-else-if="!storyboardIncludeNarration" class="sb-workflow-step-status">未开启旁白</span>
+                <span v-else class="sb-workflow-step-status">无旁白文本</span>
+              </div>
+              <div class="sb-workflow-step-actions">
+                <el-button
+                  type="primary"
+                  size="small"
+                  :disabled="!currentEpisodeId || !storyboardIncludeNarration || !videoIndexTtsNarration || indexttsLoading"
+                  :loading="batchNarrationTtsRunning || indexttsLoading"
+                  title="为本集有旁白的分镜批量生成 IndexTTS 配音（将自动加载模型，GPU 串行合成）"
+                  @click="onBatchGenerateNarrationTts"
+                >
+                  一键生成配音
+                </el-button>
+              </div>
+            </div>
+
+            <!-- 3. 生成提示词 -->
+            <div v-if="storyboardPromptCoverage" class="sb-workflow-step">
+              <div class="sb-workflow-step-head">
+                <span class="sb-workflow-step-num">3</span>
+                <span class="sb-workflow-step-title">生成提示词</span>
+                <span
+                  class="sb-workflow-step-status"
+                  :class="{ 'sb-workflow-step-status--ok': storyboardPromptCoverage.imageOk && storyboardPromptCoverage.videoOk }"
+                >
+                  <template v-if="storyboardPromptCoverage.showImagePromptComplete">
+                    生图 {{ storyboardPromptCoverage.polished }}/{{ storyboardPromptCoverage.total }}
+                  </template>
+                  <template v-if="storyboardUniversalOmni">
+                    · 全能 {{ storyboardPromptCoverage.universal }}/{{ storyboardPromptCoverage.uniShots || storyboardPromptCoverage.total }}
+                  </template>
+                  <template v-else-if="storyboardPromptCoverage.showVideoPromptComplete || storyboardFullNarrationVideoMode">
+                    · 视频 {{ storyboardPromptCoverage.video }}/{{ storyboardPromptCoverage.total }}
+                  </template>
+                </span>
+              </div>
+              <div class="sb-workflow-step-actions">
+                <el-button
+                  type="primary"
+                  size="small"
+                  :disabled="!currentEpisodeId || !canGenerateStoryboardPromptsStep"
+                  :loading="generatingStoryboardPromptsStep"
+                  :title="storyboardFullNarrationVideoMode && !storyboardUniversalOmni
+                    ? '读取各镜旁白配音实际时长，刷新 duration 并 AI 生成 polished_prompt + video_prompt'
+                    : '补全缺失的生图/视频提示词'"
+                  @click="onGenerateStoryboardPromptsStep"
+                >
+                  {{ storyboardFullNarrationVideoMode && !storyboardUniversalOmni ? '按配音时长生成提示词' : '生成提示词' }}
+                </el-button>
+              </div>
+            </div>
+
+            <!-- 4. 生图 -->
+            <div v-if="storyboardPromptCoverage" class="sb-workflow-step">
+              <div class="sb-workflow-step-head">
+                <span class="sb-workflow-step-num">4</span>
+                <span class="sb-workflow-step-title">生图</span>
+                <span
+                  class="sb-workflow-step-status"
+                  :class="{ 'sb-workflow-step-status--ok': storyboardPromptCoverage.sbImageOk }"
+                >
+                  {{ storyboardPromptCoverage.sbImagesReady }}/{{ storyboardPromptCoverage.total }}
+                </span>
+              </div>
+              <div class="sb-workflow-step-actions">
+                <el-button
+                  type="success"
+                  size="small"
+                  :loading="batchImageRunning"
+                  :disabled="!currentEpisodeId || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
+                  @click="startBatchImageGeneration"
+                >
+                  批量生成分镜图
+                </el-button>
+                <el-button v-if="batchImageRunning" size="small" type="danger" plain @click="batchImageStopping = true">
+                  停止
+                </el-button>
+              </div>
+            </div>
+
+            <!-- 5. 生视频 -->
+            <div v-if="storyboardPromptCoverage" class="sb-workflow-step">
+              <div class="sb-workflow-step-head">
+                <span class="sb-workflow-step-num">5</span>
+                <span class="sb-workflow-step-title">生视频</span>
+                <span
+                  class="sb-workflow-step-status"
+                  :class="{ 'sb-workflow-step-status--ok': storyboardPromptCoverage.sbVideoOk }"
+                >
+                  {{ storyboardPromptCoverage.sbVideosReady }}/{{ storyboardPromptCoverage.total }}
+                </span>
+              </div>
+              <div class="sb-workflow-step-actions">
+                <el-button
+                  type="warning"
+                  size="small"
+                  :loading="batchVideoRunning"
+                  :disabled="!currentEpisodeId || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
+                  @click="startBatchVideoGeneration"
+                >
+                  批量生成分镜视频
+                </el-button>
+                <el-button v-if="batchVideoRunning" size="small" type="danger" plain @click="batchVideoStopping = true">
+                  停止
+                </el-button>
+              </div>
+              <div class="sb-workflow-video-options">
+                <span class="sb-workflow-video-options-label">视频模型</span>
+                <el-select
+                  v-model="defaultVideoModel"
+                  size="small"
+                  style="width: 168px"
+                  @change="onDefaultVideoModelChange"
+                >
+                  <el-option
+                    v-for="opt in AGNES_VIDEO_MODEL_OPTIONS"
+                    :key="opt.value"
+                    :label="opt.label"
+                    :value="opt.value"
+                  />
+                </el-select>
+                <el-checkbox v-model="videoFrameContiguity" size="small">
+                  连贯帧模式
+                </el-checkbox>
+                <el-tooltip placement="top" :show-after="100">
+                  <template #content>
+                    <div style="max-width:320px;line-height:1.7">
+                      <div style="font-weight:600;margin-bottom:4px">连贯帧模式说明</div>
+                      <div>启用后批量视频<strong>串行</strong>生成，每条视频的<b>末帧</b>截取并作为下一条的<b>首帧</b>。与「首尾帧参考图」（本镜图+下一镜图、可 7 路并发）不同。</div>
+                      <div style="margin-top:6px">若已开「首尾帧参考图」，将优先用本镜/下一镜图片，并保持并发，不再走视频末帧衔接。</div>
+                      <div style="margin-top:8px;font-weight:600">⚠️ 需要模型支持图生视频（i2v）</div>
+                      <div style="margin-top:4px">
+                        ✅ 支持：kling-video、kling-omni-video、wan2.2-kf2v-flash、wan2.6-i2v-flash<br/>
+                        ❌ 不支持（末帧将被忽略）：wan2.6-t2v、wan2.6-r2v-flash、wanx2.1-vace-plus 等纯文生视频模型
+                      </div>
+                      <div style="margin-top:8px;color:#faad14">如当前视频模型不支持 i2v，启用此选项不会报错，但末帧衔接不会生效。</div>
+                    </div>
+                  </template>
+                  <el-icon style="color:#9ca3af;cursor:help"><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </div>
+            </div>
+
+            <!-- 补全 -->
+            <div v-if="storyboardPromptCoverage" class="sb-workflow-section sb-workflow-section--complete">
+              <span class="sb-workflow-section-label">补全</span>
+              <div class="sb-workflow-section-btns">
+                <el-button
+                  size="small"
+                  plain
+                  type="primary"
+                  :disabled="!currentEpisodeId || !storyboardIncludeNarration || !videoIndexTtsNarration || indexttsLoading || remainingNarrationTtsCount === 0"
+                  :loading="batchNarrationTtsRunning || indexttsLoading"
+                  title="仅为尚未配音的分镜补全（将自动加载模型，GPU 串行合成）"
+                  @click="onCompleteRemainingNarrationTts"
+                >
+                  补全配音{{ remainingNarrationTtsCount > 0 ? `（${remainingNarrationTtsCount}）` : '' }}
+                </el-button>
+                <el-button
+                  v-if="storyboardPromptCoverage.showImagePromptComplete"
+                  size="small"
+                  plain
+                  type="primary"
+                  :loading="completingImagePrompts"
+                  :disabled="!currentEpisodeId || storyboardPromptCoverage.remainingImagePrompts === 0 || completingImagePrompts || storyboardGenerating || universalOmniPolishRunning || batchImageRunning || batchVideoRunning"
+                  @click="onCompleteMissingImagePrompts"
+                >
+                  补全生图提示词{{ storyboardPromptCoverage.remainingImagePrompts > 0 ? `（${storyboardPromptCoverage.remainingImagePrompts}）` : '' }}
+                </el-button>
+                <el-button
+                  v-if="storyboardPromptCoverage.showVideoPromptComplete"
+                  size="small"
+                  plain
+                  type="primary"
+                  :loading="completingVideoPrompts || universalOmniPolishRunning"
+                  :disabled="!currentEpisodeId || storyboardPromptCoverage.remainingVideoPrompts === 0 || completingVideoPrompts || universalOmniPolishRunning || storyboardGenerating || batchImageRunning || batchVideoRunning"
+                  @click="onCompleteMissingVideoPrompts"
+                >
+                  {{ storyboardUniversalOmni ? '补全全能片段' : '补全视频提示词' }}{{ storyboardPromptCoverage.remainingVideoPrompts > 0 ? `（${storyboardPromptCoverage.remainingVideoPrompts}）` : '' }}
+                </el-button>
+                <el-button
+                  size="small"
+                  plain
+                  type="primary"
+                  :loading="batchImageRunning"
+                  :disabled="!currentEpisodeId || storyboardPromptCoverage.remainingSbImages === 0 || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
+                  @click="startBatchImageGeneration"
+                >
+                  补全分镜图{{ storyboardPromptCoverage.remainingSbImages > 0 ? `（${storyboardPromptCoverage.remainingSbImages}）` : '' }}
+                </el-button>
+                <el-button
+                  size="small"
+                  plain
+                  type="primary"
+                  :loading="batchVideoRunning"
+                  :disabled="!currentEpisodeId || storyboardPromptCoverage.remainingSbVideos === 0 || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
+                  :title="storyboardPromptCoverage.sbVideosBlocked > 0
+                    ? `另有 ${storyboardPromptCoverage.sbVideosBlocked} 镜缺分镜图或参考图，需先生图/配参考后再补全视频`
+                    : '仅为缺视频且已具备首帧/参考图的分镜批量生成'"
+                  @click="startBatchVideoGeneration"
+                >
+                  补全分镜视频{{ storyboardPromptCoverage.remainingSbVideos > 0 ? `（${storyboardPromptCoverage.remainingSbVideos}）` : '' }}
+                </el-button>
+              </div>
+            </div>
+
+            <!-- 清除 -->
+            <div class="sb-workflow-section sb-workflow-section--clear">
+              <span class="sb-workflow-section-label">清除</span>
+              <div class="sb-workflow-section-btns">
+                <el-button
+                  size="small"
+                  plain
+                  type="danger"
+                  :disabled="!currentEpisodeId || clearingMediaKind !== '' || pipelineRunning"
+                  :loading="clearingMediaKind === 'narration_audio'"
+                  title="清除本集全部分镜旁白/对白配音文件引用（不删分镜文本）"
+                  @click="onClearEpisodeMedia('narration_audio')"
+                >
+                  删除配音
+                </el-button>
+                <el-button
+                  size="small"
+                  plain
+                  type="danger"
+                  :disabled="!currentEpisodeId || clearingMediaKind !== '' || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
+                  :loading="clearingMediaKind === 'images'"
+                  title="清除本集全部分镜图（含首尾帧历史图），保留分镜文案"
+                  @click="onClearEpisodeMedia('images')"
+                >
+                  删除分镜图
+                </el-button>
+                <el-button
+                  size="small"
+                  plain
+                  type="danger"
+                  :disabled="!currentEpisodeId || clearingMediaKind !== '' || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
+                  :loading="clearingMediaKind === 'videos'"
+                  title="清除本集全部分镜视频与成片，保留分镜文案与图片"
+                  @click="onClearEpisodeMedia('videos')"
+                >
+                  删除视频
+                </el-button>
+              </div>
+            </div>
+
+            <!-- 就绪状态 -->
+            <div
+              v-if="storyboardPromptCoverage"
+              class="sb-prompt-coverage-bar"
+              :class="`sb-prompt-coverage-bar--${storyboardPromptCoverage.status}`"
+            >
+              <div class="sb-prompt-coverage-head">
+                <span class="sb-prompt-coverage-title">分镜就绪</span>
+                <el-tag
+                  v-if="storyboardPromptCoverage.status === 'generating'"
+                  size="small"
+                  type="primary"
+                  effect="plain"
+                >
+                  生成中
+                </el-tag>
+                <el-tag
+                  v-else-if="storyboardPromptCoverage.status === 'complete'"
+                  size="small"
+                  type="success"
+                  effect="plain"
+                >
+                  已全部就绪
+                </el-tag>
+                <el-tag
+                  v-else-if="storyboardPromptCoverage.status === 'partial'"
+                  size="small"
+                  type="warning"
+                  effect="plain"
+                >
+                  部分缺失
+                </el-tag>
+                <el-tag v-else size="small" type="info" effect="plain">待生成</el-tag>
+              </div>
+              <div class="sb-prompt-coverage-lines">
+                <div class="sb-prompt-coverage-line">
+                  <span :class="{ 'sb-prompt-coverage-ok': storyboardPromptCoverage.imageOk }">
+                    🖼 {{ storyboardPromptCoverage.imageLine }}
+                  </span>
+                </div>
+                <div class="sb-prompt-coverage-line">
+                  <span :class="{ 'sb-prompt-coverage-ok': storyboardPromptCoverage.videoOk }">
+                    🎬 {{ storyboardPromptCoverage.videoLine }}
+                  </span>
+                </div>
+                <div class="sb-prompt-coverage-line">
+                  <span :class="{ 'sb-prompt-coverage-ok': storyboardPromptCoverage.sbImageOk }">
+                    🖼 {{ storyboardPromptCoverage.sbImageLine }}
+                  </span>
+                </div>
+                <div class="sb-prompt-coverage-line">
+                  <span :class="{ 'sb-prompt-coverage-ok': storyboardPromptCoverage.sbVideoOk }">
+                    🎬 {{ storyboardPromptCoverage.sbVideoLine }}
+                  </span>
+                </div>
+              </div>
+              <p v-if="storyboardPromptCoverage.modeNote" class="sb-prompt-coverage-note">{{ storyboardPromptCoverage.modeNote }}</p>
+              <p v-if="storyboardPromptCoverage.isGen && storyboardGenStatusMessage" class="sb-prompt-coverage-live">
+                {{ storyboardGenStatusMessage }}
+              </p>
             </div>
           </template>
         </div>
@@ -1493,6 +1734,9 @@
               <div class="sb-prompt-label">
                 <span class="sb-dot"></span>
                 <span>{{ storyboardUseFirstLastFrame ? '基础图片提示词' : '图片提示词' }}</span>
+                <el-tag size="small" :type="sbImagePromptStatusTag(sb).type" effect="plain" class="sb-prompt-status-tag">
+                  {{ sbImagePromptStatusTag(sb).text }}
+                </el-tag>
                 <span v-if="storyboardUseFirstLastFrame" class="sb-prompt-hint-inline">首尾帧生图优先用右侧「查看提示词」里的专业版</span>
               </div>
               <div class="sb-prompt-row">
@@ -1527,7 +1771,12 @@
                 />
                 <div v-if="(sbNarration[sb.id] || sb.narration || '').toString().trim()" class="sb-narration-actions">
                   <el-tooltip content="为本镜解说旁白单独生成 IndexTTS 配音（生成视频时将自动混入）" placement="top">
-                    <el-button size="small" :loading="ttsSbNarrationIds.has(sb.id)" @click="onTtsSbNarration(sb)">
+                    <el-button
+                      size="small"
+                      :loading="ttsSbNarrationIds.has(sb.id)"
+                      :disabled="!videoIndexTtsNarration || indexttsLoading"
+                      @click="onTtsSbNarration(sb)"
+                    >
                       解说配音
                     </el-button>
                   </el-tooltip>
@@ -1946,6 +2195,9 @@
               <div class="sb-video-prompt-label">
                 <span class="sb-dot"></span>
                 <span>视频提示词</span>
+                <el-tag size="small" :type="sbVideoPromptStatusTag(sb).type" effect="plain" class="sb-prompt-status-tag">
+                  {{ sbVideoPromptStatusTag(sb).text }}
+                </el-tag>
               </div>
               <div class="sb-video-params-bar">
                 <div class="sb-video-prompt-text sb-video-prompt-text--preview">{{ sb.video_prompt || '暂无视频提示词（在「视频配置」保存后自动生成）' }}</div>
@@ -2010,7 +2262,7 @@
           <el-form-item label="字幕">
             <div class="video-option-row">
               <el-switch v-model="videoSubtitle" />
-              <span v-if="videoSubtitle" class="video-option-hint">开启后，合成整集时会检测解说旁白：若有文案则自动生成 SRT、按分镜时长合成旁白语音（过长加速 / 过短补静音）、与成片对齐后烧录字幕并混音。</span>
+              <span v-if="videoSubtitle" class="video-option-hint">开启后会烧录解说字幕：全文解说模式下在<strong>单镜视频生成后</strong>已混旁白并烧字幕，合成整集时不再二次烧录（避免叠两层字）；非全文解说模式则在合成整集时生成 SRT 并烧录。</span>
             </div>
           </el-form-item>
           <el-form-item label="对白烧录">
@@ -3194,21 +3446,24 @@ const projectAspectRatio = ref('16:9')
 const videoClipDuration = ref(5)
 
 /** Agnes 视频模型：外层总默认 + 每镜头可选 */
+const AGNES_VIDEO_MODEL_25_FLASH = 'agnes-video-2.5-flash'
 const AGNES_VIDEO_MODEL_25 = 'agnes-video-2.5'
 const AGNES_VIDEO_MODEL_20 = 'agnes-video-v2.0'
 const AGNES_VIDEO_MODEL_OPTIONS = [
-  { label: 'Agnes Video 2.0', value: AGNES_VIDEO_MODEL_20 },
+  { label: 'Agnes Video 2.5 Flash（免费）', value: AGNES_VIDEO_MODEL_25_FLASH },
   { label: 'Agnes Video 2.5', value: AGNES_VIDEO_MODEL_25 },
+  { label: 'Agnes Video 2.0', value: AGNES_VIDEO_MODEL_20 },
 ]
-const defaultVideoModel = ref(AGNES_VIDEO_MODEL_20)
+const defaultVideoModel = ref(AGNES_VIDEO_MODEL_25_FLASH)
 /** 分镜级覆盖；未设置时回落到 defaultVideoModel */
 const sbVideoModel = ref({})
 
 function normalizeAgnesVideoModelChoice(v) {
   const s = String(v || '').trim()
+  if (/agnes-video-v?2\.5-flash/i.test(s)) return AGNES_VIDEO_MODEL_25_FLASH
   if (/agnes-video-v?2\.5/i.test(s)) return AGNES_VIDEO_MODEL_25
   if (/agnes-video-v?2\.0/i.test(s)) return AGNES_VIDEO_MODEL_20
-  return AGNES_VIDEO_MODEL_20
+  return AGNES_VIDEO_MODEL_25_FLASH
 }
 
 function getSbVideoModel(sbId) {
@@ -3284,16 +3539,19 @@ const videoSubtitle = ref(true)
 const videoBurnDialogue = ref(false)
 /** IndexTTS2 旁白：逐句配音 + 逐句烧录字幕 */
 const videoIndexTtsNarration = ref(true)
-const indexttsAvailable = ref(false)
+const indexttsInstallOk = ref(false)
+const indexttsModelLoaded = ref(false)
+const indexttsLoading = ref(false)
+const indexttsUnloading = ref(false)
 const indexttsVoiceId = ref('gsv:008')
 const indexttsEmotionText = ref('自然流畅的解说语气，情绪饱满')
-const indexttsSpeed = ref(1.2)
+const indexttsSpeed = ref(1.1)
 const indexttsSpeedOptions = [
   { label: '0.8x', value: 0.8 },
   { label: '0.9x', value: 0.9 },
   { label: '1.0x', value: 1.0 },
-  { label: '1.1x', value: 1.1 },
-  { label: '1.2x（默认）', value: 1.2 },
+  { label: '1.1x（默认）', value: 1.1 },
+  { label: '1.2x', value: 1.2 },
   { label: '1.3x', value: 1.3 },
   { label: '1.5x', value: 1.5 },
 ]
@@ -3406,12 +3664,12 @@ const pipelineAbortRequested = ref(false)
 const pipelineErrorLog = ref([])
 const pipelineCurrentStep = ref('')
 const pipelineStepIndex = ref(0)    // 当前步骤序号（1-based）
-/** 全流程 10 步；仅文本框架为前 4 步；一键生成分镜脚本为前 8 步（含分镜图，不含视频） */
-const pipelineStepTotal = ref(10)
-/** 一键生成分镜脚本：图片生图并发（每路对应一个 API Key，步骤 5–8） */
-const STORYBOARD_SCRIPT_IMAGE_CONCURRENCY = 7
+/** 全流程 9 步；文本框架 4 步；一键分镜脚本 7 步（至生图，不含视频/成片） */
+const pipelineStepTotal = ref(9)
 /** 批量/一键分镜视频：与生图同为 7 路并发（对应多 Key；连贯帧模式仍强制串行） */
 const BATCH_VIDEO_CONCURRENCY = 7
+/** 一键/补全解说配音：IndexTTS 本机 GPU 独占，须串行合成 */
+const BATCH_NARRATION_TTS_CONCURRENCY = 1
 let pipelineResolveResume = null
 // 倒计时（两个生成阶段之间的确认窗口）
 const pipelineCountdown = ref(0)      // 剩余秒数，0 表示不在倒计时
@@ -3844,6 +4102,9 @@ const videoParamsTarget = ref(null)
 const videoParamsSaving = ref(false)
 const splitByAudioLoading = ref(false)
 const batchImageErrors = ref([])
+/** 补全缺失生图/视频提示词（就绪条「补全」按钮） */
+const completingImagePrompts = ref(false)
+const completingVideoPrompts = ref(false)
 // 批量生成分镜视频
 const batchVideoRunning = ref(false)
 const batchVideoStopping = ref(false)
@@ -3858,6 +4119,17 @@ const ttsSbIds = reactive(new Set())
 const ttsSbNarrationIds = reactive(new Set())
 const batchNarrationTtsRunning = ref(false)
 const remainingNarrationTtsCount = computed(() => getNarrationTtsTargets(true).length)
+/** 旁白配音覆盖（工作流步骤 2 状态） */
+const storyboardNarrationCoverage = computed(() => {
+  const list = storyboards.value || []
+  const withText = list.filter((sb) => sbNarrationText(sb).trim())
+  const dubbed = withText.filter((sb) => hasSbNarrationAudio(sb))
+  return {
+    total: withText.length,
+    dubbed: dubbed.length,
+    remaining: Math.max(0, withText.length - dubbed.length),
+  }
+})
 // 尾帧衔接 loading 状态
 const linkingTailFrameIds = reactive(new Set())
 // “上镜尾帧”（将上一分镜尾帧图片直接设为当前首帧）loading 状态
@@ -3915,10 +4187,12 @@ let storyboardLimitClearedTimer = null
 const storyboardIncludeNarration = ref(true)
 /** 全文解说旁白视频模式：分镜按剧本原文逐字拆段，narration 为原文摘录 */
 const storyboardFullNarrationVideoMode = ref(true)
-const narrationCharsPerSec = ref(5.5)
+const narrationCharsPerSec = ref(5)
 const narrationCharsPerSecOptions = [
-  { label: '5 字/秒', value: 5 },
-  { label: '5.5 字/秒（默认）', value: 5.5 },
+  { label: '5 字/秒（默认）', value: 5 },
+  { label: '5.2 字/秒', value: 5.2 },
+  { label: '5.4 字/秒', value: 5.4 },
+  { label: '5.5 字/秒', value: 5.5 },
   { label: '6 字/秒', value: 6 },
   { label: '6.5 字/秒', value: 6.5 },
   { label: '7 字/秒', value: 7 },
@@ -3927,13 +4201,202 @@ const narrationCharsPerSecOptions = [
   { label: '10 字/秒', value: 10 },
   { label: '12 字/秒', value: 12 },
 ]
-const fullNarrationTargetChars = computed(() => Math.round(9 * Number(narrationCharsPerSec.value || 5.5)))
-const fullNarrationMaxChars = computed(() => Math.round(10 * Number(narrationCharsPerSec.value || 5.5)))
+const fullNarrationTargetChars = computed(() => Math.round(9 * Number(narrationCharsPerSec.value || 5)))
+const fullNarrationMaxChars = computed(() => Math.round(10 * Number(narrationCharsPerSec.value || 5)))
 const fullNarrationMinChars = computed(() => {
-  const cps = Number(narrationCharsPerSec.value || 5.5)
+  const cps = Number(narrationCharsPerSec.value || 5)
   const max = Math.round(10 * cps)
   return Math.min(Math.round(8 * cps), max)
 })
+
+/** 分镜提示词就绪判定（与后端 batch 写入阈值大致对齐） */
+const SB_PROMPT_MIN_POLISHED = 10
+const SB_PROMPT_MIN_VIDEO = 12
+const SB_PROMPT_MIN_UNIVERSAL = 20
+
+function sbIsUniversal(sb) {
+  if (!sb?.id) return sb?.creation_mode === 'universal'
+  return sbCreationMode.value[sb.id] === 'universal' || sb.creation_mode === 'universal'
+}
+
+function sbHasAiImagePrompt(sb) {
+  return String(sb?.polished_prompt || '').trim().length >= SB_PROMPT_MIN_POLISHED
+}
+
+function sbHasVideoPrompt(sb) {
+  return String(sb?.video_prompt || '').trim().length >= SB_PROMPT_MIN_VIDEO
+}
+
+function sbUniversalSegmentReady(sb) {
+  if (!sb?.id) return false
+  const text = (sbUniversalSegmentText.value[sb.id] ?? sb.universal_segment_text ?? '').toString().trim()
+  return text.length >= SB_PROMPT_MIN_UNIVERSAL
+}
+
+function sbImagePromptStatusTag(sb) {
+  if (sbHasAiImagePrompt(sb)) return { type: 'success', text: 'AI 已润色' }
+  if (String(sb?.image_prompt || '').trim().length >= SB_PROMPT_MIN_POLISHED) return { type: 'info', text: '仅基础拼装' }
+  return { type: 'warning', text: '未生成' }
+}
+
+function sbVideoPromptStatusTag(sb) {
+  if (sbIsUniversal(sb) && sbUniversalSegmentReady(sb)) return { type: 'success', text: '全能片段就绪' }
+  if (sbHasVideoPrompt(sb)) return { type: 'success', text: '已生成' }
+  if (sbIsUniversal(sb)) return { type: 'warning', text: '缺全能片段' }
+  return { type: 'warning', text: '未生成' }
+}
+
+/** 本集分镜生图/视频提示词与分镜图/视频覆盖（持久展示，刷新后从库字段统计） */
+const storyboardPromptCoverage = computed(() => {
+  const list = storyboards.value || []
+  const total = list.length
+  if (!total) return null
+
+  const isFull = !!storyboardFullNarrationVideoMode.value
+  const isUniversal = !!storyboardUniversalOmni.value
+  const isGen = !!(
+    storyboardGenerating.value ||
+    universalOmniPolishRunning.value ||
+    completingImagePrompts.value ||
+    completingVideoPrompts.value ||
+    generatingPromptsFromAudio.value ||
+    batchImageRunning.value ||
+    batchVideoRunning.value
+  )
+
+  let polished = 0
+  let video = 0
+  let universal = 0
+  let uniShots = 0
+  let sbImagesReady = 0
+  let sbVideosReady = 0
+
+  for (const sb of list) {
+    if (sbHasAiImagePrompt(sb)) polished += 1
+    if (sbHasVideoPrompt(sb)) video += 1
+    if (sbIsUniversal(sb)) {
+      uniShots += 1
+      if (sbUniversalSegmentReady(sb)) universal += 1
+    }
+    if (sbHasStoryboardImage(sb)) sbImagesReady += 1
+    if (sbHasStoryboardVideo(sb)) sbVideosReady += 1
+  }
+
+  let modeNote = ''
+  let expectImageAi = true
+  let expectVideoAi = false
+  let expectUniversal = false
+
+  if (isFull && !isUniversal) {
+    modeNote = '全文解说经典：分镜仅规则切分旁白；配音完成后点「按配音时长生成提示词」写入 polished + video'
+    expectVideoAi = true
+  } else if (isFull && isUniversal) {
+    modeNote = '全文+全能：入库不批量润色；生视频靠全能片段，提示词需手动或重新生成分镜'
+    expectImageAi = false
+    expectUniversal = true
+  } else if (isUniversal) {
+    modeNote = '全能分镜：AI 润色生图提示词；生视频主用全能片段（留空时用 video_prompt）'
+    expectUniversal = true
+  } else {
+    modeNote = '经典分镜：AI 润色生图提示词；video_prompt 入库时规则拼装（视频参数保存可重建）'
+  }
+
+  const imageLine = expectImageAi
+    ? `生图提示词（AI 润色 polished_prompt）${polished}/${total}`
+    : `生图提示词 ${polished}/${total}（本模式不自动 AI 润色）`
+
+  let videoLine
+  if (expectUniversal && expectVideoAi) {
+    videoLine = `全能片段 ${universal}/${uniShots || total} · 视频提示词（AI）${video}/${total}`
+  } else if (expectUniversal) {
+    videoLine = `全能片段 ${universal}/${uniShots || total} · 视频提示词（备用）${video}/${total}`
+  } else if (expectVideoAi) {
+    videoLine = `视频提示词（AI）${video}/${total}`
+  } else {
+    videoLine = `视频提示词 ${video}/${total}（规则拼装）`
+  }
+
+  const sbImageLine = `分镜图（已生成）${sbImagesReady}/${total}`
+
+  const sbVideosMissing = total - sbVideosReady
+  const remainingSbVideos = list.filter((sb) => sbNeedsBatchVideo(sb)).length
+  const sbVideosBlocked = Math.max(0, sbVideosMissing - remainingSbVideos)
+  let sbVideoLine = `分镜视频（已生成）${sbVideosReady}/${total}`
+  if (sbVideosMissing > 0) {
+    sbVideoLine += sbVideosBlocked > 0
+      ? ` · 缺 ${sbVideosMissing}（可补全 ${remainingSbVideos}，${sbVideosBlocked} 需先备图/参考）`
+      : ` · 待补全 ${sbVideosMissing}`
+  }
+
+  const imageOk = !expectImageAi || polished >= total
+  const videoOk = expectVideoAi
+    ? video >= total
+    : expectUniversal
+      ? universal >= (uniShots || total)
+      : video >= total
+  const sbImageOk = sbImagesReady >= total
+  const sbVideoOk = sbVideosReady >= total
+
+  const remainingImagePrompts = expectImageAi
+    ? list.filter((sb) => !sbIsUniversal(sb) && !sbHasAiImagePrompt(sb)).length
+    : 0
+  const remainingVideoPrompts = expectUniversal
+    ? list.filter((sb) => sbIsUniversal(sb) && !sbUniversalSegmentReady(sb)).length
+    : list.filter((sb) => !sbIsUniversal(sb) && !sbHasVideoPrompt(sb)).length
+  const remainingSbImages = list.filter((sb) => sbNeedsBatchImage(sb)).length
+
+  let status = 'complete'
+  if (isGen) status = 'generating'
+  else if (!imageOk || !videoOk || !sbImageOk || !sbVideoOk) {
+    status = polished > 0 || video > 0 || universal > 0 || sbImagesReady > 0 || sbVideosReady > 0 ? 'partial' : 'pending'
+  }
+
+  return {
+    total,
+    polished,
+    video,
+    universal,
+    uniShots,
+    sbImagesReady,
+    sbVideosReady,
+    isGen,
+    modeNote,
+    imageLine,
+    videoLine,
+    sbImageLine,
+    sbVideoLine,
+    imageOk,
+    videoOk,
+    sbImageOk,
+    sbVideoOk,
+    remainingImagePrompts,
+    remainingVideoPrompts,
+    remainingSbImages,
+    remainingSbVideos,
+    sbVideosMissing,
+    sbVideosBlocked,
+    showImagePromptComplete: expectImageAi,
+    showVideoPromptComplete: true,
+    status,
+  }
+})
+
+/** 步骤 3「生成提示词」是否可执行（非全文解说模式） */
+const canGenerateStoryboardPromptsStep = computed(() => {
+  const cov = storyboardPromptCoverage.value
+  if (!cov) return false
+  if (storyboardFullNarrationVideoMode.value && !storyboardUniversalOmni.value) return true
+  const imageRemaining = cov.showImagePromptComplete ? cov.remainingImagePrompts : 0
+  const videoRemaining = cov.showVideoPromptComplete ? cov.remainingVideoPrompts : 0
+  return imageRemaining > 0 || videoRemaining > 0
+})
+
+const generatingStoryboardPromptsStep = computed(() =>
+  generatingPromptsFromAudio.value ||
+  completingImagePrompts.value ||
+  completingVideoPrompts.value ||
+  universalOmniPolishRunning.value
+)
 
 function sbNarrationText(sb) {
   if (!sb) return ''
@@ -3983,7 +4446,7 @@ function sbNarrationStatsClass(sb) {
 
 function sbNarrationStatsTitle(sb) {
   const { chars, neededSec, estSec } = sbNarrationStatsForSb(sb)
-  const cps = Number(narrationCharsPerSec.value || 5.5)
+  const cps = Number(narrationCharsPerSec.value || 5)
   const dur = sbNarrationShotDuration(sb)
   const parts = [
     `可读 ${chars} 字（不含标点）`,
@@ -4062,6 +4525,7 @@ async function syncAllStoryboardDurationsFromNarration() {
 }
 
 const resyncingFullNarration = ref(false)
+const generatingPromptsFromAudio = ref(false)
 /** 分镜生成是否使用全能模式（universal_segment_text，对接 Seedance / 可灵 Omni） */
 const storyboardUniversalOmni = ref(false)
 /** 经典首尾帧：默认开启（尾帧可用下一镜分镜图） */
@@ -4401,10 +4865,15 @@ function imageUrl(url) {
   const base = (baseUrl.value || '').replace(/\/$/, '')
   return base ? base + '/' + url.replace(/^\//, '') : url
 }
-/** 优先使用本地地址，避免远程图失效。item 为 { image_url, local_path } 或字符串 url */
+/** 优先使用本地地址，避免远程图失效。item 为 { ref_image, image_url, local_path } 或字符串 url */
 function assetImageUrl(item) {
   if (!item) return ''
   if (typeof item === 'string') return imageUrl(item)
+  const refImage = item.ref_image && String(item.ref_image).trim()
+  if (refImage) {
+    if (refImage.startsWith('http')) return refImage
+    return '/static/' + refImage.replace(/^\//, '')
+  }
   const localPath = item.local_path && String(item.local_path).trim()
   if (localPath) {
     const p = localPath.replace(/^\//, '')
@@ -4415,7 +4884,7 @@ function assetImageUrl(item) {
 }
 function hasAssetImage(item) {
   if (!item) return false
-  return !!(item.image_url || item.local_path)
+  return !!(item.ref_image || item.image_url || item.local_path)
 }
 function getSelectedStyle() {
   return getSelectedStylePrompt()
@@ -4440,6 +4909,11 @@ function isHttpVideoUrl(url) {
   const t = url.trim()
   return t.startsWith('http://') || t.startsWith('https://')
 }
+/** 分镜行 local_path 是否为视频文件（生视频完成时会覆盖 local_path） */
+function isStoryboardVideoLocalPath(rel) {
+  const lp = String(rel || '').trim()
+  return !!(lp && /\.(mp4|webm|mov|m4v)(\?|$)/i.test(lp))
+}
 /** 列表项是否具备可播放地址（避免仅有空白 local_path 时外层有卡片、内层无 <video>） */
 function recordHasPlayableVideoUrl(i) {
   if (!i) return false
@@ -4448,14 +4922,17 @@ function recordHasPlayableVideoUrl(i) {
   return isHttpVideoUrl(i.video_url)
 }
 /** 分镜是否已有可播放视频（video_generations 列表 + 分镜行 video_url/local_path） */
-function sbHasCompletedVideo(storyboardId) {
-  const vidList = sbVideos.value[storyboardId] || []
-  if (vidList.some((v) => v.status === 'completed' && recordHasPlayableVideoUrl(v))) return true
-  const sb = (store.storyboards || []).find((b) => b.id === storyboardId)
-  if (!sb) return false
+function sbHasStoryboardVideo(sb) {
+  if (!sb?.id) return false
+  const vidList = sbVideos.value[sb.id]
+  if (Array.isArray(vidList) && vidList.some((v) => v.status === 'completed' && recordHasPlayableVideoUrl(v))) return true
   if (isHttpVideoUrl(sb.video_url)) return true
-  const lp = sb.local_path && String(sb.local_path).trim()
-  return !!(lp && /\.(mp4|webm|mov|m4v)(\?|$)/i.test(lp))
+  return isStoryboardVideoLocalPath(sb.local_path)
+}
+/** @deprecated 请用 sbHasStoryboardVideo(sb) */
+function sbHasCompletedVideo(storyboardId) {
+  const sb = (store.storyboards || []).find((b) => b.id === storyboardId)
+  return sb ? sbHasStoryboardVideo(sb) : false
 }
 /** 主播放器强制随记录/地址重建，避免重新生成后 <video> 仍缓存旧 src */
 function sbMainVideoPlayerKey(sbId) {
@@ -4547,6 +5024,35 @@ function hasSbImage(sb) {
     return !!(getSbFirstImage(sb.id) || (sb && (sb.composed_image || sb.image_url)))
   }
   return !!(getSbImage(sb.id) || (sb && (sb.composed_image || sb.image_url)))
+}
+
+/** 分镜图是否已持久化（库字段 + 已拉取的 image_generations，与批量生图判定对齐） */
+function sbHasStoryboardImage(sb) {
+  if (!sb?.id) return false
+  if (sbMediaLoadedIds.has(sb.id)) return hasSbImage(sb)
+  const imgs = sbImages.value[sb.id]
+  if (Array.isArray(imgs) && imgs.some(
+    (i) => i.status === 'completed' && i.frame_type !== 'quad_grid' && i.frame_type !== 'nine_grid' && (i.image_url || i.local_path)
+  )) return true
+  if (sb.composed_image || sb.image_url) return true
+  if (sb.first_frame_image_id != null) return true
+  const lp = String(sb.local_path || '').trim()
+  return !!(lp && !/\.(mp4|webm|mov|m4v)(\?|$)/i.test(lp))
+}
+
+/** 批量视频补全候选：与 startBatchVideoGeneration 过滤条件完全一致 */
+function sbNeedsBatchVideo(sb) {
+  if (!sb?.id || sbHasStoryboardVideo(sb)) return false
+  if (isSbUniversalMode(sb.id)) {
+    if (!sbCanSubmitVideo(sb)) return false
+    return collectSbOmniReferenceAbsoluteUrls(sb).length > 0
+  }
+  return !!getSbFirstFrameUrl(sb)
+}
+
+/** 批量分镜图补全候选：尚无分镜图 */
+function sbNeedsBatchImage(sb) {
+  return !!sb?.id && !sbHasStoryboardImage(sb)
 }
 
 function hasSbFirstLastPair(sb) {
@@ -5444,7 +5950,9 @@ function patchStoryboardStateForSb(sb) {
   sbCharacterIds.value[id] = charList
     .map((c) => (typeof c === 'object' && c != null ? Number(c.id) : Number(c)))
     .filter((n) => Number.isFinite(n))
-  sbPropIds.value[id] = Array.isArray(sb.prop_ids) ? sb.prop_ids : []
+  sbPropIds.value[id] = Array.isArray(sb.prop_ids)
+    ? sb.prop_ids
+    : (Array.isArray(sbPropIds.value[id]) && sbPropIds.value[id].length ? sbPropIds.value[id] : [])
   sbCreationMode.value[id] = sb.creation_mode === 'universal' ? 'universal' : 'classic'
   sbUniversalSegmentText.value[id] = (sb.universal_segment_text ?? '').toString()
 }
@@ -5527,7 +6035,14 @@ function syncStoryboardStateFromEpisode(ep) {
     nextLayoutDescription[sb.id] = (sb.layout_description ?? '').toString()
     const charList = Array.isArray(sb.characters) ? sb.characters : (sb.characters != null ? [sb.characters] : [])
     nextCharIds[sb.id] = charList.map((c) => (typeof c === 'object' && c != null ? Number(c.id) : Number(c))).filter((n) => Number.isFinite(n))
-    nextPropIds[sb.id] = Array.isArray(sb.prop_ids) ? sb.prop_ids : []
+    // 轻量刷新接口若未带 prop_ids，保留当前勾选，避免「生成提示词」后 UI 误清空
+    if (Array.isArray(sb.prop_ids)) {
+      nextPropIds[sb.id] = sb.prop_ids
+    } else if (Array.isArray(sbPropIds.value[sb.id]) && sbPropIds.value[sb.id].length) {
+      nextPropIds[sb.id] = sbPropIds.value[sb.id]
+    } else {
+      nextPropIds[sb.id] = []
+    }
     nextCreationMode[sb.id] = sb.creation_mode === 'universal' ? 'universal' : 'classic'
     nextUniversalSegment[sb.id] = (sb.universal_segment_text ?? '').toString()
     if (sb.narration_audio_local_path) {
@@ -5655,40 +6170,13 @@ async function onClearEpisodeMedia(kind) {
     await dramaAPI.clearEpisodeMedia(currentEpisodeId.value, kind)
     resetStoryboardMediaCache()
     episodeStoryboardMediaKey = ''
+    if (kind === 'videos' && store.currentEpisode) {
+      store.currentEpisode.video_url = null
+    }
+    await refreshStoryboardsForEpisode(currentEpisodeId.value)
     if (kind === 'narration_audio') {
-      sbNarrationAudioPaths.value = {}
       sbDialogueAudioPaths.value = {}
-      sbNarrationAudioRevision.value = {}
-      for (const sb of storyboards.value || []) {
-        if (!sb) continue
-        sb.narration_audio_local_path = null
-        sb.audio_local_path = null
-      }
-      const list = store.currentEpisode?.storyboards
-      if (Array.isArray(list)) {
-        for (const row of list) {
-          row.narration_audio_local_path = null
-          row.audio_local_path = null
-        }
-      }
-    } else if (kind === 'images') {
-      for (const sb of storyboards.value || []) {
-        if (!sb) continue
-        sb.image_url = null
-        sb.local_path = null
-        sb.composed_image = null
-        sb.first_frame_image_id = null
-        sb.last_frame_image_id = null
-        sb.last_frame_image_url = null
-        sb.last_frame_local_path = null
-      }
-      await loadStoryboardMedia({ all: true, force: true })
-    } else if (kind === 'videos') {
-      for (const sb of storyboards.value || []) {
-        if (!sb) continue
-        sb.video_url = null
-      }
-      if (store.currentEpisode) store.currentEpisode.video_url = null
+    } else if (kind === 'images' || kind === 'videos') {
       await loadStoryboardMedia({ all: true, force: true })
     }
     ElMessage.success(conf.success)
@@ -5737,7 +6225,7 @@ async function loadDrama() {
       storyboardIncludeNarration.value = metaBool('storyboard_include_narration', true)
       storyboardFullNarrationVideoMode.value = metaBool('storyboard_full_narration_video_mode', true)
       const metaCps = Number(meta.narration_chars_per_sec)
-      narrationCharsPerSec.value = Number.isFinite(metaCps) && metaCps > 0 ? metaCps : 5.5
+      narrationCharsPerSec.value = Number.isFinite(metaCps) && metaCps > 0 ? metaCps : 5
       storyboardUniversalOmni.value = metaBool('storyboard_universal_omni', false)
       lastFrameUseFirstLayoutLock.value = meta.last_frame_use_first_layout_lock !== false
       if (storyboardFullNarrationVideoMode.value) {
@@ -6192,7 +6680,7 @@ async function onResyncFullNarration() {
   }
   try {
     await ElMessageBox.confirm(
-      '将按当前集剧本正文重新切分解说旁白并写回各镜 duration；会按旁白 AI 生成各镜「视频提示词」(video_prompt)，不重画分镜画面。是否继续？',
+      '将按当前集剧本正文重新切分解说旁白并写回各镜 duration；不会自动生成图/视频提示词。是否继续？',
       '重新同步旁白分段',
       { type: 'warning', confirmButtonText: '同步', cancelButtonText: '取消' }
     )
@@ -6204,14 +6692,8 @@ async function onResyncFullNarration() {
     await saveProjectSettings(false)
     const data = await storyboardsAPI.resyncFullNarration(currentEpisodeId.value)
     await refreshStoryboardsForEpisode(currentEpisodeId.value)
-    const failed = Number(data?.video_prompt_rebuild_failed) || 0
-    const rebuilt = Number(data?.video_prompts_rebuilt) || 0
     const msg = data?.message || `已同步 ${data?.segment_count ?? ''} 镜解说旁白`
-    if (failed > 0) {
-      ElMessage.warning(`${msg}；视频提示词重建失败 ${failed} 镜（成功 ${rebuilt} 镜），请重启后端后重试或逐镜「视频参数→保存并更新」`)
-    } else {
-      ElMessage.success(rebuilt > 0 ? `${msg}，已 AI 生成 ${rebuilt} 镜视频提示词` : msg)
-    }
+    ElMessage.success(msg)
   } catch (e) {
     ElMessage.error(e?.message || '同步旁白失败')
   } finally {
@@ -6228,7 +6710,7 @@ async function saveProjectSettings(includeGenerationStyle = false) {
     video_model: normalizeAgnesVideoModelChoice(defaultVideoModel.value),
     storyboard_include_narration: !!storyboardIncludeNarration.value,
     storyboard_full_narration_video_mode: !!storyboardFullNarrationVideoMode.value,
-    narration_chars_per_sec: Number(narrationCharsPerSec.value) || 5.5,
+    narration_chars_per_sec: Number(narrationCharsPerSec.value) || 5,
     storyboard_universal_omni: !!storyboardUniversalOmni.value,
     storyboard_use_first_last_frame: !!storyboardUseFirstLastFrame.value,
     last_frame_use_first_layout_lock: !!lastFrameUseFirstLayoutLock.value,
@@ -6681,9 +7163,12 @@ function onResourceImageFileChange(ev) {
 
 
 function getSbFirstFrameUrl(sb) {
-  const img = storyboardUseFirstLastFrame.value ? getSbFirstImage(sb.id) : getSbImage(sb.id)
+  if (!sb?.id) return ''
+  const img = storyboardUseFirstLastFrame.value && !isSbUniversalMode(sb.id) ? getSbFirstImage(sb.id) : getSbImage(sb.id)
   if (img && (img.image_url || img.local_path)) return assetImageUrl(img)
   if (sb.composed_image || sb.image_url) return imageUrl(sb.composed_image || sb.image_url)
+  const lp = String(sb.local_path || '').trim()
+  if (lp && !/\.(mp4|webm|mov|m4v)(\?|$)/i.test(lp)) return assetImageUrl({ local_path: lp })
   return ''
 }
 
@@ -6700,11 +7185,13 @@ function getSbLastFrameUrl(sb) {
 function getNextStoryboardFrameUrl(sb) {
   const next = getNextStoryboard(sb?.id)
   if (!next) return ''
-  const fromFirst = getSbFirstFrameUrl(next.id)
+  const fromFirst = getSbFirstFrameUrl(next)
   if (fromFirst) return fromFirst
   const main = getSbImage(next.id)
   if (main && (main.image_url || main.local_path)) return assetImageUrl(main)
   if (next.composed_image || next.image_url) return imageUrl(next.composed_image || next.image_url)
+  const lp = String(next.local_path || '').trim()
+  if (lp && !/\.(mp4|webm|mov|m4v)(\?|$)/i.test(lp)) return assetImageUrl({ local_path: lp })
   return ''
 }
 
@@ -6732,6 +7219,33 @@ function sbVideoFirstLastUrls(sb, universal, contiguityFirstFrameUrl) {
     }
   }
   return { first: first || undefined, last, lastSource }
+}
+
+function formatSbVideoLastHint(lastSource) {
+  if (lastSource === 'next_shot') return '尾帧=下一镜'
+  if (lastSource === 'own_last') return '尾帧=本镜'
+  return '无尾帧'
+}
+
+function appendSbVideoSubmitLog(sbId, imgPayload, lastSource, prefix = '提交') {
+  const lastHint = formatSbVideoLastHint(lastSource)
+  appendSbVideoLog(sbId, `${prefix} · ${imgPayload.submit_mode} · ${lastHint}`)
+  if (storyboardUseFirstLastFrame.value && imgPayload.submit_mode === 'classic_first_only') {
+    appendSbVideoLog(sbId, '提示：无尾帧（下一镜缺图或未开首尾帧）；上游将只收一张图')
+  }
+}
+
+/** 经典首尾帧模式下，缺下一镜分镜图、将只能单图提交的分镜数 */
+function countSbMissingNextShotTailFrame(boards) {
+  if (!storyboardUseFirstLastFrame.value) return 0
+  let n = 0
+  for (const sb of boards || []) {
+    if (!sb?.id || isSbUniversalMode(sb.id)) continue
+    if (getSbLastFrameUrl(sb)) continue
+    if (!getNextStoryboard(sb.id)) continue
+    if (!getNextStoryboardFrameUrl(sb)) n += 1
+  }
+  return n
 }
 
 /**
@@ -6918,7 +7432,8 @@ function buildNarrationTtsRequestBody(sbId, text) {
     provider: 'indextts',
     voice_id: String(indexttsVoiceId.value || 'gsv:008').trim(),
     emotion_text: String(indexttsEmotionText.value || '自然流畅的解说语气，情绪饱满').trim(),
-    speed: Number(indexttsSpeed.value) || 1.2,
+    speed: Number(indexttsSpeed.value) || 1.1,
+    auto_load_indextts: true,
   }
 }
 
@@ -6931,14 +7446,54 @@ function getNarrationTtsTargets(onlyMissing = false) {
   })
 }
 
-async function ensureIndexTtsForNarration() {
-  if (indexttsAvailable.value) return
-  ElMessage.info('正在启动 IndexTTS2，首次使用可能需要下载模型，请稍候…')
-  const ensureRes = await aiVoicesAPI.indexttsEnsure()
-  indexttsAvailable.value = !!ensureRes?.ok
-  if (!indexttsAvailable.value) {
-    throw new Error(ensureRes?.error || ensureRes?.detail || 'IndexTTS2 未就绪，请检查安装')
+async function loadIndexTtsModelUi({ silent = false } = {}) {
+  if (indexttsModelLoaded.value) return true
+  indexttsLoading.value = true
+  try {
+    if (!silent) ElMessage.info('正在加载配音模型，首次可能需要下载资源…')
+    const res = await aiVoicesAPI.indexttsLoad()
+    indexttsInstallOk.value = !!res?.ok
+    indexttsModelLoaded.value = !!res?.loaded
+    if (!indexttsModelLoaded.value) {
+      throw new Error(res?.error || res?.detail || '配音模型加载失败')
+    }
+    if (!silent) ElMessage.success('配音模型已加载')
+    return true
+  } catch (e) {
+    if (!silent) ElMessage.error(e.message || '配音模型加载失败')
+    throw e
+  } finally {
+    indexttsLoading.value = false
   }
+}
+
+async function unloadIndexTtsModelUi({ silent = false } = {}) {
+  if (!indexttsModelLoaded.value) return
+  indexttsUnloading.value = true
+  try {
+    await aiVoicesAPI.indexttsUnload()
+    indexttsModelLoaded.value = false
+    if (!silent) ElMessage.success('配音模型已卸载')
+  } catch (e) {
+    if (!silent) ElMessage.error(e.message || '卸载失败')
+    throw e
+  } finally {
+    indexttsUnloading.value = false
+  }
+}
+
+async function onLoadIndexTtsModel() {
+  await loadIndexTtsModelUi()
+}
+
+async function onUnloadIndexTtsModel() {
+  await unloadIndexTtsModelUi()
+}
+
+/** 配音/试听前自动加载 IndexTTS（未加载时调用 load 接口，含首次下载） */
+async function ensureIndexTtsModelLoaded({ silent = false } = {}) {
+  if (indexttsModelLoaded.value) return true
+  return loadIndexTtsModelUi({ silent })
 }
 
 function playSbTtsFromRel(rel, revision = 0) {
@@ -7012,7 +7567,7 @@ async function onTtsSbNarration(sb) {
   }
   ttsSbNarrationIds.add(sb.id)
   try {
-    await ensureIndexTtsForNarration()
+    await ensureIndexTtsModelLoaded({ silent: true })
     const res = await fetch('/api/v1/audio/extract', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -7034,7 +7589,7 @@ async function onTtsSbNarration(sb) {
   }
 }
 
-/** 全文解说：为本集分镜批量生成 IndexTTS 配音（逐条生成，完成后即时刷新播放器） */
+/** 全文解说：为本集分镜批量生成 IndexTTS 配音（GPU 串行，完成后即时刷新播放器） */
 async function runNarrationTtsBatch(targets, { emptyMessage, allFailedMessage, successLabel = '条分镜' } = {}) {
   if (!currentEpisodeId.value || batchNarrationTtsRunning.value) return
   if (!targets.length) {
@@ -7045,10 +7600,14 @@ async function runNarrationTtsBatch(targets, { emptyMessage, allFailedMessage, s
   let okCount = 0
   let failCount = 0
   try {
-    await ensureIndexTtsForNarration()
-    for (const sb of targets) {
+    await ensureIndexTtsModelLoaded({ silent: false })
+    const jobs = targets.filter((sb) => {
       const text = ((sbNarration.value[sb.id] ?? sb.narration) || '').toString().trim()
-      if (!text) continue
+      return !!text
+    })
+    await runConcurrently(jobs, BATCH_NARRATION_TTS_CONCURRENCY, async (sb) => {
+      const text = ((sbNarration.value[sb.id] ?? sb.narration) || '').toString().trim()
+      if (!text) return
       try {
         const res = await fetch('/api/v1/audio/extract', {
           method: 'POST',
@@ -7066,7 +7625,7 @@ async function runNarrationTtsBatch(targets, { emptyMessage, allFailedMessage, s
         failCount += 1
         console.warn('[batch narration tts]', sb.id, e)
       }
-    }
+    })
     if (okCount > 0 && failCount === 0) {
       ElMessage.success(`已为 ${okCount} ${successLabel}生成解说配音`)
     } else if (okCount > 0) {
@@ -7091,6 +7650,56 @@ async function onCompleteRemainingNarrationTts() {
     allFailedMessage: '补全配音全部失败，请检查 IndexTTS 是否就绪',
     successLabel: '条剩余分镜',
   })
+}
+
+/** 全文解说经典：按旁白配音实际时长刷新 duration 并 AI 生成生图+视频提示词 */
+async function onGeneratePromptsFromAudioDuration() {
+  if (!currentEpisodeId.value || generatingPromptsFromAudio.value) return
+  if (!storyboardFullNarrationVideoMode.value || storyboardUniversalOmni.value) {
+    ElMessage.warning('仅全文解说经典模式可用')
+    return
+  }
+  if (!(storyboards.value || []).length) {
+    ElMessage.warning('请先生成分镜')
+    return
+  }
+  generatingPromptsFromAudio.value = true
+  try {
+    const data = await storyboardsAPI.generatePromptsFromAudioDuration(currentEpisodeId.value, { force: true })
+    await refreshStoryboardsForEpisode(currentEpisodeId.value, { storyboards: data?.storyboards })
+    const rebuilt = Number(data?.rebuilt) || 0
+    const failed = Number(data?.failed) || 0
+    const synced = Number(data?.duration_sync?.updated) || 0
+    if (failed > 0) {
+      ElMessage.warning(`成功 ${rebuilt} 镜，失败 ${failed} 镜；${synced} 镜 duration 已按配音更新`)
+    } else {
+      ElMessage.success(data?.message || `已为 ${rebuilt} 镜生成提示词（${synced} 镜 duration 已按配音更新）`)
+    }
+  } catch (e) {
+    ElMessage.error(e?.message || '按配音时长生成提示词失败')
+  } finally {
+    generatingPromptsFromAudio.value = false
+  }
+}
+
+/** 步骤 3：非全文解说模式下补全缺失的生图/视频提示词 */
+async function onGenerateStoryboardPromptsStep() {
+  if (!currentEpisodeId.value || generatingStoryboardPromptsStep.value) return
+  if (storyboardFullNarrationVideoMode.value && !storyboardUniversalOmni.value) {
+    await onGeneratePromptsFromAudioDuration()
+    return
+  }
+  const cov = storyboardPromptCoverage.value
+  if (!cov) return
+  if (cov.showImagePromptComplete && cov.remainingImagePrompts > 0) {
+    await onCompleteMissingImagePrompts()
+  }
+  if (cov.showVideoPromptComplete && cov.remainingVideoPrompts > 0) {
+    await onCompleteMissingVideoPrompts()
+  }
+  if (!canGenerateStoryboardPromptsStep.value) {
+    ElMessage.info('提示词已全部就绪')
+  }
 }
 
 function formatSrtTimestamp(ms) {
@@ -7408,6 +8017,7 @@ function onUniversalSegmentPromptMenu(sb, cmd) {
 async function onGenerateUniversalSegmentPrompt(sb, opts = {}) {
   if (!sb?.id || generatingUniversalSegmentIds.has(sb.id)) return
   const force = !!opts.forceWithoutReferenceImages
+  const silent = !!opts.silent
   generatingUniversalSegmentIds.add(sb.id)
   let live = ''
   try {
@@ -7426,7 +8036,7 @@ async function onGenerateUniversalSegmentPrompt(sb, opts = {}) {
     )
     const text = (data?.universal_segment_text ?? '').toString().trim()
     if (!text) {
-      ElMessage.warning('未收到完整生成结果，请重试')
+      if (!silent) ElMessage.warning('未收到完整生成结果，请重试')
       return
     }
     sbUniversalSegmentText.value = { ...sbUniversalSegmentText.value, [sb.id]: text }
@@ -7435,9 +8045,12 @@ async function onGenerateUniversalSegmentPrompt(sb, opts = {}) {
       const row = list.find((x) => Number(x.id) === Number(sb.id))
       if (row) row.universal_segment_text = text
     }
-    ElMessage.success(force ? '已强制生成全能片段提示词（无图模式）' : '已根据分镜生成全能片段提示词')
+    if (!silent) {
+      ElMessage.success(force ? '已强制生成全能片段提示词（无图模式）' : '已根据分镜生成全能片段提示词')
+    }
   } catch (e) {
-    ElMessage.error(e.message || '生成失败，请检查文本模型配置')
+    if (!silent) ElMessage.error(e.message || '生成失败，请检查文本模型配置')
+    throw e
   } finally {
     generatingUniversalSegmentIds.delete(sb.id)
   }
@@ -8159,9 +8772,7 @@ async function onGenerateSbVideo(sb) {
       lastSource,
     })
     const preferClassicPrompt = universal && !universalOmniApi
-    const lastHint =
-      lastSource === 'next_shot' ? '尾帧=下一镜' : lastSource === 'own_last' ? '尾帧=本镜' : '无尾帧'
-    appendSbVideoLog(sb.id, `正在提交上游… · ${imgPayload.submit_mode} · ${lastHint}`)
+    appendSbVideoSubmitLog(sb.id, imgPayload, lastSource, '正在提交上游…')
     const res = await videosAPI.create({
       drama_id: dramaId.value,
       storyboard_id: sb.id,
@@ -8352,8 +8963,11 @@ async function refreshStoryboardsForEpisode(episodeId, options = {}) {
   const light = options.light ?? false
   if (!episodeId) return
   try {
-    const res = await dramaAPI.getStoryboards(episodeId)
-    const list = Array.isArray(res) ? res : (res?.storyboards ?? null)
+    let list = options.storyboards
+    if (!Array.isArray(list)) {
+      const res = await dramaAPI.getStoryboards(episodeId)
+      list = Array.isArray(res) ? res : (res?.storyboards ?? null)
+    }
     if (!Array.isArray(list)) return
     if (Number(store.currentEpisode?.id) === Number(episodeId)) {
       store.currentEpisode.storyboards = list
@@ -8383,7 +8997,7 @@ function buildStoryboardGenerateOptions(extra = {}) {
     aspect_ratio: projectAspectRatio.value || '16:9',
     include_narration: !!storyboardIncludeNarration.value,
     full_narration_video_mode: !!storyboardFullNarrationVideoMode.value,
-    narration_chars_per_sec: Number(narrationCharsPerSec.value) || 5.5,
+    narration_chars_per_sec: Number(narrationCharsPerSec.value) || 5,
     universal_omni_storyboard: !!storyboardUniversalOmni.value,
     ...extra,
   }
@@ -8443,9 +9057,11 @@ async function onGenerateStoryboard(extra = {}) {
         ? polishedN > 0
           ? `全能分镜生成完成，已自动润色 ${polishedN} 条片段`
           : '全能分镜生成完成'
-        : isTest
-          ? `测试分镜生成完成（${TEST_STORYBOARD_COUNT} 镜）`
-          : '分镜生成完成'
+        : storyboardFullNarrationVideoMode.value
+          ? '分镜已按规则切分旁白；请先配音，再点「按配音时长生成提示词」'
+          : isTest
+            ? `测试分镜生成完成（${TEST_STORYBOARD_COUNT} 镜）`
+            : '分镜生成完成'
     )
     trackFilmCreateAction('generate_storyboard_complete', {
       extra: { storyboard_count: (store.storyboards || []).length },
@@ -8514,6 +9130,104 @@ async function onInsertStoryboardBefore(sb) {
   }
 }
 
+async function onCompleteMissingImagePrompts() {
+  if (!currentEpisodeId.value || completingImagePrompts.value) return
+  const remaining = storyboardPromptCoverage.value?.remainingImagePrompts ?? 0
+  if (remaining <= 0) {
+    ElMessage.info('生图提示词已全部就绪')
+    return
+  }
+  completingImagePrompts.value = true
+  try {
+    const data = await storyboardsAPI.completeMissingImagePrompts(currentEpisodeId.value)
+    await loadDrama()
+    const polished = Number(data?.polished) || 0
+    const failed = Number(data?.failed) || 0
+    const skipped = Number(data?.skipped) || 0
+    if (data?.skipped_reason === 'no_text_model') {
+      ElMessage.warning('未配置文本模型，无法补全生图提示词')
+      return
+    }
+    if (failed > 0) {
+      ElMessage.warning(`生图提示词补全完成：成功 ${polished} 条，失败 ${failed} 条${skipped > 0 ? `，跳过 ${skipped} 条` : ''}`)
+    } else if (polished > 0) {
+      ElMessage.success(`已补全 ${polished} 条生图提示词`)
+    } else {
+      ElMessage.info('没有需要补全的生图提示词')
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '补全生图提示词失败')
+  } finally {
+    completingImagePrompts.value = false
+  }
+}
+
+async function onCompleteMissingVideoPrompts() {
+  if (!currentEpisodeId.value || completingVideoPrompts.value || universalOmniPolishRunning.value) return
+  const cov = storyboardPromptCoverage.value
+  const remaining = cov?.remainingVideoPrompts ?? 0
+  if (remaining <= 0) {
+    ElMessage.info(cov?.showVideoPromptComplete && storyboardUniversalOmni.value ? '全能片段已全部就绪' : '视频提示词已全部就绪')
+    return
+  }
+
+  if (storyboardUniversalOmni.value) {
+    const targets = (storyboards.value || []).filter((sb) => sbIsUniversal(sb) && !sbUniversalSegmentReady(sb))
+    if (!targets.length) {
+      ElMessage.info('全能片段已全部就绪')
+      return
+    }
+    universalOmniPolishRunning.value = true
+    universalOmniPolishAbort.value = false
+    universalOmniPolishProgress.value = { current: 0, total: targets.length, label: '' }
+    let okCount = 0
+    try {
+      for (let i = 0; i < targets.length; i++) {
+        if (universalOmniPolishAbort.value) break
+        const sb = targets[i]
+        universalOmniPolishProgress.value = {
+          current: i + 1,
+          total: targets.length,
+          label: '#' + (sb.storyboard_number ?? sb.id),
+        }
+        try {
+          await onGenerateUniversalSegmentPrompt(sb, { silent: true })
+          const row = (store.storyboards || []).find((x) => Number(x.id) === Number(sb.id)) || sb
+          if (sbUniversalSegmentReady(row)) okCount += 1
+        } catch (e) {
+          console.warn('[补全全能片段] 失败', sb.id, e?.message)
+        }
+        await pipelineRest()
+      }
+      if (okCount > 0) ElMessage.success(`已补全 ${okCount} 条全能片段`)
+      else ElMessage.warning('全能片段补全未成功，请检查文本模型配置')
+    } finally {
+      universalOmniPolishRunning.value = false
+      universalOmniPolishProgress.value = { current: 0, total: 0, label: '' }
+    }
+    return
+  }
+
+  completingVideoPrompts.value = true
+  try {
+    const data = await storyboardsAPI.completeMissingVideoPrompts(currentEpisodeId.value)
+    await loadDrama()
+    const rebuilt = Number(data?.rebuilt) || 0
+    const failed = Number(data?.failed) || 0
+    if (failed > 0) {
+      ElMessage.warning(`视频提示词补全完成：成功 ${rebuilt} 条，失败 ${failed} 条`)
+    } else if (rebuilt > 0) {
+      ElMessage.success(`已补全 ${rebuilt} 条视频提示词`)
+    } else {
+      ElMessage.info('没有需要补全的视频提示词')
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '补全视频提示词失败')
+  } finally {
+    completingVideoPrompts.value = false
+  }
+}
+
 async function startBatchImageGeneration() {
   if (!currentEpisodeId.value || batchImageRunning.value || pipelineRunning.value) return
   batchImageErrors.value = []
@@ -8523,7 +9237,7 @@ async function startBatchImageGeneration() {
     // 批量前必须拉齐本集全部分镜媒体（按页懒加载时 sbImages 可能只有部分 key，不能靠 length===0 判断）
     await loadStoryboardMedia({ all: true })
     const boards = store.storyboards || []
-    const todo = boards.filter((sb) => !hasSbImage(sb))
+    const todo = boards.filter((sb) => sbNeedsBatchImage(sb))
     if (todo.length === 0) {
       ElMessage.info('所有分镜均已有图片，无需重新生成')
       return
@@ -8599,18 +9313,17 @@ async function startBatchVideoGeneration() {
     // 批量前必须拉齐本集全部分镜媒体（按页懒加载时 sbVideos 可能只有部分 key，不能靠 length===0 判断）
     await loadStoryboardMedia({ all: true })
     const boards = store.storyboards || []
-    // 只处理：有参考图（经典=分镜主图；全能=场景/角色/道具，不含经典主图）且 还没有已完成视频 的分镜
-    const todo = boards.filter((sb) => {
-      if (sbHasCompletedVideo(sb.id)) return false
-      if (isSbUniversalMode(sb.id)) {
-        if (!sbCanSubmitVideo(sb)) return false
-        return collectSbOmniReferenceAbsoluteUrls(sb).length > 0
-      }
-      return !!getSbFirstFrameUrl(sb)
-    })
+    // 只处理：有参考图（经典=分镜主图；全能=场景/角色/道具）且还没有已完成视频的分镜
+    const todo = boards.filter((sb) => sbNeedsBatchVideo(sb))
     if (todo.length === 0) {
       ElMessage.info('没有需要生成视频的分镜（分镜缺少图片，或视频已全部生成）')
       return
+    }
+    const missingTail = countSbMissingNextShotTailFrame(todo)
+    if (missingTail > 0) {
+      ElMessage.warning(
+        `已开首尾帧参考图：${missingTail} 镜因「下一镜尚无分镜图」将仅用首帧提交（末镜除外）。请先生成后续镜的分镜图。`
+      )
     }
     batchVideoProgress.value = { current: 0, total: todo.length, failed: 0 }
     // 「首尾帧参考图」= 本镜图为首帧、下一镜图为尾帧，无视频依赖 → 7 路并发
@@ -8670,6 +9383,7 @@ async function startBatchVideoGeneration() {
             vLast,
             lastSource,
           })
+          appendSbVideoSubmitLog(sb.id, imgPayload, lastSource, '批量提交')
           const res = await videosAPI.create({
             drama_id: dramaId.value,
             storyboard_id: sb.id,
@@ -8686,7 +9400,7 @@ async function startBatchVideoGeneration() {
           })
           if (res?.task_id) {
             const meta = buildSbGenMeta(sb, GEN_RESOURCE.SB_VIDEO, '分镜视频')
-            appendSbVideoLog(sb.id, `批量提交 · task ${String(res.task_id).slice(0, 36)}`)
+            appendSbVideoLog(sb.id, `task ${String(res.task_id).slice(0, 36)}`)
             const pollRes = await pollTask(res.task_id, () => loadSingleStoryboardMedia(sb.id), meta, {
               onTick: makeSbVideoPollOnTick(sb.id),
             })
@@ -8748,7 +9462,7 @@ function getFinalizeMergeOptions() {
     use_indextts_narration: useIndexTts,
     indextts_voice: String(indexttsVoiceId.value || 'gsv:008').trim(),
     indextts_emotion: String(indexttsEmotionText.value || '自然流畅的解说语气，情绪饱满').trim(),
-    indextts_speed: Number(indexttsSpeed.value) || 1.2,
+    indextts_speed: Number(indexttsSpeed.value) || 1.1,
     narration_subtitle_mode: useIndexTts ? 'per_line' : 'per_shot',
   }
 }
@@ -8831,9 +9545,11 @@ function loadIndexTtsPrefs() {
 async function refreshIndexTtsHealth() {
   try {
     const res = await aiVoicesAPI.indexttsHealth()
-    indexttsAvailable.value = !!res?.ok
+    indexttsInstallOk.value = !!res?.ok
+    indexttsModelLoaded.value = !!res?.loaded
   } catch (_) {
-    indexttsAvailable.value = false
+    indexttsInstallOk.value = false
+    indexttsModelLoaded.value = false
   }
 }
 
@@ -8941,16 +9657,11 @@ async function onPreviewIndexTtsVoice() {
   if (!indexttsVoiceId.value) return
   gsvPreviewing.value = true
   try {
-    if (!indexttsAvailable.value) {
-      ElMessage.info('正在启动 IndexTTS2，首次使用可能需要下载模型，请稍候…')
-      const ensureRes = await aiVoicesAPI.indexttsEnsure()
-      indexttsAvailable.value = !!ensureRes?.ok
-    }
+    await ensureIndexTtsModelLoaded({ silent: false })
     const res = await aiVoicesAPI.preview({
       local_voice: indexttsVoiceId.value,
       voicebox_instruct: indexttsEmotionText.value,
     })
-    indexttsAvailable.value = true
     const playUrl = res?.audio_url || (res?.local_path ? `/static/${res.local_path}` : '')
     if (!playUrl) throw new Error('无试听地址')
     const a = new Audio(playUrl)
@@ -9208,7 +9919,7 @@ async function startOneClickPipeline() {
   pipelineCurrentStep.value = ''
   pipelineStepIndex.value = 0
   pipelineActiveTasks.clear()
-  pipelineStepTotal.value = 10
+  pipelineStepTotal.value = 9
   pipelineRunning.value = true
   pipelinePaused.value = false
   pipelineAbortRequested.value = false
@@ -9229,7 +9940,7 @@ async function startStoryboardScriptPipeline() {
   pipelineCurrentStep.value = ''
   pipelineStepIndex.value = 0
   pipelineActiveTasks.clear()
-  pipelineStepTotal.value = 8
+  pipelineStepTotal.value = 7
   pipelineRunning.value = true
   pipelinePaused.value = false
   pipelineAbortRequested.value = false
@@ -9274,17 +9985,160 @@ function setPipelineStep(idx, text) {
   pipelineCurrentStep.value = `[步骤 ${idx}/${pipelineStepTotal.value}] ${text}`
 }
 
+/** 一键成片步骤 5：批量旁白配音 */
+async function runPipelineNarrationTtsStep() {
+  await checkPause()
+  if (!storyboardIncludeNarration.value || !videoIndexTtsNarration.value) {
+    setPipelineStep(5, '跳过配音（未开启旁白或 IndexTTS）')
+    return
+  }
+  const targets = getNarrationTtsTargets(false)
+  if (!targets.length) {
+    setPipelineStep(5, '跳过配音（无旁白文本）')
+    return
+  }
+  setPipelineStep(5, `生成旁白配音（${targets.length} 镜，GPU 串行）...`)
+  batchNarrationTtsRunning.value = true
+  let okCount = 0
+  let failCount = 0
+  let modelLoadedByPipeline = false
+  try {
+    setPipelineStep(5, '加载配音模型...')
+    await ensureIndexTtsModelLoaded({ silent: true })
+    modelLoadedByPipeline = true
+    setPipelineStep(5, `生成旁白配音（${targets.length} 镜，GPU 串行）...`)
+    for (const sb of targets) {
+      await checkPause()
+      const text = ((sbNarration.value[sb.id] ?? sb.narration) || '').toString().trim()
+      if (!text) continue
+      try {
+        const res = await fetch('/api/v1/audio/extract', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildNarrationTtsRequestBody(sb.id, text)),
+        })
+        const data = await res.json()
+        const businessOk = data.success === true || Number(data.code) === 200
+        if (!res.ok || !businessOk || !data.data?.local_path) {
+          throw new Error(data.error?.message || data.message || '解说配音失败')
+        }
+        applySbNarrationAudioPath(sb.id, data.data.local_path)
+        okCount += 1
+      } catch (e) {
+        failCount += 1
+        addPipelineError('配音', `镜#${sb.storyboard_number ?? sb.id}: ${e?.message || e}`)
+      }
+    }
+    if (failCount > 0 && okCount === 0) {
+      addPipelineError('配音', '全部镜配音失败')
+    }
+  } catch (e) {
+    addPipelineError('配音', e.message || String(e))
+  } finally {
+    if (modelLoadedByPipeline) {
+      try {
+        await unloadIndexTtsModelUi({ silent: true })
+      } catch (_) {}
+    }
+    batchNarrationTtsRunning.value = false
+  }
+  await pipelineRest()
+}
+
+/** 一键成片步骤 6：生成/补全提示词 */
+async function runPipelinePromptsStep() {
+  await checkPause()
+  const episodeId = currentEpisodeId.value
+  if (!episodeId) return
+
+  if (storyboardFullNarrationVideoMode.value && !storyboardUniversalOmni.value) {
+    setPipelineStep(6, '按配音时长生成提示词...')
+    generatingPromptsFromAudio.value = true
+    try {
+      const data = await storyboardsAPI.generatePromptsFromAudioDuration(episodeId, { force: true })
+      await refreshStoryboardsForEpisode(episodeId, { storyboards: data?.storyboards })
+      const failed = Number(data?.failed) || 0
+      if (failed > 0) addPipelineError('生成提示词', `${failed} 镜失败`)
+    } catch (e) {
+      addPipelineError('生成提示词', e.message || String(e))
+    } finally {
+      generatingPromptsFromAudio.value = false
+    }
+    await pipelineRest()
+    return
+  }
+
+  await loadDrama()
+  let boards = store.storyboards || []
+  const expectImageAi = !(storyboardFullNarrationVideoMode.value && storyboardUniversalOmni.value)
+  const imageRemaining = expectImageAi
+    ? boards.filter((sb) => !sbIsUniversal(sb) && !sbHasAiImagePrompt(sb)).length
+    : 0
+  const videoRemaining = storyboardUniversalOmni.value
+    ? boards.filter((sb) => sbIsUniversal(sb) && !sbUniversalSegmentReady(sb)).length
+    : boards.filter((sb) => !sbIsUniversal(sb) && !sbHasVideoPrompt(sb)).length
+
+  if (imageRemaining === 0 && videoRemaining === 0) {
+    setPipelineStep(6, '提示词已就绪，跳过')
+    return
+  }
+
+  setPipelineStep(6, `生成提示词（生图 ${imageRemaining} · 视频/全能 ${videoRemaining}）...`)
+
+  if (imageRemaining > 0) {
+    completingImagePrompts.value = true
+    try {
+      const data = await storyboardsAPI.completeMissingImagePrompts(episodeId)
+      await loadDrama()
+      boards = store.storyboards || []
+      const failed = Number(data?.failed) || 0
+      if (failed > 0) addPipelineError('生图提示词', `${failed} 条失败`)
+      if (data?.skipped_reason === 'no_text_model') addPipelineError('生图提示词', '未配置文本模型')
+    } catch (e) {
+      addPipelineError('生图提示词', e.message || String(e))
+    } finally {
+      completingImagePrompts.value = false
+    }
+  }
+
+  if (storyboardUniversalOmni.value) {
+    const uniTargets = boards.filter((sb) => sbIsUniversal(sb) && !sbUniversalSegmentReady(sb))
+    if (uniTargets.length) {
+      await polishUniversalSegmentsAfterGeneration({
+        checkPause,
+        onShotProgress: (cur, total, sb) =>
+          setPipelineStep(6, `补全全能片段(${cur}/${total}) #${sb.storyboard_number ?? cur}`),
+        onShotError: (sb, msg) =>
+          addPipelineError('全能片段', `镜#${sb.storyboard_number ?? sb.id}: ${msg}`),
+      })
+      await loadDrama()
+    }
+  } else if (videoRemaining > 0) {
+    completingVideoPrompts.value = true
+    try {
+      const data = await storyboardsAPI.completeMissingVideoPrompts(episodeId)
+      await loadDrama()
+      const failed = Number(data?.failed) || 0
+      if (failed > 0) addPipelineError('视频提示词', `${failed} 条失败`)
+    } catch (e) {
+      addPipelineError('视频提示词', e.message || String(e))
+    } finally {
+      completingVideoPrompts.value = false
+    }
+  }
+
+  await pipelineRest()
+}
+
 async function runOneClickPipeline(textOnly = false, textOnlyVariant = 'framework') {
   const episodeId = currentEpisodeId.value
   const dramaIdVal = dramaId.value
   if (!episodeId || !dramaIdVal) return
   const style = getSelectedStyle()
   const stopAfterStep = textOnly
-    ? (textOnlyVariant === 'storyboard_script' ? 8 : 4)
+    ? (textOnlyVariant === 'storyboard_script' ? 7 : 4)
     : null
-  const assetImageConcurrency = textOnlyVariant === 'storyboard_script'
-    ? STORYBOARD_SCRIPT_IMAGE_CONCURRENCY
-    : pipelineConcurrency.value
+  const assetImageConcurrency = pipelineConcurrency.value
 
   try {
     // ════════════════════════════════════════════════════════
@@ -9431,26 +10285,34 @@ async function runOneClickPipeline(textOnly = false, textOnlyVariant = 'framewor
     }
 
     if (stopAfterStep === 4) {
-      pipelineCurrentStep.value = '文本框架已就绪（未生成图片与视频）'
+      pipelineCurrentStep.value = '文本框架已就绪（未生成配音、提示词、图片与视频）'
       ElMessage.success('文本框架已生成：角色、场景、道具与分镜脚本已就绪')
       return
     }
 
     // ════════════════════════════════════════════════════════
-    // ⏱ 倒计时 20 秒：请浏览分镜内容，确认后开始生成角色/场景/道具图片
+    // 分镜五步工作流：配音 → 提示词 → 生图 → 生视频 → 合成
     // ════════════════════════════════════════════════════════
-    await runPipelineCountdown(20, '分镜脚本生成完毕，请浏览确认内容。倒计时结束后将开始生成角色、场景、道具图片。')
+
+    await runPipelineCountdown(20, '分镜脚本生成完毕，请浏览确认内容。倒计时结束后将开始生成旁白配音。')
+    await checkPause()
+
+    await runPipelineNarrationTtsStep()
+    await checkPause()
+    await runPipelinePromptsStep()
+
+    await runPipelineCountdown(30, '提示词已就绪，请确认。倒计时结束后将开始生图（角色/场景/道具/分镜图，消耗较多 Token）。')
     await checkPause()
 
     // ════════════════════════════════════════════════════════
-    // 阶段二：角色 / 场景 / 道具 图片生成（中等消耗）
+    // 步骤 7：生图（角色 / 场景 / 道具 / 分镜图）
     // ════════════════════════════════════════════════════════
 
-    // 步骤 5：生成角色图
+    // 7a：生成角色图
     {
       const charsWithoutImage = chars.filter((c) => !hasAssetImage(c))
       const concurrency = assetImageConcurrency
-      setPipelineStep(5, `生成角色图（${charsWithoutImage.length} 个，并发 ${concurrency}）...`)
+      setPipelineStep(7, `生成角色图（${charsWithoutImage.length} 个，并发 ${concurrency}）...`)
       const { paused } = await runConcurrently(charsWithoutImage, concurrency, async (char) => {
         await checkPause()
         generatingCharIds.add(char.id)
@@ -9480,11 +10342,11 @@ async function runOneClickPipeline(textOnly = false, textOnlyVariant = 'framewor
       if (paused) { await waitForResume() }
     }
 
-    // 步骤 6：生成场景图
+    // 7b：生成场景图
     {
       const scenesWithoutImage = sceneList.filter((s) => !hasAssetImage(s))
       const concurrency = assetImageConcurrency
-      setPipelineStep(6, `生成场景图（${scenesWithoutImage.length} 个，并发 ${concurrency}）...`)
+      setPipelineStep(7, `生成场景图（${scenesWithoutImage.length} 个，并发 ${concurrency}）...`)
       await checkPause()
       const { paused } = await runConcurrently(scenesWithoutImage, concurrency, async (scene) => {
         await checkPause()
@@ -9516,7 +10378,7 @@ async function runOneClickPipeline(textOnly = false, textOnlyVariant = 'framewor
       if (paused) { await waitForResume() }
     }
 
-    // 步骤 7：生成道具图
+    // 7c：生成道具图
     {
       const propsWithoutImage = propList.filter((p) => !hasAssetImage(p))
       const concurrency = assetImageConcurrency
@@ -9551,25 +10413,13 @@ async function runOneClickPipeline(textOnly = false, textOnlyVariant = 'framewor
       if (paused) { await waitForResume() }
     }
 
-    // ════════════════════════════════════════════════════════
-    // ⏱ 倒计时 30 秒：请浏览角色/场景/道具图，确认后开始生成分镜图
-    // ════════════════════════════════════════════════════════
-    await runPipelineCountdown(30, '角色、场景、道具图片生成完毕，请浏览确认效果。倒计时结束后将开始生成分镜图（消耗较多 Token）。')
-    await checkPause()
-
-    // ════════════════════════════════════════════════════════
-    // 阶段三：分镜图生成（较高消耗）
-    // ════════════════════════════════════════════════════════
-
-    // 步骤 8：生成分镜图
+    // 7d：生成分镜图
     {
       await loadStoryboardMedia({ all: true })
       boards = store.storyboards || []
-      const boardsWithoutImg = boards.filter((sb) => !hasSbImage(sb))
-      const concurrency = textOnlyVariant === 'storyboard_script'
-        ? assetImageConcurrency
-        : pipelineConcurrency.value
-      setPipelineStep(8, `生成分镜图（${boardsWithoutImg.length} 个，并发 ${concurrency}）...`)
+      const boardsWithoutImg = boards.filter((sb) => sbNeedsBatchImage(sb))
+      const concurrency = pipelineConcurrency.value
+      setPipelineStep(7, `生成分镜图（${boardsWithoutImg.length} 个，并发 ${concurrency}）...`)
       const { paused } = await runConcurrently(boardsWithoutImg, concurrency, async (sb) => {
         await checkPause()
         generatingSbImageIds.add(sb.id)
@@ -9606,23 +10456,20 @@ async function runOneClickPipeline(textOnly = false, textOnlyVariant = 'framewor
       if (paused) { await waitForResume() }
     }
 
-    if (stopAfterStep === 8) {
-      pipelineCurrentStep.value = '分镜图已生成（未生成视频与成片）'
-      ElMessage.success('分镜脚本与图片已就绪：角色、场景、道具、分镜图均已生成（未生成视频）')
+    if (stopAfterStep === 7) {
+      pipelineCurrentStep.value = '分镜脚本与图片已就绪（未生成分镜视频与成片）'
+      ElMessage.success('分镜脚本流程已完成：提取、分镜、配音、提示词与图片均已生成（未生成视频）')
       return
     }
 
-    // ════════════════════════════════════════════════════════
-    // ⏱ 倒计时 20 秒：请浏览分镜图，确认后开始生成分镜视频
-    // ════════════════════════════════════════════════════════
     await runPipelineCountdown(20, '分镜图生成完毕，请浏览确认图片效果。倒计时结束后将开始生成分镜视频（消耗最多 Token）。')
     await checkPause()
 
     // ════════════════════════════════════════════════════════
-    // 阶段四：分镜视频 & 合集（最高消耗）
+    // 步骤 8：生成分镜视频
     // ════════════════════════════════════════════════════════
 
-    // 步骤 9：生成分镜视频
+    // 步骤 8：生成分镜视频
     {
       await loadStoryboardMedia({ all: true })
       const boards2 = (store.storyboards || []).filter((sb) => {
@@ -9633,8 +10480,15 @@ async function runOneClickPipeline(textOnly = false, textOnlyVariant = 'framewor
         }
         return !!getSbFirstFrameUrl(sb)
       })
+      const missingTailPipeline = countSbMissingNextShotTailFrame(boards2)
+      if (missingTailPipeline > 0) {
+        addPipelineError(
+          '分镜视频',
+          `首尾帧已开：${missingTailPipeline} 镜因下一镜尚无分镜图将仅用首帧提交（末镜除外）`
+        )
+      }
       const concurrency = BATCH_VIDEO_CONCURRENCY
-      setPipelineStep(9, `生成分镜视频（${boards2.length} 个，并发 ${concurrency}）...`)
+      setPipelineStep(8, `生成分镜视频（${boards2.length} 个，并发 ${concurrency}）...`)
       const { paused } = await runConcurrently(boards2, concurrency, async (sb) => {
         await checkPause()
         generatingSbVideoIds.add(sb.id)
@@ -9655,6 +10509,7 @@ async function runOneClickPipeline(textOnly = false, textOnlyVariant = 'framewor
               vLast,
               lastSource,
             })
+            appendSbVideoSubmitLog(sb.id, imgPayload, lastSource, '成片提交')
             const res = await videosAPI.create({
               drama_id: dramaIdVal,
               storyboard_id: sb.id,
@@ -9684,9 +10539,9 @@ async function runOneClickPipeline(textOnly = false, textOnlyVariant = 'framewor
       if (paused) { await waitForResume() }
     }
 
-    // 步骤 10：合成整集视频
+    // 步骤 9：合成整集视频
     await checkPause()
-    setPipelineStep(10, '合成整集视频...')
+    setPipelineStep(9, '合成整集视频...')
     try {
       const result = await dramaAPI.finalizeEpisode(episodeId, getFinalizeMergeOptions())
       if (result?.task_id != null) {
@@ -9927,7 +10782,7 @@ async function runRepairPipeline() {
     }
     // 先拉取分镜图片/视频列表，再批量生成分镜图（并发）
     await loadStoryboardMedia({ all: true })
-    const boardsWithoutImg = boards.filter((sb) => !hasSbImage(sb))
+    const boardsWithoutImg = boards.filter((sb) => sbNeedsBatchImage(sb))
     {
       const concurrency = pipelineConcurrency.value
       pipelineCurrentStep.value = `正在生成分镜图（并发${concurrency}）...`
@@ -9962,15 +10817,15 @@ async function runRepairPipeline() {
       if (paused) { await waitForResume() }
     }
     await loadStoryboardMedia({ all: true })
-    const boards2 = (store.storyboards || []).filter((sb) => {
-      if (sbHasCompletedVideo(sb.id)) return false
-      if (isSbUniversalMode(sb.id)) {
-        if (!sbCanSubmitVideo(sb)) return false
-        return collectSbOmniReferenceAbsoluteUrls(sb).length > 0
-      }
-      return !!getSbFirstFrameUrl(sb)
-    })
+    const boards2 = (store.storyboards || []).filter((sb) => sbNeedsBatchVideo(sb))
     {
+      const missingTailRepair = countSbMissingNextShotTailFrame(boards2)
+      if (missingTailRepair > 0) {
+        addPipelineError(
+          '分镜视频',
+          `首尾帧已开：${missingTailRepair} 镜因下一镜尚无分镜图将仅用首帧提交（末镜除外）`
+        )
+      }
       const concurrency = BATCH_VIDEO_CONCURRENCY
       pipelineCurrentStep.value = `正在生成分镜视频（并发${concurrency}）...`
       const { paused } = await runConcurrently(boards2, concurrency, async (sb) => {
@@ -9993,6 +10848,7 @@ async function runRepairPipeline() {
               vLast,
               lastSource,
             })
+            appendSbVideoSubmitLog(sb.id, imgPayload, lastSource, '补全提交')
             const res = await videosAPI.create({
               drama_id: dramaIdVal,
               storyboard_id: sb.id,
@@ -12540,6 +13396,97 @@ html.light .sb-video-placeholder {
 .sb-truncated-warning span {
   flex: 1;
 }
+.sb-prompt-coverage-bar {
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  background: rgba(59, 130, 246, 0.08);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: #cbd5e1;
+}
+.sb-prompt-coverage-bar--complete {
+  border-color: rgba(74, 222, 128, 0.35);
+  background: rgba(34, 197, 94, 0.08);
+}
+.sb-prompt-coverage-bar--partial {
+  border-color: rgba(251, 191, 36, 0.4);
+  background: rgba(234, 179, 8, 0.1);
+}
+.sb-prompt-coverage-bar--pending {
+  border-color: rgba(161, 161, 170, 0.35);
+  background: rgba(113, 113, 122, 0.1);
+}
+.sb-prompt-coverage-bar--generating {
+  border-color: rgba(96, 165, 250, 0.45);
+  background: rgba(59, 130, 246, 0.12);
+}
+.sb-prompt-coverage-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.sb-prompt-coverage-title {
+  font-weight: 600;
+  color: #e4e4e7;
+}
+.sb-prompt-coverage-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sb-prompt-coverage-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sb-prompt-coverage-ok {
+  color: #86efac;
+}
+.sb-prompt-coverage-note {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  color: #a1a1aa;
+}
+.sb-prompt-coverage-live {
+  margin: 6px 0 0;
+  font-size: 0.78rem;
+  color: #93c5fd;
+}
+.sb-prompt-status-tag {
+  margin-left: 4px;
+  vertical-align: middle;
+}
+html.light .sb-prompt-coverage-bar {
+  color: #374151;
+  border-color: rgba(59, 130, 246, 0.25);
+  background: rgba(239, 246, 255, 0.9);
+}
+html.light .sb-prompt-coverage-bar--complete {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(240, 253, 244, 0.95);
+}
+html.light .sb-prompt-coverage-bar--partial {
+  border-color: rgba(234, 179, 8, 0.4);
+  background: rgba(254, 252, 232, 0.95);
+}
+html.light .sb-prompt-coverage-title {
+  color: #1e1b4b;
+}
+html.light .sb-prompt-coverage-ok {
+  color: #15803d;
+}
+html.light .sb-prompt-coverage-note {
+  color: #6b7280;
+}
+html.light .sb-prompt-coverage-live {
+  color: #2563eb;
+}
 /* 分镜生成中提示条 */
 .sb-generating-tip {
   display: flex;
@@ -12624,6 +13571,142 @@ html.light .sb-video-placeholder {
   margin-top: 12px;
   padding-top: 10px;
   border-top: 1px dashed rgba(124, 58, 237, 0.22);
+}
+.sb-dubbing-resync-row {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(124, 58, 237, 0.22);
+}
+/* 分镜五步工作流 */
+.sb-workflow {
+  margin: 12px 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sb-workflow-step {
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(113, 113, 122, 0.35);
+  background: rgba(39, 39, 42, 0.45);
+}
+.sb-workflow-step-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.sb-workflow-step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 700;
+  color: #e4e4e7;
+  background: rgba(99, 102, 241, 0.35);
+  border: 1px solid rgba(129, 140, 248, 0.5);
+  flex-shrink: 0;
+}
+.sb-workflow-step-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #e4e4e7;
+}
+.sb-workflow-step-status {
+  font-size: 0.78rem;
+  color: #a1a1aa;
+}
+.sb-workflow-step-status--ok {
+  color: #86efac;
+}
+.sb-workflow-step-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.sb-workflow-step-hint {
+  font-size: 0.78rem;
+  color: #a1a1aa;
+  line-height: 1.5;
+}
+.sb-workflow-video-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+.sb-workflow-video-options-label {
+  color: #a1a1aa;
+}
+.sb-workflow-section {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 8px;
+}
+.sb-workflow-section--complete {
+  border: 1px dashed rgba(59, 130, 246, 0.4);
+  background: rgba(59, 130, 246, 0.06);
+}
+.sb-workflow-section--clear {
+  border: 1px dashed rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.06);
+}
+.sb-workflow-section-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #d4d4d8;
+  min-width: 36px;
+  padding-top: 4px;
+  flex-shrink: 0;
+}
+.sb-workflow-section-btns {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+}
+html.light .sb-workflow-step {
+  background: rgba(249, 250, 251, 0.95);
+  border-color: rgba(209, 213, 219, 0.9);
+}
+html.light .sb-workflow-step-num {
+  color: #312e81;
+  background: rgba(199, 210, 254, 0.6);
+  border-color: rgba(129, 140, 248, 0.45);
+}
+html.light .sb-workflow-step-title {
+  color: #1f2937;
+}
+html.light .sb-workflow-step-status {
+  color: #6b7280;
+}
+html.light .sb-workflow-step-status--ok {
+  color: #15803d;
+}
+html.light .sb-workflow-step-hint {
+  color: #6b7280;
+}
+html.light .sb-workflow-section-label {
+  color: #374151;
+}
+html.light .sb-workflow-section--complete {
+  border-color: rgba(59, 130, 246, 0.25);
+  background: rgba(239, 246, 255, 0.85);
+}
+html.light .sb-workflow-section--clear {
+  border-color: rgba(239, 68, 68, 0.25);
+  background: rgba(254, 242, 242, 0.85);
 }
 .sb-voice-select-row {
   display: flex;

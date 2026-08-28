@@ -348,6 +348,7 @@ function rowToEpisode(r) {
     status: r.status || 'draft',
     video_url: r.video_url,
     thumbnail: r.thumbnail,
+    full_narration_audio_local_path: r.full_narration_audio_local_path ?? null,
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -857,7 +858,7 @@ function finalizeEpisode(db, log, episodeId, baseUrl, body = {}) {
         : '自然流畅的解说语气，情绪饱满',
       indextts_speed: (body && body.indextts_speed != null && Number(body.indextts_speed) > 0)
         ? Number(body.indextts_speed)
-        : 1.2,
+        : 1.1,
       narration_subtitle_mode: (body && body.use_indextts_narration) ? 'per_line' : (body?.narration_subtitle_mode || 'per_shot'),
     },
   };

@@ -128,6 +128,7 @@ function ensureAllColumns(database) {
     { name: 'created_at',     type: 'TEXT' },
     { name: 'updated_at',     type: 'TEXT' },
     { name: 'deleted_at',     type: 'TEXT' },
+    { name: 'full_narration_audio_local_path', type: 'TEXT' },
   ]);
 
   // --- storyboards ---

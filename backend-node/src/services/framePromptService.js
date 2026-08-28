@@ -334,6 +334,12 @@ ${ld}
       ? `【ALLOWED CHARACTERS IN THIS SHOT — ONLY these may appear; NO other people】\n${allowedCharNames.join(', ')}`
       : `【本分镜允许出场的角色（仅此名单，严禁出现名单外的任何其他人物）】\n${allowedCharNames.join('、')}`;
     parts.unshift(rosterLine);
+  } else {
+    parts.unshift(
+      isEn
+        ? '【ALLOWED CHARACTERS】None linked to this shot yet — NEVER use "Character A/B" or anonymous role labels; if the shot needs a person, you must wait for real names or describe only environment/lighting without a named figure.'
+        : '【本分镜允许出场的角色】当前未关联角色 — **严禁**使用「角色A/B」「参照角色A」等匿名占位；若必须出现人物，只能写 CONTEXT 中已给出的**真实姓名**（格式：姓名（参考图中的人物形象）），否则只写环境/光线不写人物。'
+    );
   }
   if (characterNames.length) {
     // 强化角色视觉锚点注入（针对首尾帧一致性问题）

@@ -59,7 +59,7 @@ export function useCanvasEpisodeGenerate(deps) {
       aspect_ratio: gen.aspectRatio,
       include_narration: !!meta.storyboard_include_narration,
       full_narration_video_mode: !!meta.storyboard_full_narration_video_mode,
-      narration_chars_per_sec: Number(meta.narration_chars_per_sec) || 5.5,
+      narration_chars_per_sec: Number(meta.narration_chars_per_sec) || 5,
       universal_omni_storyboard: !!meta.storyboard_universal_omni,
     }
   }
@@ -85,6 +85,7 @@ export function useCanvasEpisodeGenerate(deps) {
     return {
       ...getDramaGenerationOptions(drama.value),
       imagesBySbId: imagesBySbId.value,
+      storyboards: getStoryboardsForEpisode(),
     }
   }
 

@@ -218,6 +218,45 @@ function resolveStoragePath(cfg) {
     : path.join(process.cwd(), cfg.storage?.local_path || './data/storage');
 }
 
+const MISSING_NARRATION_AUDIO_MSG =
+  '全文解说模式：请先为本镜生成旁白配音，再生成视频（避免现场合成导致配音错乱）';
+
+const MISSING_NARRATION_PROMPT_ALIGN_MSG =
+  '全文解说模式：请先完成「按配音润色/生成提示词」，再生成视频';
+
+/**
+ * 全文解说模式下：有旁白文案的分镜必须先有可用的 narration_audio_local_path，
+ * 且已按配音完成提示词对齐（narration_prompt_aligned_at），才允许生视频。
+ * @returns {{ ok: true } | { ok: false, error: string }}
+ */
+function assertFullNarrationVideoPrerequisites(db, dramaId, storyboardId) {
+  if (!db || !dramaId || !storyboardId) return { ok: true };
+  const sb = db.prepare(
+    `SELECT narration, narration_audio_local_path, narration_prompt_aligned_at, is_intro
+     FROM storyboards WHERE id = ? AND deleted_at IS NULL`
+  ).get(Number(storyboardId));
+  if (!sb) return { ok: false, error: '分镜不存在' };
+  const isIntro = Number(sb.is_intro) === 1;
+  if (!isIntro && !videoClient.isDramaFullNarrationVideoMode(db, dramaId)) return { ok: true };
+  const narrText = (sb.narration && String(sb.narration).trim()) ? String(sb.narration).trim() : '';
+  if (!narrText) return { ok: true };
+  const rel = sb.narration_audio_local_path && String(sb.narration_audio_local_path).trim();
+  if (!rel) return { ok: false, error: MISSING_NARRATION_AUDIO_MSG };
+  try {
+    const cfg = require('../config').loadConfig();
+    const storageRoot = resolveStoragePath(cfg);
+    const abs = path.join(storageRoot, rel.replace(/\//g, path.sep));
+    if (!fs.existsSync(abs)) {
+      return { ok: false, error: '旁白配音文件缺失，请重新生成配音后再生成视频' };
+    }
+  } catch (_) {
+    // 配置异常时仍以 DB 路径为准放行文件存在性，后处理会再校验
+  }
+  const aligned = sb.narration_prompt_aligned_at && String(sb.narration_prompt_aligned_at).trim();
+  if (!aligned) return { ok: false, error: MISSING_NARRATION_PROMPT_ALIGN_MSG };
+  return { ok: true };
+}
+
 async function maybeApplyStoryboardNarrationPost(db, log, videoGenId, row, localPath, storagePath) {
   if (!localPath || !row.storyboard_id || !row.drama_id) {
     return { localPath, postWarning: null };
@@ -238,6 +277,9 @@ async function maybeApplyStoryboardNarrationPost(db, log, videoGenId, row, local
   }
   if (post.error === 'NO_NARRATION' || post.error === 'NOT_FULL_NARRATION') {
     return { localPath, postWarning: null };
+  }
+  if (post.error === 'MISSING_NARRATION_AUDIO') {
+    return { localPath, fatal: true, fatalError: MISSING_NARRATION_AUDIO_MSG };
   }
   log.warn('Storyboard narration post skipped', {
     videoGenId,
@@ -261,6 +303,17 @@ async function finalizeSuccessfulVideo(db, log, videoGenId, row, rowForAspect, v
       const postResult = await maybeApplyStoryboardNarrationPost(
         db, log, videoGenId, row, localPath, storagePath
       );
+      if (postResult.fatal) {
+        setVideoGenFailed(db, videoGenId, postResult.fatalError || MISSING_NARRATION_AUDIO_MSG, now);
+        if (row.task_id) {
+          taskService.updateTaskError(db, row.task_id, postResult.fatalError || MISSING_NARRATION_AUDIO_MSG);
+        }
+        log.error('Video generation failed after download (narration audio required)', {
+          id: videoGenId,
+          error: postResult.fatalError,
+        });
+        return;
+      }
       localPath = postResult.localPath;
       postWarning = postResult.postWarning;
     }
@@ -510,6 +563,17 @@ async function processVideoGeneration(db, log, videoGenId) {
   }
   const now = new Date().toISOString();
   try {
+    const prereq = assertFullNarrationVideoPrerequisites(db, row.drama_id, row.storyboard_id);
+    if (!prereq.ok) {
+      setVideoGenFailed(db, videoGenId, prereq.error, now);
+      if (row.task_id) taskService.updateTaskError(db, row.task_id, prereq.error);
+      log.error('Video generation blocked: missing narration audio', {
+        id: videoGenId,
+        storyboard_id: row.storyboard_id,
+        error: prereq.error,
+      });
+      return;
+    }
     db.prepare('UPDATE video_generations SET status = ?, updated_at = ? WHERE id = ?').run('processing', now, videoGenId);
     const loadConfig = require('../config').loadConfig;
     const cfg = loadConfig();
@@ -567,6 +631,10 @@ async function processVideoGeneration(db, log, videoGenId) {
         `正在上传 ${reference_urls.length} 张参考图到图床…`
       );
     }
+    const preferredKeyIndex =
+      row.preferred_key_index != null && Number.isFinite(Number(row.preferred_key_index))
+        ? Number(row.preferred_key_index)
+        : undefined;
     const result = await videoClient.callVideoApi(db, log, {
       prompt: row.prompt,
       model: row.model,
@@ -586,6 +654,7 @@ async function processVideoGeneration(db, log, videoGenId) {
       files_base_url: filesBaseUrl,
       storage_local_path: storageLocalPath,
       video_gen_id: videoGenId,
+      preferred_key_index: preferredKeyIndex,
     });
     const now2 = new Date().toISOString();
     if (result.error) {
@@ -641,4 +710,7 @@ module.exports = {
   resumeProcessingVideoGenerations,
   resumeFailedVideoPoll,
   resumePollForVideoGeneration,
+  assertFullNarrationVideoPrerequisites,
+  MISSING_NARRATION_AUDIO_MSG,
+  MISSING_NARRATION_PROMPT_ALIGN_MSG,
 };

@@ -3,6 +3,7 @@
 const storageLayout = require('./storageLayout');
 const { resolveStylePreset } = require('../constants/generationStylePresets');
 const seedance2AssetGuards = require('../utils/seedance2AssetGuards');
+const { normalizeScriptContentForSave } = require('../utils/scriptContentNormalize');
 
 /**
  * 清理 image_url：如果数据库中存储的是 base64 data URL，则返回 null。
@@ -67,6 +68,9 @@ function getDramaById(db, id) {
 function getDrama(db, dramaId, baseUrl) {
   const drama = getDramaById(db, Number(dramaId));
   if (!drama) return null;
+  const loadConfig = require('../config').loadConfig;
+  const cfg = loadConfig();
+  const sceneLog = { warn: () => {}, info: () => {} };
   // 加载 episodes、characters、scenes、props、storyboards（简化：只查当前 drama 的）
   const episodes = db.prepare(
     'SELECT * FROM episodes WHERE drama_id = ? AND deleted_at IS NULL ORDER BY episode_number ASC'
@@ -74,15 +78,23 @@ function getDrama(db, dramaId, baseUrl) {
   drama.episodes = episodes.map((e) => rowToEpisode(e));
   const { dedupeStoryboardRowsByNumber } = require('./episodeStoryboardService');
   for (const ep of drama.episodes) {
-    const storyboards = dedupeStoryboardRowsByNumber(
-      db.prepare(
+    const allRows = db
+      .prepare(
         'SELECT * FROM storyboards WHERE episode_id = ? AND deleted_at IS NULL ORDER BY storyboard_number ASC, id ASC'
-      ).all(ep.id)
+      )
+      .all(ep.id);
+    const introRow = allRows.find((r) => Number(r.is_intro) === 1) || null;
+    const bodyRows = dedupeStoryboardRowsByNumber(
+      allRows.filter((r) => Number(r.is_intro) !== 1)
     );
-    ep.storyboards = storyboards.map((s) => rowToStoryboard(s));
+    ep.storyboards = bodyRows.map((s) => rowToStoryboard(s));
+    ep.intro_storyboard = introRow ? rowToStoryboard(introRow) : null;
     // 批量加载 storyboard_props，附加到对应分镜
     try {
-      const sbIds = ep.storyboards.map((s) => s.id);
+      const sbIds = [
+        ...ep.storyboards.map((s) => s.id),
+        ...(ep.intro_storyboard ? [ep.intro_storyboard.id] : []),
+      ];
       if (sbIds.length > 0) {
         const placeholders = sbIds.map(() => '?').join(',');
         const spRows = db.prepare(`SELECT storyboard_id, prop_id FROM storyboard_props WHERE storyboard_id IN (${placeholders})`).all(...sbIds);
@@ -93,6 +105,9 @@ function getDrama(db, dramaId, baseUrl) {
         }
         for (const sb of ep.storyboards) {
           sb.prop_ids = spMap[sb.id] || [];
+        }
+        if (ep.intro_storyboard) {
+          ep.intro_storyboard.prop_ids = spMap[ep.intro_storyboard.id] || [];
         }
       }
     } catch (_) {}
@@ -110,20 +125,52 @@ function getDrama(db, dramaId, baseUrl) {
     } catch (_) {
       ep.characters = [];
     }
-    // 本集关联的场景（与 Go Preload("Episodes.Scenes") 一致，用于提取完成后展示）
+    // 本集关联的场景：本集提取的 + 本集绑定的跨集场景 + 本集分镜实际使用的场景
     try {
-      const epScenes = db.prepare(
+      const byEpisode = db.prepare(
         'SELECT * FROM scenes WHERE episode_id = ? AND deleted_at IS NULL ORDER BY id ASC'
       ).all(ep.id);
-      ep.scenes = epScenes.map((s) => rowToScene(s));
+      let byBind = [];
+      try {
+        byBind = db.prepare(
+          `SELECT s.* FROM scenes s
+           INNER JOIN episode_scenes es ON es.scene_id = s.id
+           WHERE es.episode_id = ? AND s.deleted_at IS NULL ORDER BY s.id ASC`
+        ).all(ep.id);
+      } catch (_) {
+        byBind = [];
+      }
+      const byStoryboard = db.prepare(
+        `SELECT DISTINCT s.* FROM scenes s
+         INNER JOIN storyboards sb ON sb.scene_id = s.id AND sb.episode_id = ? AND sb.deleted_at IS NULL
+         WHERE s.deleted_at IS NULL ORDER BY s.id ASC`
+      ).all(ep.id);
+      const seen = new Set();
+      ep.scenes = [];
+      for (const s of [...byEpisode, ...byBind, ...byStoryboard]) {
+        if (seen.has(s.id)) continue;
+        seen.add(s.id);
+        ep.scenes.push(rowToScene(s, ep.id, db, sceneLog, cfg));
+      }
+      ep.scenes.sort((a, b) => a.id - b.id);
     } catch (_) {
       ep.scenes = [];
     }
-    // 本集关联的道具：本集提取的（episode_id=本集）+ 本集分镜中出现的（storyboard_props），合并去重
+    // 本集关联的道具：本集提取的 + 本集绑定的跨集道具 + 本集分镜中出现的
     try {
       const byEpisode = db.prepare(
         'SELECT * FROM props WHERE episode_id = ? AND deleted_at IS NULL ORDER BY id ASC'
       ).all(ep.id);
+      let byBind = [];
+      try {
+        byBind = db.prepare(
+          `SELECT p.* FROM props p
+           INNER JOIN episode_props epb ON epb.prop_id = p.id
+           WHERE epb.episode_id = ? AND p.deleted_at IS NULL ORDER BY p.id ASC`
+        ).all(ep.id);
+      } catch (_) {
+        byBind = [];
+      }
       const byStoryboard = db.prepare(
         `SELECT DISTINCT p.* FROM props p
          INNER JOIN storyboard_props sp ON p.id = sp.prop_id
@@ -132,17 +179,10 @@ function getDrama(db, dramaId, baseUrl) {
       ).all(ep.id);
       const seen = new Set();
       ep.props = [];
-      for (const p of byEpisode) {
-        if (!seen.has(p.id)) {
-          seen.add(p.id);
-          ep.props.push(rowToProp(p));
-        }
-      }
-      for (const p of byStoryboard) {
-        if (!seen.has(p.id)) {
-          seen.add(p.id);
-          ep.props.push(rowToProp(p));
-        }
+      for (const p of [...byEpisode, ...byBind, ...byStoryboard]) {
+        if (seen.has(p.id)) continue;
+        seen.add(p.id);
+        ep.props.push(rowToProp(p, ep.id));
       }
       ep.props.sort((a, b) => a.id - b.id);
     } catch (_) {
@@ -156,7 +196,7 @@ function getDrama(db, dramaId, baseUrl) {
   const scenes = db.prepare(
     'SELECT * FROM scenes WHERE drama_id = ? AND deleted_at IS NULL ORDER BY id ASC'
   ).all(drama.id);
-  drama.scenes = scenes.map((s) => rowToScene(s));
+  drama.scenes = scenes.map((s) => rowToScene(s, null, db, sceneLog, cfg));
   const props = db.prepare(
     'SELECT * FROM props WHERE drama_id = ? AND deleted_at IS NULL ORDER BY id ASC'
   ).all(drama.id);
@@ -196,14 +236,22 @@ function listDramas(db, query) {
     d.episodes = episodes.map((e) => {
       const ep = rowToEpisode(e);
       const { dedupeStoryboardRowsByNumber } = require('./episodeStoryboardService');
-      const storyboards = dedupeStoryboardRowsByNumber(
-        db.prepare(
+      const allRows = db
+        .prepare(
           'SELECT * FROM storyboards WHERE episode_id = ? AND deleted_at IS NULL ORDER BY storyboard_number ASC, id ASC'
-        ).all(ep.id)
+        )
+        .all(ep.id);
+      const introRow = allRows.find((r) => Number(r.is_intro) === 1) || null;
+      const storyboards = dedupeStoryboardRowsByNumber(
+        allRows.filter((r) => Number(r.is_intro) !== 1)
       );
       ep.storyboards = storyboards.map((s) => rowToStoryboard(s));
+      ep.intro_storyboard = introRow ? rowToStoryboard(introRow) : null;
       try {
-        const sbIds = ep.storyboards.map((s) => s.id);
+        const sbIds = [
+          ...ep.storyboards.map((s) => s.id),
+          ...(ep.intro_storyboard ? [ep.intro_storyboard.id] : []),
+        ];
         if (sbIds.length > 0) {
           const placeholders = sbIds.map(() => '?').join(',');
           const spRows = db.prepare(`SELECT storyboard_id, prop_id FROM storyboard_props WHERE storyboard_id IN (${placeholders})`).all(...sbIds);
@@ -213,6 +261,7 @@ function listDramas(db, query) {
             spMap[row.storyboard_id].push(row.prop_id);
           }
           for (const sb of ep.storyboards) sb.prop_ids = spMap[sb.id] || [];
+          if (ep.intro_storyboard) ep.intro_storyboard.prop_ids = spMap[ep.intro_storyboard.id] || [];
         }
       } catch (_) {}
       ep.duration = ep.storyboards.reduce((sum, s) => sum + (s.duration || 0), 0);
@@ -349,6 +398,16 @@ function rowToEpisode(r) {
     video_url: r.video_url,
     thumbnail: r.thumbnail,
     full_narration_audio_local_path: r.full_narration_audio_local_path ?? null,
+    bgm_local_path: r.bgm_local_path ?? null,
+    bgm_music_id: r.bgm_music_id ?? null,
+    sfx_local_path: r.sfx_local_path ?? null,
+    sfx_music_id: r.sfx_music_id ?? null,
+    bgm_video_url: r.bgm_video_url ?? null,
+    foley_events_json: r.foley_events_json ?? null,
+    foley_status: r.foley_status ?? null,
+    foley_error: r.foley_error ?? null,
+    foley_video_url: r.foley_video_url ?? null,
+    foley_task_id: r.foley_task_id ?? null,
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -371,6 +430,7 @@ function rowToStoryboard(r) {
     episode_id: r.episode_id,
     scene_id: r.scene_id,
     storyboard_number: r.storyboard_number,
+    is_intro: Number(r.is_intro) === 1 ? 1 : 0,
     title: r.title,
     description: r.description,
     location: r.location,
@@ -407,8 +467,10 @@ function rowToStoryboard(r) {
       local_path: r.local_path ?? null,
       main_panel_idx: r.main_panel_idx != null ? Number(r.main_panel_idx) : null,
       video_url: r.video_url,
+      video_review: r.video_review === 'ok' || r.video_review === 'revise' ? r.video_review : null,
       audio_local_path: r.audio_local_path ?? null,
       narration_audio_local_path: r.narration_audio_local_path ?? null,
+      narration_prompt_aligned_at: r.narration_prompt_aligned_at ?? null,
       status: r.status || 'pending',
       error_msg: r.error_msg,
       created_at: r.created_at,
@@ -444,31 +506,56 @@ function rowToCharacter(r) {
   };
 }
 
-function rowToScene(r) {
+function rowToScene(r, viewEpisodeId, db, log, cfg) {
+  const ownerEpisodeId = r.episode_id != null ? Number(r.episode_id) : null;
+  const viewId = viewEpisodeId != null ? Number(viewEpisodeId) : null;
+  const boundFromOther =
+    viewId != null && ownerEpisodeId != null && Number.isFinite(ownerEpisodeId) && ownerEpisodeId !== viewId;
+
+  let video_ref_local_path = null;
+  if (db) {
+    try {
+      const { pickSceneRefForVideo, resolveStorageRoot } = require('../utils/sceneRefPicker');
+      const picked = pickSceneRefForVideo(db, log, r, resolveStorageRoot(cfg));
+      if (picked.ref && !String(picked.ref).startsWith('http')) {
+        video_ref_local_path = picked.ref;
+      }
+    } catch (_) {}
+  }
+
   return {
     id: r.id,
     drama_id: r.drama_id,
+    episode_id: ownerEpisodeId,
     location: r.location,
     time: r.time,
     prompt: r.prompt,
     polished_prompt: r.polished_prompt || null,
+    polished_prompt_single: r.polished_prompt_single || null,
     negative_prompt: r.negative_prompt || null,
     storyboard_count: r.storyboard_count ?? 1,
     image_url: sanitizeImageUrl(r.image_url),
     local_path: r.local_path,
+    video_ref_local_path,
     extra_images: r.extra_images || null,
     ref_image: r.ref_image || null,
     status: r.status || 'pending',
     error_msg: r.error_msg,
+    bound_from_other_episode: boundFromOther,
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
 }
 
-function rowToProp(r) {
+function rowToProp(r, viewEpisodeId) {
+  const ownerEpisodeId = r.episode_id != null ? Number(r.episode_id) : null;
+  const viewId = viewEpisodeId != null ? Number(viewEpisodeId) : null;
+  const boundFromOther =
+    viewId != null && ownerEpisodeId != null && Number.isFinite(ownerEpisodeId) && ownerEpisodeId !== viewId;
   return {
     id: r.id,
     drama_id: r.drama_id,
+    episode_id: ownerEpisodeId,
     name: r.name,
     type: r.type,
     description: r.description,
@@ -479,6 +566,7 @@ function rowToProp(r) {
     ref_image: r.ref_image || null,
     negative_prompt: r.negative_prompt || null,
     error_msg: r.error_msg,
+    bound_from_other_episode: boundFromOther,
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -679,6 +767,9 @@ function saveEpisodes(db, log, dramaId, req) {
   for (const ep of episodes) {
     const num = ep.episode_number ?? 0;
     keptNumbers.add(num);
+    const scriptContent = ep.script_content != null && String(ep.script_content).trim()
+      ? normalizeScriptContentForSave(ep.script_content)
+      : (ep.script_content ?? null);
     // 查找已有的（包含软删除的，以防重新激活）
     const existing = db.prepare(
       'SELECT id FROM episodes WHERE drama_id = ? AND episode_number = ? ORDER BY deleted_at IS NOT NULL ASC, id ASC LIMIT 1'
@@ -687,13 +778,13 @@ function saveEpisodes(db, log, dramaId, req) {
       // 更新已有分集，保留 id
       db.prepare(
         `UPDATE episodes SET title = ?, script_content = ?, description = ?, duration = ?, deleted_at = NULL, updated_at = ? WHERE id = ?`
-      ).run(ep.title || '', ep.script_content ?? null, ep.description ?? null, ep.duration ?? 0, now, existing.id);
+      ).run(ep.title || '', scriptContent, ep.description ?? null, ep.duration ?? 0, now, existing.id);
     } else {
       // 新增
       db.prepare(
         `INSERT INTO episodes (drama_id, episode_number, title, script_content, description, duration, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)`
-      ).run(did, num, ep.title || '', ep.script_content ?? null, ep.description ?? null, ep.duration ?? 0, now, now);
+      ).run(did, num, ep.title || '', scriptContent, ep.description ?? null, ep.duration ?? 0, now, now);
     }
   }
 
@@ -814,10 +905,38 @@ function finalizeEpisode(db, log, episodeId, baseUrl, body = {}) {
   if (!ep) return null;
   const drama = db.prepare('SELECT title FROM dramas WHERE id = ? AND deleted_at IS NULL').get(ep.drama_id);
   const storyboards = db.prepare(
-    'SELECT id, storyboard_number, duration FROM storyboards WHERE episode_id = ? AND deleted_at IS NULL ORDER BY storyboard_number ASC'
+    `SELECT id, storyboard_number, duration FROM storyboards
+     WHERE episode_id = ? AND deleted_at IS NULL AND COALESCE(is_intro, 0) = 0
+     ORDER BY storyboard_number ASC`
   ).all(episodeId);
   const videoMergeService = require('./videoMergeService');
   const scenes = [];
+
+  const includeIntro = body.include_intro !== false && body.include_intro !== 0 && body.include_intro !== '0' && body.include_intro !== 'false';
+  if (includeIntro) {
+    const intro = db
+      .prepare(
+        `SELECT id, duration FROM storyboards
+         WHERE episode_id = ? AND deleted_at IS NULL AND COALESCE(is_intro, 0) = 1
+         ORDER BY id DESC LIMIT 1`
+      )
+      .get(episodeId);
+    if (intro) {
+      const introUrl = getVideoUrlForStoryboard(db, intro.id, baseUrl);
+      if (introUrl) {
+        scenes.push({
+          scene_id: intro.id,
+          video_url: introUrl,
+          duration: Number(intro.duration) || 5,
+          order: 0,
+          is_intro: true,
+        });
+      } else {
+        log.warn('Finalize skip intro (no video)', { episode_id: episodeId, storyboard_id: intro.id });
+      }
+    }
+  }
+
   for (let i = 0; i < storyboards.length; i++) {
     const sb = storyboards[i];
     const videoUrl = getVideoUrlForStoryboard(db, sb.id, baseUrl);
@@ -829,13 +948,16 @@ function finalizeEpisode(db, log, episodeId, baseUrl, body = {}) {
       scene_id: sb.id,
       video_url: videoUrl,
       duration: Number(sb.duration) || 5,
-      order: i,
+      order: scenes.length,
     });
   }
   if (scenes.length === 0) {
     log.warn('Finalize no scenes with video', { episode_id: episodeId });
     return { message: '本集没有可合成的视频片段', merge_id: null, episode_id: episodeId, scenes_count: 0, task_id: null };
   }
+  // 规范化 order
+  for (let i = 0; i < scenes.length; i++) scenes[i].order = i;
+
   const title = drama && drama.title ? `${drama.title} - 第${ep.episode_number ?? episodeId}集` : null;
   const mergeReq = {
     episode_id: episodeId,
@@ -860,6 +982,9 @@ function finalizeEpisode(db, log, episodeId, baseUrl, body = {}) {
         ? Number(body.indextts_speed)
         : 1.1,
       narration_subtitle_mode: (body && body.use_indextts_narration) ? 'per_line' : (body?.narration_subtitle_mode || 'per_shot'),
+      include_intro: includeIntro,
+      subtitle_auto_align: false,
+      subtitle_margin_v: 12,
     },
   };
   const created = videoMergeService.create(db, log, mergeReq);
@@ -874,6 +999,7 @@ function finalizeEpisode(db, log, episodeId, baseUrl, body = {}) {
     episode_id: episodeId,
     scenes_count: scenes.length,
     task_id: created.task_id,
+    include_intro: includeIntro,
   };
 }
 
@@ -901,4 +1027,5 @@ module.exports = {
   finalizeEpisode,
   downloadEpisodeVideo,
   generateStoryboard,
+  rowToStoryboard,
 };

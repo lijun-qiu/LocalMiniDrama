@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { getFfmpegPath, getFfprobePath } = require('../utils/ffmpegPath');
+const { fitNarrationAudioToSlot, alignNarrationAudioToVideoDuration, extendVideoToDuration } = require('../utils/narrationAudioFit');
 
 function ffprobeDurationSec(filePath) {
   const probe = getFfprobePath();
@@ -138,48 +139,16 @@ function concatMp3List(segmentPaths, outPath, log) {
 }
 
 /**
- * 将整条旁白轨对齐到视频时长（视频偏短则整体加速）。
+ * @deprecated 使用 alignNarrationAudioToVideoDuration（旁白不加速）
  */
 function alignNarrationToVideoDuration(narrMp3, videoDur, outPath, log) {
-  const n = ffprobeDurationSec(narrMp3);
-  if (n == null || !Number.isFinite(videoDur) || videoDur <= 0.1) return false;
-  const eps = 0.08;
-  if (n > videoDur + eps) {
-    const factor = n / videoDur;
-    const chain = buildAtempoChain(factor);
-    if (!chain) {
-      try {
-        fs.copyFileSync(narrMp3, outPath);
-        return true;
-      } catch (_) {
-        return false;
-      }
-    }
-    return runFfmpeg(
-      ['-y', '-i', narrMp3, '-af', chain, '-t', String(videoDur), '-c:a', 'libmp3lame', '-q:a', '4', outPath],
-      log,
-      'align_speed'
-    );
-  }
-  if (n < videoDur - eps) {
-    const pad = videoDur - n;
-    return runFfmpeg(
-      ['-y', '-i', narrMp3, '-af', `apad=pad_dur=${pad}`, '-t', String(videoDur), '-c:a', 'libmp3lame', '-q:a', '4', outPath],
-      log,
-      'align_pad'
-    );
-  }
-  try {
-    fs.copyFileSync(narrMp3, outPath);
-    return true;
-  } catch (_) {
-    return false;
-  }
+  const r = alignNarrationAudioToVideoDuration(narrMp3, videoDur, outPath, log, ffprobeDurationSec);
+  return r.ok;
 }
 
-function burnSubtitlesAndMux(mergedVideoPath, narrAlignedMp3, srtPath, outPath, log) {
+function burnSubtitlesAndMux(mergedVideoPath, narrAlignedMp3, srtPath, outPath, log, subtitleStyle) {
   const sub = escapeSubtitlesPathForFfmpeg(srtPath);
-  const forceStyle = "FontSize=24,Outline=2,Shadow=1,Bold=1,MarginV=48";
+  const forceStyle = subtitleStyle || "FontSize=24,Outline=2,Shadow=1,Bold=1,Alignment=2,MarginV=12";
   const vf = `subtitles='${sub}':charenc=UTF-8:force_style='${forceStyle}'`;
   const args = [
     '-y',
@@ -192,6 +161,8 @@ function burnSubtitlesAndMux(mergedVideoPath, narrAlignedMp3, srtPath, outPath, 
     '-preset', 'fast',
     '-crf', '23',
     '-c:a', 'aac',
+    '-ar', '44100',
+    '-ac', '2',
     '-b:a', '192k',
     '-movflags', '+faststart',
     '-shortest',
@@ -274,7 +245,10 @@ async function runNarrationSubtitlePostProcess(db, log, opts) {
         } catch (_) {
           return { ok: false, error: '复制 TTS 文件失败' };
         }
-        if (!fitAudioToSlot(segRaw, slotSec, segFit, log)) {
+        if (!fitNarrationAudioToSlot(segRaw, slotSec, segFit, log, {
+          ffprobeDurationSec,
+          allowTrim: true,
+        })) {
           return { ok: false, error: `旁白时长对齐失败 #${i}` };
         }
       }
@@ -292,8 +266,18 @@ async function runNarrationSubtitlePostProcess(db, log, opts) {
     }
 
     const narrAligned = path.join(tempRoot, 'narr_aligned.mp3');
-    if (!alignNarrationToVideoDuration(narrConcat, videoDur, narrAligned, log)) {
+    const align = alignNarrationAudioToVideoDuration(narrConcat, videoDur, narrAligned, log, ffprobeDurationSec);
+    if (!align.ok) {
       return { ok: false, error: '旁白与视频总时长对齐失败' };
+    }
+    let videoForMux = mergedAbsPath;
+    const outputVideoDur = align.outputVideoDur;
+    if (align.extended && outputVideoDur > videoDur + 0.05) {
+      const extendedVideo = path.join(tempRoot, 'merged_extended.mp4');
+      if (!extendVideoToDuration(mergedAbsPath, outputVideoDur, extendedVideo, log, ffprobeDurationSec)) {
+        return { ok: false, error: '旁白长于视频且延长画面失败' };
+      }
+      videoForMux = extendedVideo;
     }
 
     const baseName = path.basename(mergedAbsPath, path.extname(mergedAbsPath));
@@ -301,7 +285,21 @@ async function runNarrationSubtitlePostProcess(db, log, opts) {
     fs.writeFileSync(srtPath, `\uFEFF${srtLines.join('\n')}\n`, 'utf8');
 
     const outAbs = path.join(path.dirname(mergedAbsPath), `${baseName}_subs.mp4`);
-    if (!burnSubtitlesAndMux(mergedAbsPath, narrAligned, srtPath, outAbs, log)) {
+    let dramaId = null;
+    if (episodeId) {
+      try {
+        dramaId = db.prepare('SELECT drama_id FROM episodes WHERE id = ?').get(Number(episodeId))?.drama_id ?? null;
+      } catch (_) {}
+    }
+    const { resolveSubtitleForceStyleAsync } = require('../utils/subtitleBurnStyle');
+    const subtitleStyle = await resolveSubtitleForceStyleAsync(db, log, {
+      dramaId,
+      episodeId,
+      videoAbsPath: videoForMux,
+      videoDurSec: outputVideoDur,
+      fullNarration: true,
+    });
+    if (!burnSubtitlesAndMux(videoForMux, narrAligned, srtPath, outAbs, log, subtitleStyle)) {
       return { ok: false, error: '烧录字幕或混音失败（请确认已安装 ffmpeg 且支持 libx264）' };
     }
 

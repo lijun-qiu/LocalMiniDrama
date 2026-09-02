@@ -12,6 +12,7 @@ function createTestDb() {
       id INTEGER PRIMARY KEY, drama_id INTEGER, episode_number INTEGER, title TEXT, script_content TEXT,
       description TEXT, duration INTEGER, video_url TEXT, thumbnail TEXT, status TEXT,
       full_narration_audio_local_path TEXT,
+      bgm_local_path TEXT, bgm_music_id INTEGER, sfx_local_path TEXT, sfx_music_id INTEGER, bgm_video_url TEXT,
       created_at TEXT, updated_at TEXT, deleted_at TEXT
     );
     CREATE TABLE characters (id INTEGER PRIMARY KEY, drama_id INTEGER, name TEXT, deleted_at TEXT);
@@ -20,10 +21,13 @@ function createTestDb() {
     CREATE TABLE props (id INTEGER PRIMARY KEY, drama_id INTEGER, episode_id INTEGER, name TEXT, deleted_at TEXT);
     CREATE TABLE storyboards (
       id INTEGER PRIMARY KEY, episode_id INTEGER, title TEXT, deleted_at TEXT,
+      is_intro INTEGER DEFAULT 0,
       narration_audio_local_path TEXT, audio_local_path TEXT,
       image_url TEXT, local_path TEXT, composed_image TEXT, video_url TEXT,
       first_frame_image_id INTEGER, last_frame_image_id INTEGER,
-      last_frame_image_url TEXT, last_frame_local_path TEXT, updated_at TEXT
+      last_frame_image_url TEXT, last_frame_local_path TEXT, updated_at TEXT,
+      polished_prompt TEXT, video_prompt TEXT, universal_segment_text TEXT,
+      narration_prompt_aligned_at TEXT
     );
     CREATE TABLE storyboard_props (storyboard_id INTEGER, prop_id INTEGER, PRIMARY KEY (storyboard_id, prop_id));
     CREATE TABLE image_generations (id INTEGER PRIMARY KEY, storyboard_id INTEGER, character_id INTEGER, scene_id INTEGER, deleted_at TEXT, local_path TEXT, image_url TEXT);
@@ -41,8 +45,10 @@ function createTestDb() {
   db.prepare(
     `INSERT INTO storyboards (
       id, episode_id, title, narration_audio_local_path, audio_local_path,
-      image_url, local_path, composed_image, video_url, first_frame_image_id, last_frame_image_id
-    ) VALUES (400, 10, ?, 'audio/n.wav', 'audio/d.wav', 'img.png', 'img/local.png', 'composed.png', 'vid.mp4', 500, NULL)`
+      image_url, local_path, composed_image, video_url, first_frame_image_id, last_frame_image_id,
+      polished_prompt, video_prompt, universal_segment_text, narration_prompt_aligned_at
+    ) VALUES (400, 10, ?, 'audio/n.wav', 'audio/d.wav', 'img.png', 'img/local.png', 'composed.png', 'vid.mp4', 500, NULL,
+      '生图提示词', '视频提示词', '全能片段', '2026-01-01T00:00:00.000Z')`
   ).run('开场');
   db.prepare('INSERT INTO storyboard_props (storyboard_id, prop_id) VALUES (400, 300)').run();
   db.prepare('INSERT INTO image_generations (id, storyboard_id) VALUES (500, 400)').run();
@@ -134,6 +140,22 @@ describe('clearEpisodeMedia', () => {
     const sb = db.prepare('SELECT local_path, video_url FROM storyboards WHERE id = 400').get();
     assert.equal(sb.video_url, null);
     assert.equal(sb.local_path, null);
+  });
+
+  it('clears prompts only', () => {
+    const db = createTestDb();
+    const result = clearEpisodeMedia(db, { info() {} }, 10, 'prompts');
+    assert.equal(result.prompts, 1);
+    const sb = db.prepare('SELECT * FROM storyboards WHERE id = 400').get();
+    assert.equal(sb.polished_prompt, null);
+    assert.equal(sb.video_prompt, null);
+    assert.equal(sb.universal_segment_text, null);
+    assert.equal(sb.narration_prompt_aligned_at, null);
+    assert.equal(sb.image_url, 'img.png');
+    assert.equal(sb.video_url, 'vid.mp4');
+    assert.equal(sb.narration_audio_local_path, 'audio/n.wav');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM image_generations').get().n, 1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM video_generations').get().n, 1);
   });
 
   it('rejects invalid kind', () => {

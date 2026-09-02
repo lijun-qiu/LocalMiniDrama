@@ -149,13 +149,23 @@ function hardDeleteStoryboardIds(db, log, storyboardIds, storageRoot) {
   };
 }
 
-/** 删除本集全部分镜（含历史软删除行）及关联媒体。 */
-function purgeAllEpisodeStoryboards(db, log, episodeId, storageRoot) {
+/**
+ * 删除本集分镜（含历史软删除行）及关联媒体。
+ * @param {{ preserveIntro?: boolean }} [opts] preserveIntro=true 时保留 is_intro=1（正文重生默认）
+ */
+function purgeAllEpisodeStoryboards(db, log, episodeId, storageRoot, opts = {}) {
   const epId = Number(episodeId);
-  const rows = db.prepare('SELECT id FROM storyboards WHERE episode_id = ?').all(epId);
+  const preserveIntro = opts.preserveIntro !== false;
+  const rows = preserveIntro
+    ? db.prepare('SELECT id FROM storyboards WHERE episode_id = ? AND COALESCE(is_intro, 0) = 0').all(epId)
+    : db.prepare('SELECT id FROM storyboards WHERE episode_id = ?').all(epId);
   const ids = rows.map((r) => r.id);
   const out = hardDeleteStoryboardIds(db, log, ids, storageRoot);
-  log?.info?.('[purge] 本集分镜已硬删除', { episode_id: epId, ...out });
+  log?.info?.('[purge] 本集分镜已硬删除', {
+    episode_id: epId,
+    preserve_intro: preserveIntro,
+    ...out,
+  });
   return out;
 }
 

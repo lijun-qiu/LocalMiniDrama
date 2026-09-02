@@ -5,7 +5,7 @@
       class="omni-at-editor"
       contenteditable="true"
       spellcheck="false"
-      data-placeholder="输入 @ 选择素材；编辑区显示 @场景名 / @角色名，保存与提交仍为 @图片N"
+      data-placeholder="可直接编辑；输入 @ 选择素材。点「全能提示词」生成，或在上方填写生成/润色要求"
       @input="onInput"
       @blur="onBlur"
       @keydown="onKeydown"

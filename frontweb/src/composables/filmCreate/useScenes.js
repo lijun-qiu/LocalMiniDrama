@@ -21,7 +21,7 @@ import { buildExtractTaskMeta, isEpisodeExtractRunning } from '@/composables/use
  * @param {object} deps.dramaAPI
  */
 export function useScenes(deps) {
-  const { store, dramaId, currentEpisodeId, getSelectedStyle, scriptLanguage, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage, dramaAPI } = deps
+  const { store, dramaId, currentEpisodeId, getSelectedStyle, getSelectedImageModel, getSelectedTextModel, scriptLanguage, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage, dramaAPI } = deps
   const genStore = useGenerationTaskStore()
 
   function buildSceneImageMeta(scene) {
@@ -99,7 +99,7 @@ export function useScenes(deps) {
     genStore.markRunning(meta)
     try {
       const res = await dramaAPI.extractBackgrounds(epId, {
-        model: undefined,
+        model: typeof getSelectedTextModel === 'function' ? getSelectedTextModel() : undefined,
         style: getSelectedStyle(),
         language: scriptLanguage.value
       })
@@ -294,15 +294,18 @@ export function useScenes(deps) {
   }
 
   async function onDeleteScene(scene) {
+    const isBound = !!scene?.bound_from_other_episode
     try {
       await ElMessageBox.confirm(
-        `确定要删除场景「${(scene.location || scene.time || '未命名').slice(0, 20)}」吗？此操作不可恢复。`,
-        '删除确认',
-        { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+        isBound
+          ? `「${(scene.location || scene.time || '未命名').slice(0, 20)}」来自其他集，确定从本集解除绑定吗？原集场景不会被删除。`
+          : `确定要删除场景「${(scene.location || scene.time || '未命名').slice(0, 20)}」吗？此操作不可恢复。`,
+        isBound ? '解除绑定' : '删除确认',
+        { type: 'warning', confirmButtonText: isBound ? '解除绑定' : '删除', cancelButtonText: '取消' }
       )
-      await sceneAPI.delete(scene.id)
+      await sceneAPI.delete(scene.id, currentEpisodeId.value || undefined)
       await loadDrama()
-      ElMessage.success('场景已删除')
+      ElMessage.success(isBound ? '已从本集解除绑定' : '场景已删除')
     } catch (e) {
       if (e === 'cancel') return
       ElMessage.error(e.message || '删除失败')
@@ -318,7 +321,7 @@ export function useScenes(deps) {
     try {
       const res = await sceneAPI.generateImage({
         scene_id: scene.id,
-        model: undefined,
+        model: typeof getSelectedImageModel === 'function' ? getSelectedImageModel() : undefined,
         style: getSelectedStyle(),
         use_quad_grid: !!useQuadGrid
       })
@@ -526,6 +529,12 @@ export function useScenes(deps) {
     const loadingKey = sceneAddToEpisodeLoadingKey(scope, item.id)
     addingSceneFromLibraryId.value = loadingKey
     try {
+      if (scope === 'drama' && item?.id) {
+        await sceneAPI.bindToEpisode(currentEpisodeId.value, item.id)
+        ElMessage.success(`「${item.location || '场景'}」已绑定到本集`)
+        await loadDrama()
+        return
+      }
       const existingScene = (store.scenes || []).find((s) => s.location === item.location)
       if (existingScene) {
         await sceneAPI.update(existingScene.id, {

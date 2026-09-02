@@ -163,6 +163,7 @@
 
     <div class="panel-actions">
       <el-button size="small" :loading="saving" @click.stop="saveFields">保存</el-button>
+      <el-button size="small" :loading="regenerating" title="仅重新生成本镜脚本，可选重绑资产" @click.stop="regenerateOne">↻ 本镜重生成</el-button>
       <el-button v-if="!isUniversal" size="small" :loading="busyStep === 'polish'" @click.stop="polishPrompt">润色</el-button>
       <el-button v-if="!isUniversal" size="small" type="primary" :loading="busyStep === 'image'" @click.stop="runStep('image')">生图</el-button>
       <el-button size="small" type="primary" :loading="busyStep === 'video'" @click.stop="runStep('video')">生视频</el-button>
@@ -197,6 +198,7 @@ const props = defineProps({
 const router = useRouter()
 const ctx = useCanvasContext()
 const saving = ref(false)
+const regenerating = ref(false)
 const busyStep = ref('')
 const characterIds = ref([])
 const sceneId = ref(null)
@@ -273,8 +275,45 @@ async function onRelationChange() {
       prop_ids: propIds.value,
     })
     await ctx?.refreshDrama?.(true)
+    ElMessage.success('资产绑定已更新')
   } catch (e) {
     ElMessage.error(e?.message || '关联保存失败')
+  }
+}
+
+async function regenerateOne() {
+  if (!props.storyboard?.id || regenerating.value) return
+  const shotLabel = props.storyboard.storyboard_number != null
+    ? `#${props.storyboard.storyboard_number}`
+    : ''
+  let rebindAssets = false
+  try {
+    await ElMessageBox.confirm(
+      `将 AI 重新生成分镜 ${shotLabel} 的脚本（标题/动作/对白等）。\n\n「生成并重绑」：按 AI 更新角色/场景/道具；「仅生成」：保留当前勾选。`,
+      '重新生成本镜',
+      {
+        distinguishCancelAndClose: true,
+        confirmButtonText: '生成并重绑',
+        cancelButtonText: '仅生成',
+        type: 'warning',
+      }
+    )
+    rebindAssets = true
+  } catch (action) {
+    if (action === 'cancel') rebindAssets = false
+    else return
+  }
+  regenerating.value = true
+  ctx?.nodeStatus?.set(sbNodeId.value, { step: 'regen', message: '本镜重生成中…' })
+  try {
+    await storyboardsAPI.regenerateOne(props.storyboard.id, { rebind_assets: rebindAssets })
+    await ctx?.refreshDrama?.(true)
+    ElMessage.success(rebindAssets ? '本镜已重新生成，资产已重绑' : '本镜已重新生成（保留原资产）')
+  } catch (e) {
+    ElMessage.error(e?.message || '重新生成本镜失败')
+  } finally {
+    regenerating.value = false
+    if (!busyStep.value) ctx?.nodeStatus?.clear(sbNodeId.value)
   }
 }
 

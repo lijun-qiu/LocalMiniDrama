@@ -22,6 +22,8 @@ const audioRoutes = require('./audio');
 const aiVoicesRoutes = require('./aiVoices');
 const promptOverridesRoutes = require('./promptOverrides');
 const sceneModelMapRoutes = require('./sceneModelMap');
+const bgmRoutes = require('./bgm');
+const foleyRoutes = require('./foley');
 
 function setupRouter(cfg, db, log) {
   const r = express.Router();
@@ -49,6 +51,8 @@ function setupRouter(cfg, db, log) {
   const audio = audioRoutes(db, log, cfg);
   const aiVoices = aiVoicesRoutes(db, log, cfg);
   const promptOverrides = promptOverridesRoutes.routes(db, log);
+  const bgm = bgmRoutes.routes(db, log, cfg);
+  const foley = foleyRoutes.routes(db, log, cfg);
 
   // ---------- dramas ----------
   r.get('/dramas', drama.listDramas);
@@ -220,12 +224,29 @@ function setupRouter(cfg, db, log) {
   r.post('/episodes/:episode_id/complete-missing-video-prompts', storyboards.completeMissingVideoPrompts);
   r.post('/episodes/:episode_id/generate-prompts-from-audio', storyboards.generatePromptsFromAudioDuration);
   r.post('/episodes/:episode_id/props/extract', prop.extractProps);
+  r.post('/episodes/:episode_id/props/:prop_id/bind', prop.bindPropToEpisode);
+  r.post('/episodes/:episode_id/scenes/:scene_id/bind', scenes.bindToEpisode);
   r.post('/episodes/:episode_id/characters/extract', stub.episodeCharactersExtract);
   r.get('/episodes/:episode_id/storyboards', storyboards.episodeStoryboardsGet);
+  r.get('/episodes/:episode_id/intro-storyboard', drama.getIntroStoryboard);
+  r.put('/episodes/:episode_id/intro-storyboard', drama.upsertIntroStoryboard);
+  r.post('/episodes/:episode_id/intro-storyboard/generate-prompts', drama.generateIntroPrompts);
   r.post('/episodes/:episode_id/finalize', drama.finalizeEpisode);
   r.post('/episodes/:episode_id/clear-generated', drama.clearEpisodeGenerated);
   r.post('/episodes/:episode_id/clear-media', drama.clearEpisodeMedia);
   r.get('/episodes/:episode_id/download', drama.downloadEpisodeVideo);
+  r.get('/episodes/:episode_id/bgm', bgm.list);
+  r.get('/bgm/ace-step/health', bgm.aceStepHealth);
+  r.post('/bgm/ace-step/start', bgm.aceStepStart);
+  r.post('/bgm/ace-step/unload', bgm.aceStepUnload);
+  r.post('/episodes/:episode_id/bgm/suggest-description', bgm.suggestDescription);
+  r.post('/episodes/:episode_id/bgm/generate', bgm.generate);
+  r.post('/episodes/:episode_id/bgm/mix-to-video', bgm.mixToVideo);
+  r.post('/episodes/:episode_id/bgm/:music_id/apply', bgm.apply);
+  r.get('/episodes/:episode_id/foley', foley.get);
+  r.post('/episodes/:episode_id/foley/analyze', foley.analyze);
+  r.post('/episodes/:episode_id/foley/generate', foley.generate);
+  r.post('/episodes/:episode_id/foley/mix-to-video', foley.mixToVideo);
 
   // ---------- tasks ----------
   r.get('/tasks/:task_id', task.getTaskStatus);
@@ -244,6 +265,7 @@ function setupRouter(cfg, db, log) {
   r.post('/scenes/:scene_id/add-to-library', scenes.addToLibrary);
   r.post('/scenes/:scene_id/add-to-material-library', scenes.addToMaterialLibrary);
   r.post('/scenes/:scene_id/extract-from-image', scenes.extractFromImage);
+  r.post('/scenes/:scene_id/ensure-video-ref', scenes.ensureVideoRef);
 
   // ---------- images ----------
   r.get('/images', images.list);
@@ -302,6 +324,7 @@ function setupRouter(cfg, db, log) {
   r.post('/storyboards/:id/regenerate-layout-description', storyboards.regenerateLayoutDescription);
   r.post('/storyboards/:id/rebuild-video-prompt', storyboards.rebuildVideoPrompt);
   r.post('/storyboards/:id/split-by-audio', storyboards.splitByAudio);
+  r.post('/storyboards/:id/regenerate', storyboards.regenerateOne);
 
   // ---------- audio ----------
   r.post('/audio/extract', audio.extract);

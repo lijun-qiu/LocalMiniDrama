@@ -192,7 +192,7 @@ API Key：your-api-key
 在「AI 配置」页面，点击顶部的：
 - **「一键配置通义」** — 自动创建阿里云 DashScope 的文本/图片/视频三套配置模板
 - **「一键配置火山」** — 自动创建火山引擎的文本/图片/视频三套配置模板
-- **「一键配置 Agnes」**（v1.2.8+）— 自动创建 Agnes AI 的文本/图片/视频三套配置模板（`agnes-2.0-flash` / `agnes-image-2.1-flash` / `agnes-video-v2.0`）
+- **「一键配置 Agnes」**（v1.2.8+）— 自动创建/更新 Agnes AI 的文本/图片/视频配置模板（默认 `agnes-2.5-flash` / `agnes-image-2.5-flash` / `agnes-video-2.5-flash`，列表内可选 2.0 / 2.1 等旧版）
 
 一键配置后，只需填入你的 API Key，其他参数已预填好，点击「保存」即可使用。
 
@@ -248,6 +248,37 @@ image_proxy:
 - 视频生成通常需要 1–5 分钟（取决于时长和分辨率）
 - 建议使用 `turbo` 或 `fast` 后缀的模型加快速度
 - 如频繁遇到 429 限流，系统会自动重试，无需手动干预
+
+---
+
+## 画面音效 Foley（与 BGM 独立）
+
+在 BGM 面板下方的 **画面音效（Foley）** 面板使用。
+
+1. 先生成各镜视频并完成「合成视频」
+2. 点 **分析画面音效**：按分镜每 **3 秒**抽一帧，调用 Agnes 视觉（推荐 `agnes-2.5-flash`）标出明显事件（关门、按键等）
+3. 点 **生成短音**：本地 ACE-Step 为每条事件生成短 Foley（需先在 BGM 面板启动 ACE-Step）
+4. 点 **混入成片**：按 `t_episode_sec` 时间轴叠到合成原片或带 BGM 成片 → 写入 `foley_video_url`（**不改写** `video_url` / `bgm_video_url`）
+
+AI 配置：文本类型需包含 Agnes，并建议加入模型 `agnes-2.5-flash`。
+
+## 音乐 / BGM（ACE-Step 本地 + Suno 可选）
+
+成片配乐在「合成视频」旁的 **BGM 生成** 面板使用。
+
+1. **推荐（本地）**：在 BGM 面板点 **「启动」**（或运行 `scripts/start-ace-step.ps1`），默认 `http://127.0.0.1:8001`，无需 API Key；不用时点 **「卸载」** 释放显存
+2. **可选（云端）**：在「AI 配置」新增 **音乐/BGM** 类型，选 Suno 模型（`suno_music_open` / `chirp-v3-5`）；Base URL 指向兼容网关（如 Chatfire / 4022），含 `/v1` 后缀亦可
+3. BGM 仅生成纯器乐；画面事件音效用下方 Foley 面板
+4. 流程：合成视频 → AI 生成描述 / 生成 BGM → **混入成片（保留原片）**
+5. 原 `video_url` 不改写；带 BGM 结果写入 `bgm_video_url`，可多次混音试听
+
+环境变量（可选）：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `ACE_STEP_BASE_URL` | `http://127.0.0.1:8001` | ACE-Step API 地址 |
+| `ACE_STEP_ROOT` | `C:\my\ace-step\ACE-Step-1.5` | ACE-Step 安装目录 |
+| `ACE_STEP_LM_MODEL` | `acestep-5Hz-lm-0.6B` | 规划 LM 权重 |
 
 ---
 

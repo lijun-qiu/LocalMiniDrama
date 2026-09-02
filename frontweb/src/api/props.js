@@ -24,8 +24,12 @@ export const propAPI = {
   extractFromScript(episodeId) {
     return request.post(`/episodes/${episodeId}/props/extract`)
   },
-  delete(id) {
-    return request.delete(`/props/${id}`)
+  delete(id, episodeId) {
+    const q = episodeId != null ? `?episode_id=${encodeURIComponent(episodeId)}` : ''
+    return request.delete(`/props/${id}${q}`)
+  },
+  bindToEpisode(episodeId, propId) {
+    return request.post(`/episodes/${episodeId}/props/${propId}/bind`)
   },
   addToLibrary(id, body = {}) {
     return request.post(`/props/${id}/add-to-library`, body)

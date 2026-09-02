@@ -3,6 +3,12 @@ const imageClient = require('./imageClient');
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
 const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+const {
+  SCENE_EMPTY_NEGATIVE_PROMPT,
+  EMPTY_SCENE_LOCK,
+  wrapStyleForEmptyScene,
+  scrubAndReinforceScenePrompt,
+} = require('../utils/assetImageStyle');
 
 function applySceneStyleOverride(cfg, styleOverride) {
   const o = (styleOverride || '').toString().trim();
@@ -152,20 +158,10 @@ function getSceneById(db, id) {
  */
 function buildSceneFourViewImagePrompt(fourViewDescription, styleEn, styleZh) {
   const imageLayoutInstruction = promptI18n.getSceneGenerateImagePrompt();
-  const zh = (styleZh || '').trim();
-  const en = (styleEn || '').trim();
-
-  const styleLines = [];
-  if (zh) styleLines.push(`【画风·最高优先级】四格统一：${zh}`);
-  if (en && en !== zh) styleLines.push(`MANDATORY ART STYLE (all 4 panels): ${en}.`);
-  else if (en && !zh) styleLines.push(`MANDATORY ART STYLE (all 4 panels): ${en}.`);
+  const styleLines = wrapStyleForEmptyScene(styleEn, styleZh);
   const styleHeader = styleLines.length ? `${styleLines.join('\n')}\n\n` : '';
-
-  const tailParts = [];
-  if (zh || en) tailParts.push(`Reiterate: same art style as above (${en || zh}). No people, no text.`);
-  const tail = tailParts.length ? `\n\n---\n\n${tailParts.join(' ')}` : '';
-
-  return `${styleHeader}${imageLayoutInstruction}\n\n---\n\n${fourViewDescription}${tail}`;
+  const tail = `\n\n---\n\n${EMPTY_SCENE_LOCK}`;
+  return `${styleHeader}${EMPTY_SCENE_LOCK}\n\n${imageLayoutInstruction}\n\n---\n\n${fourViewDescription}${tail}`;
 }
 
 /**
@@ -173,20 +169,10 @@ function buildSceneFourViewImagePrompt(fourViewDescription, styleEn, styleZh) {
  */
 function buildSceneSingleImagePrompt(description, styleEn, styleZh) {
   const imageLayoutInstruction = promptI18n.getSceneGenerateSingleImagePrompt();
-  const zh = (styleZh || '').trim();
-  const en = (styleEn || '').trim();
-
-  const styleLines = [];
-  if (zh) styleLines.push(`【画风·最高优先级】${zh}`);
-  if (en && en !== zh) styleLines.push(`MANDATORY ART STYLE: ${en}.`);
-  else if (en && !zh) styleLines.push(`MANDATORY ART STYLE: ${en}.`);
+  const styleLines = wrapStyleForEmptyScene(styleEn, styleZh);
   const styleHeader = styleLines.length ? `${styleLines.join('\n')}\n\n` : '';
-
-  const tailParts = [];
-  if (zh || en) tailParts.push(`Reiterate: same art style as above (${en || zh}). No people, no text.`);
-  const tail = tailParts.length ? `\n\n---\n\n${tailParts.join(' ')}` : '';
-
-  return `${styleHeader}${imageLayoutInstruction}\n\n---\n\n${description}${tail}`;
+  const tail = `\n\n---\n\n${EMPTY_SCENE_LOCK}`;
+  return `${styleHeader}${EMPTY_SCENE_LOCK}\n\n${imageLayoutInstruction}\n\n---\n\n${description}${tail}`;
 }
 
 /**
@@ -320,6 +306,8 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
 
   let mergedCfg = mergeCfgStyleWithDrama(cfg, dramaFull);
   mergedCfg = applySceneStyleOverride(mergedCfg, style);
+  const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
+  const styleZh = (mergedCfg.style.default_style_zh || '').trim();
   let imagePrompt;
 
   if (sceneRow.polished_prompt && String(sceneRow.polished_prompt).trim()) {
@@ -352,8 +340,6 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
       fourViewDescription = inputText;
     }
 
-    const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
-    const styleZh = (mergedCfg.style.default_style_zh || '').trim();
     imagePrompt = buildSceneFourViewImagePrompt(fourViewDescription, styleEn, styleZh);
 
     // 顺带保存，供下次复用
@@ -369,11 +355,13 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
   const imageGen = imageClient.createAndGenerateImage(db, log, {
     drama_id: sceneRow.drama_id,
     scene_id: sceneId,
-    prompt: imagePrompt,
+    prompt: scrubAndReinforceScenePrompt(imagePrompt, styleEn, styleZh),
     model: modelName || undefined,
     size: '1792x1024',
     quality: 'standard',
     provider: 'openai',
+    frame_type: 'quad_grid',
+    user_negative_prompt: SCENE_EMPTY_NEGATIVE_PROMPT,
   });
 
   log.info('[场景四视图] Step2 图片生成任务已提交', { scene_id: sceneId, image_gen_id: imageGen?.id });
@@ -396,6 +384,8 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style)
 
   let mergedCfg = mergeCfgStyleWithDrama(cfg, dramaFull);
   mergedCfg = applySceneStyleOverride(mergedCfg, style);
+  const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
+  const styleZh = (mergedCfg.style.default_style_zh || '').trim();
   let imagePrompt;
 
   // 注意：单图模式只检查 polished_prompt_single，即使 polished_prompt（四宫格）有值也不复用
@@ -430,8 +420,6 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style)
       singleViewDescription = inputText;
     }
 
-    const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
-    const styleZh = (mergedCfg.style.default_style_zh || '').trim();
     imagePrompt = buildSceneSingleImagePrompt(singleViewDescription, styleEn, styleZh);
 
     try {
@@ -446,11 +434,12 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style)
   const imageGen = imageClient.createAndGenerateImage(db, log, {
     drama_id: sceneRow.drama_id,
     scene_id: sceneId,
-    prompt: imagePrompt,
+    prompt: scrubAndReinforceScenePrompt(imagePrompt, styleEn, styleZh),
     model: modelName || undefined,
     size: '1792x1024',
     quality: 'standard',
     provider: 'openai',
+    user_negative_prompt: SCENE_EMPTY_NEGATIVE_PROMPT,
   });
 
   log.info('[场景单图] Step2 图片生成任务已提交', { scene_id: sceneId, image_gen_id: imageGen?.id });
@@ -508,4 +497,6 @@ module.exports = {
   generateScenePromptOnly,
   generateSceneSinglePromptOnly,
   extractSceneFromImage,
+  buildSceneSingleImagePrompt,
+  buildSceneFourViewImagePrompt,
 };

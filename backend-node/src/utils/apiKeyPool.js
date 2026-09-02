@@ -158,8 +158,58 @@ class ApiKeyPool {
     else if (this.waiters.length && this.minIntervalMs > 0) this._scheduleCooldownWake();
   }
 
+  _msUntilKeyReady(key) {
+    if (this.minIntervalMs <= 0) return 0;
+    if ((this.activeCounts.get(key) || 0) >= this.perKeyLimit) {
+      // 占用中：短暂轮询，等 release 后再判冷却
+      return 50;
+    }
+    const wait = this.minIntervalMs - (Date.now() - (this.lastUsedAt.get(key) || 0));
+    return wait > 0 ? wait : 0;
+  }
+
+  /**
+   * 指定 Key 下标获取（串行轮询用）；该 Key 冷却中则等待，不抢其它 Key。
+   */
+  acquirePreferred(preferredIndex) {
+    const n = this.keys.length;
+    if (!n) {
+      return Promise.resolve({ key: '', index: 0 });
+    }
+    const want = ((Number(preferredIndex) % n) + n) % n;
+    return new Promise((resolve) => {
+      const attempt = () => {
+        const key = this.keys[want];
+        if (this._keyReady(key)) {
+          this.activeCounts.set(key, (this.activeCounts.get(key) || 0) + 1);
+          this.rr = (want + 1) % n;
+          resolve({ key, index: want });
+          return;
+        }
+        const waitMs = Math.max(1, this._msUntilKeyReady(key));
+        setTimeout(attempt, waitMs);
+      };
+      attempt();
+    });
+  }
+
   async run(fn) {
     const { key, index } = await this.acquire();
+    try {
+      return await fn(key, index);
+    } finally {
+      this.release(key);
+    }
+  }
+
+  async runPreferred(preferredIndex, fn) {
+    if (this.keys.length === 0) {
+      return fn('', 0);
+    }
+    if (preferredIndex == null || !Number.isFinite(Number(preferredIndex))) {
+      return this.run(fn);
+    }
+    const { key, index } = await this.acquirePreferred(preferredIndex);
     try {
       return await fn(key, index);
     } finally {

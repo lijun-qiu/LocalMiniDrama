@@ -18,17 +18,25 @@ function routes(db, log) {
     create: (req, res) => {
       try {
         const body = req.body || {};
-        const task = taskService.createTask(db, log, 'video_generation', String(body.drama_id || ''));
         const now = new Date().toISOString();
         const dramaId = Number(body.drama_id) || 0;
         const storyboardId = body.storyboard_id != null ? Number(body.storyboard_id) : null;
+        const prereq = videoService.assertFullNarrationVideoPrerequisites(db, dramaId, storyboardId);
+        if (!prereq.ok) {
+          return response.badRequest(res, prereq.error);
+        }
+        const task = taskService.createTask(db, log, 'video_generation', String(body.drama_id || ''));
         const provider = body.provider || 'chatfire';
         let prompt = body.prompt || '';
         const style = (body.style || '').toString().trim();
         if (style) {
+          // 全能多子分镜块已自带「画面风格和类型」，再拼 drama.style 易把古风/汉服等错误风格叠进现代戏
+          const looksOmniMultiBeat =
+            /画面风格和类型\s*[:：]/.test(prompt) ||
+            /生成一个由以下\s*\d+\s*个分镜组成的视频/.test(prompt);
           const baseLower = String(prompt || '').toLowerCase();
           const styleLower = style.toLowerCase();
-          if (!baseLower.includes(styleLower)) {
+          if (!looksOmniMultiBeat && !baseLower.includes(styleLower)) {
             prompt = prompt ? `${prompt}。风格：${style}` : `风格：${style}`;
           }
         }
@@ -61,10 +69,14 @@ function routes(db, log) {
           body.reference_image_urls && Array.isArray(body.reference_image_urls)
             ? JSON.stringify(body.reference_image_urls.slice(0, 10))
             : null;
+        const preferredKeyIndex =
+          body.preferred_key_index != null && Number.isFinite(Number(body.preferred_key_index))
+            ? Math.trunc(Number(body.preferred_key_index))
+            : null;
         db.prepare(
-          `INSERT INTO video_generations (drama_id, storyboard_id, provider, prompt, model, duration, aspect_ratio, resolution, seed, camera_fixed, watermark, image_url, first_frame_url, last_frame_url, reference_image_urls, status, task_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?)`
-        ).run(dramaId, storyboardId, provider, prompt, model, duration, aspectRatio, resolution, seed, cameraFixed, watermark, imageUrl, firstFrameUrl, lastFrameUrl, refImagesJson, task.id, now, now);
+          `INSERT INTO video_generations (drama_id, storyboard_id, provider, prompt, model, duration, aspect_ratio, resolution, seed, camera_fixed, watermark, image_url, first_frame_url, last_frame_url, reference_image_urls, preferred_key_index, status, task_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?)`
+        ).run(dramaId, storyboardId, provider, prompt, model, duration, aspectRatio, resolution, seed, cameraFixed, watermark, imageUrl, firstFrameUrl, lastFrameUrl, refImagesJson, preferredKeyIndex, task.id, now, now);
         const videoGenId = db.prepare('SELECT last_insert_rowid() as id').get().id;
         setImmediate(() => {
           videoService.processVideoGeneration(db, log, videoGenId);

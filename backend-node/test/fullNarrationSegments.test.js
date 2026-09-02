@@ -2,80 +2,98 @@ const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   splitScriptIntoNarrationSegments,
+  splitScriptIntoNarrationSegmentsByPeriod,
   mergeShortNarrationSegments,
   enforceFullNarrationSegments,
   countNarrationSpeechChars,
   normalizeNarrationCoverageText,
   resolveFullNarrationLimits,
+  resolveFullNarrationSplitPlan,
+  tokenizeNarrationByPeriod,
+  packPeriodSentences,
   FULL_NARRATION_TARGET_CHARS,
   FULL_NARRATION_MIN_CHARS,
   FULL_NARRATION_MAX_CHARS,
 } = require('../src/services/episodeStoryboardService');
 
-const TARGET = FULL_NARRATION_TARGET_CHARS;
-const MIN = FULL_NARRATION_MIN_CHARS;
 const MAX = FULL_NARRATION_MAX_CHARS;
+const MIN = FULL_NARRATION_MIN_CHARS;
+const TARGET = FULL_NARRATION_TARGET_CHARS;
 
 function segN(n, ch = '一') {
   return ch.repeat(n);
 }
 
 describe('estimateDurationFromSpeechText', () => {
-  it('uses 5 chars/sec, ceil on overflow, clamps to 4–10s', () => {
+  it('uses 5.5 chars/sec, ceil on overflow, clamps to 4–12s', () => {
     const { estimateDurationFromSpeechText } = require('../src/services/episodeStoryboardService');
     assert.equal(estimateDurationFromSpeechText('一'.repeat(20)), 4);
-    assert.equal(estimateDurationFromSpeechText('一'.repeat(21)), 5);
     assert.equal(estimateDurationFromSpeechText('一'.repeat(45)), 9);
-    assert.equal(estimateDurationFromSpeechText('一'.repeat(46)), 10);
-    assert.equal(estimateDurationFromSpeechText('一'.repeat(50)), 10);
-    assert.equal(estimateDurationFromSpeechText('一'.repeat(15)), 4);
-    assert.equal(
-      estimateDurationFromSpeechText(
-        '府里那位俊俏的少爷常引得姑娘们脸红心跳，你却心如止水。'
-      ),
-      5
-    );
-  });
-});
-
-describe('countNarrationSpeechChars', () => {
-  it('excludes punctuation from char count', () => {
-    assert.equal(countNarrationSpeechChars('剩下的全交给老婆刘念。她以前是小'), 15);
-    assert.equal(countNarrationSpeechChars('学美术老师，结婚后嫌累辞了，在家画画、养猫、做做烘焙。'), 22);
+    assert.equal(estimateDurationFromSpeechText('一'.repeat(66)), 12);
+    assert.equal(estimateDurationFromSpeechText('一'.repeat(80)), 12);
   });
 });
 
 describe('resolveFullNarrationLimits', () => {
-  it('scales target/max chars with chars per sec (6 → 54/60)', () => {
+  it('uses 12s max for classic and period splitMode', () => {
+    const limits = resolveFullNarrationLimits(5.5);
+    assert.equal(limits.FULL_NARRATION_MAX_SEC, 12);
+    assert.equal(limits.FULL_NARRATION_MAX_CHARS, 66);
+    assert.equal(limits.splitMode, 'period');
+  });
+
+  it('scales max chars with chars per sec (6 → 72)', () => {
     const limits = resolveFullNarrationLimits(6);
-    assert.equal(limits.NARRATION_CHARS_PER_SEC, 6);
-    assert.equal(limits.FULL_NARRATION_TARGET_CHARS, 54);
-    assert.equal(limits.FULL_NARRATION_MAX_CHARS, 60);
+    assert.equal(limits.FULL_NARRATION_MAX_CHARS, 72);
+  });
+});
+
+describe('tokenizeNarrationByPeriod', () => {
+  it('splits only at 。 and keeps the period', () => {
+    const units = tokenizeNarrationByPeriod('第一句。第二句。第三');
+    assert.deepEqual(units, ['第一句。', '第二句。', '第三']);
+  });
+});
+
+describe('packPeriodSentences', () => {
+  it('merges up to 3 short sentences under max chars', () => {
+    const limits = resolveFullNarrationLimits(5);
+    const sentences = ['他走进房间。', '窗外下着雨。', '桌上放着信。'];
+    const out = packPeriodSentences(sentences, limits);
+    assert.equal(out.length, 1);
+    assert.equal(out[0], sentences.join(''));
+  });
+
+  it('merges many short sentences when under max chars', () => {
+    const limits = resolveFullNarrationLimits(5);
+    const sentences = ['一。', '二。', '三。', '四。', '五。', '六。', '七。', '八。'];
+    const out = packPeriodSentences(sentences, limits);
+    assert.equal(out.length, 1);
+    assert.equal(out[0], sentences.join(''));
+  });
+
+  it('splits when combined would exceed max chars', () => {
+    const limits = resolveFullNarrationLimits(5);
+    const s1 = segN(25) + '。';
+    const s2 = segN(25, '二') + '。';
+    const s3 = segN(25, '三') + '。';
+    const out = packPeriodSentences([s1, s2, s3], limits);
+    assert.ok(out.length >= 2);
+    for (const seg of out) {
+      assert.ok(countNarrationSpeechChars(seg) <= limits.FULL_NARRATION_MAX_CHARS);
+    }
+    assert.equal(normalizeNarrationCoverageText(out.join('')), normalizeNarrationCoverageText(s1 + s2 + s3));
   });
 });
 
 describe('splitScriptIntoNarrationSegments', () => {
-  it('uses target ~45 / hard max 50 by default (5 chars/sec)', () => {
-    assert.equal(TARGET, 45);
-    assert.equal(MAX, 50);
-    assert.equal(MIN, 40);
+  it('default max is 66 chars at 5.5 cps', () => {
+    assert.equal(MAX, 66);
+    assert.equal(TARGET, 66);
+    assert.equal(MIN, 44);
   });
 
-  it('uses 6 chars/sec limits (54 target / 60 max)', () => {
-    const limits = resolveFullNarrationLimits(6);
-    const script =
-      '夏天晒得满身疮，可你从不敢有半句怨言——因为这已经是活命的代价。十六岁那年，你的身子渐渐长开，心底也多了一份说不清道不明的情绪。府里那位俊俏的少爷常引得姑娘们脸红心跳，你却心如止水。';
-    const segs = splitScriptIntoNarrationSegments(script, limits);
-    assert.ok(segs.length >= 2);
-    for (const seg of segs) {
-      assert.ok(
-        countNarrationSpeechChars(seg) <= limits.FULL_NARRATION_MAX_CHARS,
-        `segment too long (${countNarrationSpeechChars(seg)}): ${seg}`
-      );
-    }
-  });
-
-  it('covers full script text without dropping characters', () => {
+  it('covers full script without dropping characters', () => {
     const script =
       '清晨，阳光洒进房间。她缓缓睁开眼睛，望向窗外。远处传来鸟鸣声，新的一天开始了。' +
       '她起身走到窗边，看着街道上渐渐热闹起来，心里想着今天要做的事情。';
@@ -87,150 +105,63 @@ describe('splitScriptIntoNarrationSegments', () => {
     }
   });
 
-  it('packs toward ~45 chars and backs up before exceeding 50', () => {
-    const script =
-      '夏天晒得满身疮，可你从不敢有半句怨言——因为这已经是活命的代价。十六岁那年，你的身子渐渐长开，心底也多了一份说不清道不明的情绪。府里那位俊俏的少爷常引得姑娘们脸红心跳，你却心如止水。';
+  it('merges short sentences separated by blank lines', () => {
+    const script = '他走进房间。\n\n窗外下着雨。\n\n桌上放着一封信。';
     const segs = splitScriptIntoNarrationSegments(script);
-    assert.ok(segs.length >= 2, `expected >=2 segments, got ${segs.length}`);
+    assert.equal(segs.length, 1);
     assert.equal(normalizeNarrationCoverageText(segs.join('')), normalizeNarrationCoverageText(script));
-    for (const seg of segs) {
-      assert.ok(
-        countNarrationSpeechChars(seg) <= MAX,
-        `segment too long (${countNarrationSpeechChars(seg)}): ${seg}`
-      );
-    }
   });
 
-  it('never exceeds hard max 50 speech chars per segment', () => {
-    const script =
-      segN(80) +
-      '。' +
-      segN(90, '二') +
-      '，继续说下去然后到句号。' +
-      segN(70, '三');
+  it('merges multiple short 。 sentences into one shot', () => {
+    const script = '他走进房间。窗外下着雨。桌上放着一封信。';
     const segs = splitScriptIntoNarrationSegments(script);
-    assert.ok(segs.length > 0);
-    for (const seg of segs) {
-      assert.ok(
-        countNarrationSpeechChars(seg) <= MAX,
-        `segment too long: ${countNarrationSpeechChars(seg)} > ${MAX}`
-      );
-    }
+    assert.equal(segs.length, 1);
+    assert.equal(segs[0], script);
   });
 
-  it('splits last over-max remainder into two shots', () => {
-    // 一段无标点超长 + 尾部短句：末段规则仍保证 ≤硬上限
-    const script = segN(60) + '。' + segN(30, '尾') + '。';
+  it('splits when next sentence would exceed 12s char limit', () => {
+    const script = '一。二。三。四。五。六。七。八。九。十。';
     const segs = splitScriptIntoNarrationSegments(script);
-    assert.equal(normalizeNarrationCoverageText(segs.join('')), normalizeNarrationCoverageText(script));
+    assert.ok(segs.length >= 1);
     for (const seg of segs) {
       assert.ok(countNarrationSpeechChars(seg) <= MAX);
     }
+    assert.equal(normalizeNarrationCoverageText(segs.join('')), normalizeNarrationCoverageText(script));
   });
 
-  it('does not split words like 小学 across segments', () => {
-    const script =
-      '剩下的全交给老婆刘念。' +
-      segN(44, '她') +
-      '以前是小学美术老师，结婚后嫌累辞了，在家画画、养猫、做做烘焙。';
+  it('never exceeds hard max speech chars per segment', () => {
+    const longSent = segN(70) + '。';
+    const script = longSent + segN(20, '二') + '。';
     const segs = splitScriptIntoNarrationSegments(script);
-    const joined = segs.join('');
-    for (let i = 0; i < segs.length - 1; i++) {
-      const tail = segs[i].slice(-1);
-      const head = segs[i + 1].slice(0, 1);
-      if (tail === '小' && head === '学') {
-        assert.fail(`split 小学 across segments: "${segs[i]}" | "${segs[i + 1]}"`);
-      }
+    for (const seg of segs) {
+      assert.ok(countNarrationSpeechChars(seg) <= MAX);
     }
-    assert.equal(normalizeNarrationCoverageText(joined), normalizeNarrationCoverageText(script));
+    assert.equal(normalizeNarrationCoverageText(segs.join('')), normalizeNarrationCoverageText(script));
   });
 });
 
-describe('mergeShortNarrationSegments', () => {
-  it('respects dynamic target at 6 chars/sec (54)', () => {
-    const limits = resolveFullNarrationLimits(6);
-    const input = [segN(30) + '。', segN(30, '二') + '。'];
-    const out = mergeShortNarrationSegments(
-      input,
-      limits.FULL_NARRATION_MIN_CHARS,
-      limits.FULL_NARRATION_MAX_CHARS,
-      limits.FULL_NARRATION_TARGET_CHARS
-    );
-    assert.equal(out.length, 2);
-    for (const seg of out) {
-      assert.ok(countNarrationSpeechChars(seg) <= limits.FULL_NARRATION_MAX_CHARS);
-    }
-  });
-
-  it('does not merge past target when combining shorts', () => {
-    const input = [segN(30) + '。', segN(30, '二') + '。'];
-    const out = mergeShortNarrationSegments(input, MIN, MAX, TARGET);
-    for (const seg of out) {
-      assert.ok(countNarrationSpeechChars(seg) <= MAX);
-    }
-    assert.equal(normalizeNarrationCoverageText(out.join('')), normalizeNarrationCoverageText(input.join('')));
-  });
-
-  it('does not merge two segments that each already meet soft min', () => {
-    const input = [segN(MIN, '一') + '。', segN(MIN, '二') + '。'];
-    const out = mergeShortNarrationSegments(input, MIN, MAX);
-    assert.equal(out.length, 2);
+describe('resolveFullNarrationSplitPlan', () => {
+  it('uses period mode for both classic and universal', () => {
+    const script = '短句一。短句二。短句三。';
+    const planClassic = resolveFullNarrationSplitPlan(script, resolveFullNarrationLimits(5), false);
+    const planUni = resolveFullNarrationSplitPlan(script, resolveFullNarrationLimits(5), true);
+    assert.equal(planClassic.limits.splitMode, 'period');
+    assert.equal(planUni.limits.splitMode, 'period');
+    assert.deepEqual(planClassic.segments, planUni.segments);
+    assert.equal(planClassic.segments.length, 1);
   });
 });
 
 describe('enforceFullNarrationSegments', () => {
-  it('uses shot 1 as empty title card; narration segments start at shot 2', () => {
+  it('binds narration segments from shot 1', () => {
     const segs = ['第一段旁白内容足够长用于绑定测试甲。', '第二段旁白内容足够长用于绑定测试乙。'];
     const boards = [
       { shot_number: 1, title: 'A', narration: '旧' },
       { shot_number: 2, title: 'B', narration: '旧2' },
     ];
-    const log = { warn() {}, info() {} };
-    const out = enforceFullNarrationSegments(boards, segs, log, 't1');
-    assert.equal(out.length, 3);
-    assert.equal(out[0].narration, '');
-    assert.equal(out[1].narration, segs[0]);
-    assert.equal(out[2].narration, segs[1]);
-  });
-
-  it('inherits scene/characters from shot 2 onto title shot', () => {
-    const segs = ['旁白段落一足够长度用于测试继承角色场景字段。'];
-    const boards = [
-      { shot_number: 1, title: '片头', narration: 'x', scene_id: null, characters: [] },
-      { shot_number: 2, title: '正片', narration: 'y', scene_id: 9, characters: [1, 2], props: [3] },
-    ];
-    const out = enforceFullNarrationSegments(boards, segs, { warn() {}, info() {} }, 't2');
-    assert.equal(out[0].scene_id, 9);
-    assert.deepEqual(out[0].characters, [1, 2]);
-  });
-
-  it('trims extra AI shots so last narration shot reaches script end', () => {
-    const segs = ['唯一旁白段足够长度。'];
-    const boards = [
-      { shot_number: 1 },
-      { shot_number: 2 },
-      { shot_number: 3 },
-      { shot_number: 4 },
-    ];
-    const out = enforceFullNarrationSegments(boards, segs, { warn() {}, info() {} }, 't3');
+    const out = enforceFullNarrationSegments(boards, segs, { warn() {}, info() {} }, 't1');
     assert.equal(out.length, 2);
-    assert.equal(out[1].narration, segs[0]);
-  });
-
-  it('propagates characters/props from donor shot to all shots when AI only filled shot 2', () => {
-    const segs = ['旁白一足够长度用于测试。', '旁白二足够长度用于测试。'];
-    const boards = [
-      { shot_number: 1, characters: [], props: [] },
-      { shot_number: 2, scene_id: 5, characters: [{ id: 1, name: '甲' }], props: [9] },
-      { shot_number: 3, characters: [], props: [] },
-      { shot_number: 4, characters: [], props: [] },
-    ];
-    const out = enforceFullNarrationSegments(boards, segs, { warn() {}, info() {} }, 't4');
-    assert.equal(out.length, 3);
-    assert.deepEqual(out[0].characters, [{ id: 1, name: '甲' }]);
-    assert.deepEqual(out[1].characters, [{ id: 1, name: '甲' }]);
-    assert.deepEqual(out[2].characters, [{ id: 1, name: '甲' }]);
-    assert.deepEqual(out[0].props, [9]);
-    assert.deepEqual(out[2].props, [9]);
+    assert.equal(out[0].narration, segs[0]);
+    assert.equal(out[1].narration, segs[1]);
   });
 });

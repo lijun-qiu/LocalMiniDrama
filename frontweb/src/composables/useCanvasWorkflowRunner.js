@@ -10,6 +10,7 @@ import {
   toAbsoluteMediaUrl,
 } from '@/utils/canvasWorkflow'
 import { dramaUsesFirstLastFrame, sbVideoFirstLastUrls } from '@/utils/storyboardMedia'
+import { nextVideoPreferredKeyIndex } from '@/utils/videoKeyRoundRobin'
 
 async function pollTaskSimple(taskId, options = {}) {
   if (!taskId) return { status: 'failed', error: '缺少 task_id' }
@@ -47,6 +48,14 @@ export async function runImageStep(drama, sb, genOpts) {
 }
 
 export async function runVideoStep(drama, sb, genOpts) {
+  const meta = typeof drama?.metadata === 'string'
+    ? (() => { try { return JSON.parse(drama.metadata) } catch { return {} } })()
+    : (drama?.metadata || {})
+  const fullNarration = !!(meta && meta.storyboard_full_narration_video_mode)
+  const narrText = (sb.narration || '').toString().trim()
+  if (fullNarration && narrText && !(sb.narration_audio_local_path || '').toString().trim()) {
+    throw new Error(`分镜 #${sb.storyboard_number ?? sb.id} 尚未配音，请先生成旁白配音再生成视频`)
+  }
   const useFirstLast = dramaUsesFirstLastFrame(drama)
   const imagesBySbId = genOpts?.imagesBySbId || {}
   const { first, last } = sbVideoFirstLastUrls(sb, imagesBySbId, useFirstLast, {
@@ -66,6 +75,7 @@ export async function runVideoStep(drama, sb, genOpts) {
     image_url: absoluteFirst || undefined,
     first_frame_url: absoluteFirst || undefined,
     last_frame_url: absoluteLast,
+    preferred_key_index: nextVideoPreferredKeyIndex(),
     style: genOpts.style || undefined,
     aspect_ratio: genOpts.aspectRatio,
     resolution: genOpts.videoResolution || undefined,

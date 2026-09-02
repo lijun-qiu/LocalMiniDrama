@@ -68,9 +68,18 @@ function routes(db, log, cfg) {
           const now = new Date().toISOString();
           try {
             if (kind === 'narration') {
-              db.prepare('UPDATE storyboards SET narration_audio_local_path = ?, updated_at = ? WHERE id = ?').run(
-                result.local_path, now, Number(storyboard_id)
+              db.prepare(
+                'UPDATE storyboards SET narration_audio_local_path = ?, narration_prompt_aligned_at = NULL, updated_at = ? WHERE id = ?'
+              ).run(result.local_path, now, Number(storyboard_id));
+              const { applyNarrationAudioDurationToStoryboard } = require('../services/narrationAudioService');
+              const durSec = applyNarrationAudioDurationToStoryboard(
+                db,
+                log,
+                storyboard_id,
+                storagePath,
+                result.local_path
               );
+              if (durSec != null) result.duration = durSec;
             } else {
               db.prepare('UPDATE storyboards SET audio_local_path = ?, updated_at = ? WHERE id = ?').run(
                 result.local_path, now, Number(storyboard_id)
@@ -78,7 +87,12 @@ function routes(db, log, cfg) {
             }
           } catch (_) {}
         }
-        response.success(res, { local_path: result.local_path, url: result.local_path ? '/static/' + result.local_path : '', tts_kind: kind });
+        response.success(res, {
+          local_path: result.local_path,
+          url: result.local_path ? '/static/' + result.local_path : '',
+          tts_kind: kind,
+          duration: result.duration ?? null,
+        });
       } catch (err) {
         log.error('audio extract', { error: err.message });
         response.internalError(res, err.message);
@@ -116,9 +130,19 @@ function routes(db, log, cfg) {
             const now = new Date().toISOString();
             try {
               if (kind === 'narration') {
-                db.prepare('UPDATE storyboards SET narration_audio_local_path = ?, updated_at = ? WHERE id = ?').run(
-                  result.local_path, now, row.id
+                db.prepare(
+                  'UPDATE storyboards SET narration_audio_local_path = ?, narration_prompt_aligned_at = NULL, updated_at = ? WHERE id = ?'
+                ).run(result.local_path, now, row.id);
+                const { applyNarrationAudioDurationToStoryboard } = require('../services/narrationAudioService');
+                const durSec = applyNarrationAudioDurationToStoryboard(
+                  db,
+                  log,
+                  row.id,
+                  storagePath,
+                  result.local_path
                 );
+                results.push({ storyboard_id: sbId, local_path: result.local_path, duration: durSec });
+                continue;
               } else {
                 db.prepare('UPDATE storyboards SET audio_local_path = ?, updated_at = ? WHERE id = ?').run(
                   result.local_path, now, row.id

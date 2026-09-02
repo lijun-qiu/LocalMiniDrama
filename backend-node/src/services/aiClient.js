@@ -726,4 +726,5 @@ module.exports = {
   EXTRACT_PROMPTS,
   isRefusalResponse,
   postJSONWithTimeout,
+  withAgnesApiKey,
 };

@@ -83,4 +83,30 @@ describe('ApiKeyPool', () => {
     ]);
     assert.deepEqual(new Set(keysUsed), new Set(['a', 'b']));
   });
+
+  it('runPreferred sticks to requested key index (mod key count)', async () => {
+    const pool = new ApiKeyPool(['a', 'b', 'c'], 1, 0);
+    const keys = [];
+    await pool.runPreferred(1, async (key, index) => {
+      keys.push({ key, index });
+    });
+    await pool.runPreferred(7, async (key, index) => {
+      keys.push({ key, index });
+    });
+    assert.deepEqual(keys, [
+      { key: 'b', index: 1 },
+      { key: 'b', index: 1 },
+    ]);
+  });
+
+  it('serial preferred round-robin uses distinct keys', async () => {
+    const pool = new ApiKeyPool(['k0', 'k1', 'k2'], 1, 0);
+    const used = [];
+    for (let i = 0; i < 3; i++) {
+      await pool.runPreferred(i, async (key) => {
+        used.push(key);
+      });
+    }
+    assert.deepEqual(used, ['k0', 'k1', 'k2']);
+  });
 });

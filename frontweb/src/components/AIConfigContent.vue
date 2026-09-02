@@ -89,6 +89,7 @@
                     <Film v-else-if="row.service_type === 'storyboard_image'" />
                     <VideoCamera v-else-if="row.service_type === 'video'" />
                     <Microphone v-else-if="row.service_type === 'tts'" />
+                    <Headset v-else-if="row.service_type === 'music'" />
                     <Key v-else-if="row.service_type === 'jimeng2_character_auth'" />
                     <Folder v-else-if="row.service_type === 'model_ark_asset'" />
                   </el-icon>
@@ -279,6 +280,7 @@
             <el-option label="分镜图片生成" value="storyboard_image" />
             <el-option label="视频生成" value="video" />
             <el-option label="语音合成 TTS" value="tts" />
+            <el-option label="音乐/BGM" value="music" />
             <el-option label="即梦2角色认证" value="jimeng2_character_auth" />
           </el-select>
         </el-form-item>
@@ -965,11 +967,11 @@ input_reference = (图片文件，可选)</pre>
     >
       <div class="one-key-help">
         <div class="one-key-section">
-          <div class="one-key-section-title">📋 将自动创建以下配置</div>
+          <div class="one-key-section-title">📋 将自动创建或更新以下配置</div>
           <ul class="one-key-list">
-            <li><b>文本/对话</b>：Agnes 2.0 Flash（agnes-2.0-flash）— 生成故事剧本</li>
-            <li><b>文本生成图片</b>：Agnes Image 2.1 Flash — 角色/场景/道具图</li>
-            <li><b>分镜图片生成</b>：Agnes Image 2.1 Flash — 支持参考图编辑</li>
+            <li><b>文本/对话</b>：Agnes 2.5 Flash（agnes-2.5-flash，默认）/ 2.0 Flash — 生成故事剧本</li>
+            <li><b>文本生成图片</b>：Agnes Image 2.5 Flash（agnes-image-2.5-flash，默认）/ 2.1 / 2.0 — 角色/场景/道具图</li>
+            <li><b>分镜图片生成</b>：Agnes Image 2.5 Flash（agnes-image-2.5-flash，默认）/ 2.1 / 2.0 — 支持参考图编辑</li>
             <li><b>视频生成</b>：Agnes Video 2.5 Flash（agnes-video-2.5-flash，默认，限时免费）/ 2.5 / 2.0 — 生成视频片段</li>
           </ul>
         </div>
@@ -981,7 +983,7 @@ input_reference = (图片文件，可选)</pre>
             <li>点击「Create new secret key」创建密钥</li>
             <li>复制 Key 填入下方</li>
           </ol>
-          <p class="one-key-note">💡 多个 Key 用英文逗号分隔，自动轮询。图片：每 Key 并发 1。视频：每 Key <b>每分钟最多提交 1 次</b>（N Key ≈ 每分钟 N 次），手动与流水线相同。接口文档见 <a href="https://agnes-ai.com/doc/agnes-20-flash" target="_blank" class="one-key-link">agnes-ai.com/doc</a></p>
+          <p class="one-key-note">💡 多个 Key 用英文逗号分隔，自动轮询。图片：每 Key 并发 1。视频：每 Key <b>每分钟最多提交 1 次</b>（N Key ≈ 每分钟 N 次），手动与流水线相同。图生模型见 <a href="https://www.agnes-ai.com/zh-Hans/docs/agnes-image-25-flash" target="_blank" class="one-key-link">Agnes Image 2.5 Flash</a></p>
         </div>
       </div>
       <el-form label-width="0" style="margin-top: 8px">
@@ -998,7 +1000,7 @@ input_reference = (图片文件，可选)</pre>
       <template #footer>
         <el-button @click="oneKeyAgnesVisible = false">取消</el-button>
         <el-button type="success" :loading="oneKeyAgnesSaving" :disabled="!oneKeyAgnesKey.trim()" @click="submitOneKeyAgnes">
-          确定，一键创建配置
+          确定，一键创建/更新配置
         </el-button>
       </template>
     </el-dialog>
@@ -1098,7 +1100,7 @@ input_reference = (图片文件，可选)</pre>
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, MagicStick, QuestionFilled, Download, Upload, Delete, ChatDotRound, Picture, Film, VideoCamera, Key, Microphone, Folder } from '@element-plus/icons-vue'
+import { Plus, MagicStick, QuestionFilled, Download, Upload, Delete, ChatDotRound, Picture, Film, VideoCamera, Key, Microphone, Folder, Headset } from '@element-plus/icons-vue'
 import { aiAPI } from '@/api/ai'
 import { generationSettingsAPI } from '@/api/prompts'
 import PromptEditor from '@/components/PromptEditor.vue'
@@ -1303,7 +1305,7 @@ const providerConfigs = {
     { id: 'gemini', name: 'Google Gemini', models: ['gemini-2.5-pro', 'gemini-3-flash-preview'] },
     { id: 'deepseek', name: 'DeepSeek', models: ['deepseek-v4-flash', 'deepseek-v4-pro'] },
     { id: 'qwen', name: '通义千问', models: ['qwen3-max', 'qwen-plus', 'qwen-flash'] },
-    { id: 'agnes', name: 'Agnes AI', models: ['agnes-2.0-flash'] }
+    { id: 'agnes', name: 'Agnes AI', models: ['agnes-2.5-flash', 'agnes-2.0-flash'] }
   ],
   image: [
     { id: 'volcengine', name: '火山引擎', models: ['doubao-seedream-4-5-251128', 'doubao-seedream-4-0-250828'] },
@@ -1314,7 +1316,7 @@ const providerConfigs = {
     { id: 'openai', name: 'OpenAI', models: ['dall-e-3', 'dall-e-2'] },
     { id: 'dashscope', name: '通义万象', models: ['wan2.6-image', 'qwen-image-edit-plus-2026-01-09', 'qwen-image-edit-plus', 'qwen-image-edit-max'] },
     { id: 'qwen_image', name: '通义千问', models: ['qwen-image-max', 'qwen-image-plus', 'qwen-image'] },
-    { id: 'agnes', name: 'Agnes AI', models: ['agnes-image-2.1-flash', 'agnes-image-2.0-flash'] }
+    { id: 'agnes', name: 'Agnes AI', models: ['agnes-image-2.5-flash', 'agnes-image-2.1-flash', 'agnes-image-2.0-flash'] }
   ],
   storyboard_image: [
     { id: 'dashscope', name: '通义万象', models: ['wan2.6-image', 'qwen-image-edit-plus-2026-01-09', 'qwen-image-edit-plus', 'qwen-image-edit-max'] },
@@ -1324,7 +1326,7 @@ const providerConfigs = {
     // { id: 'chatfire', name: 'Chatfire', models: ['nano-banana-pro', 'doubao-seedream-4-5-251128', 'qwen-image'] },
     { id: 'gemini', name: 'Google Gemini', models: ['gemini-2.5-flash-image', 'gemini-2.5-flash-image-preview', 'gemini-3.1-flash-image-preview', 'gemini-3-pro-image-preview'] },
     { id: 'openai', name: 'OpenAI', models: ['dall-e-3', 'dall-e-2'] },
-    { id: 'agnes', name: 'Agnes AI', models: ['agnes-image-2.1-flash', 'agnes-image-2.0-flash'] }
+    { id: 'agnes', name: 'Agnes AI', models: ['agnes-image-2.5-flash', 'agnes-image-2.1-flash', 'agnes-image-2.0-flash'] }
   ],
   video: [
     { id: 'klingai', name: '可灵官方 Omni (api-beijing.klingai.com)', models: ['kling-video-o1', 'kling-v3-omni'] },
@@ -1351,10 +1353,15 @@ const providerConfigs = {
     },
     { id: 'openai', name: 'OpenAI', models: ['sora-2', 'sora-2-pro'] },
     { id: 'xai', name: 'xAI Grok Imagine', models: ['grok-imagine-video'] },
-    { id: 'agnes', name: 'Agnes AI', models: ['agnes-video-v2.0', 'agnes-video-2.5', 'agnes-video-2.5-flash'] },
+    { id: 'agnes', name: 'Agnes AI', models: ['agnes-video-2.5-flash', 'agnes-video-2.5', 'agnes-video-v2.0'] },
   ],
   tts: [
     { id: 'minimax', name: 'MiniMax T2A', models: ['speech-02-hd', 'speech-02-turbo'] },
+  ],
+  music: [
+    { id: 'acestep', name: 'ACE-Step 本地', models: ['ace_step_local'] },
+    { id: 'chatfire', name: 'Chatfire / 4022 Suno', models: ['ace_step_local', 'suno_music_open', 'chirp-v3-5'] },
+    { id: 'openai', name: 'Suno 兼容网关', models: ['suno_music_open', 'chirp-v3-5'] },
   ],
   jimeng2_character_auth: [
     { id: 'jimeng_material_api', name: '即梦业务素材 API（/api/business/v1）', models: ['-'] },
@@ -1412,6 +1419,7 @@ function getBaseUrlForProvider(provider) {
   if (p === 'jimeng_material_api') return 'https://silvamux.tingyutech.com'
   if (p === 'xai' || p === 'grok') return 'https://api.x.ai'
   if (p === 'agnes') return 'https://apihub.agnes-ai.com/v1'
+  if (p === 'acestep') return 'http://127.0.0.1:8001'
   return 'https://api.chatfire.site/v1'
 }
 
@@ -1695,11 +1703,11 @@ const VOLCENGINE_CONFIGS = [
   { service_type: 'video', name: '火山引擎 即梦 视频', base_url: 'https://ark.cn-beijing.volces.com/api/v3', provider: 'volces', model: ['doubao-seedance-1-5-pro-251215'] }
 ]
 
-/** Agnes 一键配置用 */
+/** Agnes 一键配置用（默认均为 2.5 Flash，列表内可切换旧版） */
 const AGNES_CONFIGS = [
-  { service_type: 'text', name: 'Agnes 文本', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-2.0-flash'] },
-  { service_type: 'image', name: 'Agnes 文本生图', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-image-2.1-flash'] },
-  { service_type: 'storyboard_image', name: 'Agnes 分镜图', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-image-2.1-flash'] },
+  { service_type: 'text', name: 'Agnes 文本', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-2.5-flash', 'agnes-2.0-flash'] },
+  { service_type: 'image', name: 'Agnes 文本生图', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-image-2.5-flash', 'agnes-image-2.1-flash', 'agnes-image-2.0-flash'] },
+  { service_type: 'storyboard_image', name: 'Agnes 分镜图', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-image-2.5-flash', 'agnes-image-2.1-flash', 'agnes-image-2.0-flash'] },
   { service_type: 'video', name: 'Agnes 视频', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'agnes', endpoint: '/videos', query_endpoint: '/videos/{taskId}', model: ['agnes-video-2.5-flash', 'agnes-video-2.5', 'agnes-video-v2.0'] },
 ]
 
@@ -1710,6 +1718,7 @@ function serviceTypeLabel(t) {
     storyboard_image: '分镜图片生成',
     video: '视频',
     tts: '语音合成 TTS',
+    music: '音乐/BGM',
     jimeng2_character_auth: '即梦2角色认证',
     model_ark_asset: 'SD2 资产库',
   }
@@ -2116,9 +2125,12 @@ async function submitOneKeyAgnes() {
   if (!apiKey) return
   oneKeyAgnesSaving.value = true
   try {
+    const existing = Array.isArray(list.value) ? list.value : []
+    let created = 0
+    let updated = 0
     for (const cfg of AGNES_CONFIGS) {
       const models = cfg.model || []
-      await aiAPI.create({
+      const payload = {
         service_type: cfg.service_type,
         name: cfg.name,
         provider: cfg.provider,
@@ -2130,10 +2142,25 @@ async function submitOneKeyAgnes() {
         endpoint: cfg.endpoint || '',
         query_endpoint: cfg.query_endpoint || '',
         priority: 10,
-        is_default: true
-      })
+        is_default: true,
+      }
+      const hit = existing.find(
+        (row) =>
+          row.service_type === cfg.service_type &&
+          String(row.provider || '').toLowerCase() === 'agnes'
+      )
+      if (hit?.id != null) {
+        await aiAPI.update(hit.id, payload)
+        updated += 1
+      } else {
+        await aiAPI.create(payload)
+        created += 1
+      }
     }
-    ElMessage.success('已创建 Agnes 文本、文本生图、分镜图、视频配置')
+    const parts = []
+    if (created) parts.push(`新建 ${created} 项`)
+    if (updated) parts.push(`更新 ${updated} 项`)
+    ElMessage.success(`Agnes 文本/生图/分镜图/视频已就绪（${parts.join('，') || '无变更'}），默认均为 2.5 Flash`)
     oneKeyAgnesVisible.value = false
     await loadList()
   } catch (_) {
@@ -2316,6 +2343,11 @@ onMounted(() => {
   background: rgba(249, 115, 22, 0.12);
   color: #f97316;
   border-color: rgba(249, 115, 22, 0.25);
+}
+.type-music {
+  background: rgba(16, 185, 129, 0.12);
+  color: #059669;
+  border-color: rgba(16, 185, 129, 0.25);
 }
 .jimeng2-assets-actions {
   display: flex;

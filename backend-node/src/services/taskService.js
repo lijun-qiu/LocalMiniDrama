@@ -126,6 +126,18 @@ function failOrphanedAsyncTasksOnStartup(db, log) {
   for (const row of rows) {
     if (recoveredTaskIds.has(row.id)) continue;
     updateTaskError(db, row.id, ORPHAN_ASYNC_TASK_MSG);
+    // Foley 分析/生成在进程内执行；重启后需同步清掉 episodes.foley_status=analyzing|generating
+    if ((row.type === 'foley_analyze' || row.type === 'foley_generate') && row.resource_id) {
+      const episodeId = Number(row.resource_id);
+      if (Number.isFinite(episodeId) && episodeId > 0) {
+        try {
+          db.prepare(
+            `UPDATE episodes SET foley_status = ?, foley_error = ?, updated_at = ?
+             WHERE id = ? AND foley_status IN ('analyzing', 'generating')`
+          ).run('failed', ORPHAN_ASYNC_TASK_MSG, new Date().toISOString(), episodeId);
+        } catch (_) { /* ignore */ }
+      }
+    }
     failed += 1;
     log.info('Orphaned async task marked failed', {
       task_id: row.id,

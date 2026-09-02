@@ -18,6 +18,7 @@ export async function runGenerateStoryFromPremise({
   generationStyle,
   customStylePrompt,
   projectAspectRatio,
+  textModel,
   store,
   router,
   route,
@@ -84,10 +85,12 @@ export async function runGenerateStoryFromPremise({
         summary: text,
         genre: storyType || undefined,
         drama_style: generationStyle || undefined,
+        model: textModel || undefined,
         metadata: {
           ...stylePromptMetadataForSave(generationStyle, customStylePrompt),
           story_style: storyStyle || undefined,
           aspect_ratio: projectAspectRatio || '16:9',
+          text_model: textModel || undefined,
         },
       })
 

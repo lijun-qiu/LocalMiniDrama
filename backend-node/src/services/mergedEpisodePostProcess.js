@@ -1,11 +1,18 @@
 /**
- * 整集合并后的后处理：对白 TTS 轨、解说旁白轨+SRT、右下角文字水印（可组合）。
+ * 整集合并后的后处理：对白 TTS 轨、解说旁白轨+SRT、右上角文字水印（可组合）。
  */
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { getFfmpegPath, getFfprobePath } = require('../utils/ffmpegPath');
 const { splitNarrationLines } = require('../utils/narrationLineSplit');
+const {
+  computeNarrationLineWeights,
+  resolveNarrationSlotPlan,
+  fitNarrationAudioToSlot,
+  alignNarrationAudioToVideoDuration,
+  extendVideoToDuration,
+} = require('../utils/narrationAudioFit');
 
 function ffprobeDurationSec(filePath) {
   const probe = getFfprobePath();
@@ -73,10 +80,17 @@ function resolveStorageAudioAbs(storageRoot, relPath) {
   return fs.existsSync(abs) ? abs : null;
 }
 
-/** 烧录字幕样式：描边保证可读 */
-const SUBTITLE_FORCE_STYLE = "FontSize=36,Outline=2,Shadow=1,Bold=1,MarginV=48";
-/** 全文解说旁白视频模式：字号略小，避免逐句字幕占屏过多 */
-const FULL_NARRATION_SUBTITLE_FORCE_STYLE = "FontSize=24,Outline=2,Shadow=1,Bold=1,MarginV=48";
+/** 烧录字幕样式：描边保证可读（详见 subtitleStyle.js） */
+const {
+  DEFAULT_SUBTITLE_STYLE,
+  FULL_NARRATION_SUBTITLE_STYLE,
+} = require('../utils/subtitleStyle');
+const { resolveSubtitleForceStyleAsync } = require('../utils/subtitleBurnStyle');
+
+/** @deprecated 使用 resolveSubtitleForceStyleAsync */
+const SUBTITLE_FORCE_STYLE = DEFAULT_SUBTITLE_STYLE;
+/** @deprecated 使用 resolveSubtitleForceStyleAsync */
+const FULL_NARRATION_SUBTITLE_FORCE_STYLE = FULL_NARRATION_SUBTITLE_STYLE;
 
 function resolveSubtitleForceStyle(db, episodeId) {
   if (!db || !episodeId) return SUBTITLE_FORCE_STYLE;
@@ -104,7 +118,7 @@ function buildVideoFilterParts(srtPath, watermarkText, tempRoot, subtitleStyle =
     const wmEsc = escapeFfmpegPath(wmFile);
     const fontOpt = getDrawtextFontOption();
     vfParts.push(
-      `drawtext=textfile='${wmEsc}':reload=1${fontOpt}:x=w-tw-16:y=h-th-16:fontsize=22:fontcolor=white@0.82:borderw=2:bordercolor=black@0.55`
+      `drawtext=textfile='${wmEsc}':reload=1${fontOpt}:x=w-tw-16:y=h/9:fontsize=22:fontcolor=white@0.82:borderw=2:bordercolor=black@0.55`
     );
   }
   let filterComplex = '';
@@ -125,7 +139,8 @@ function muxVideoWithAudio(mergedAbsPath, alignedAudioPath, outAbs, filterComple
   }
   args.push(
     '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-    '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', outAbs
+    '-c:a', 'aac', '-ar', '44100', '-ac', '2', '-b:a', '192k',
+    '-movflags', '+faststart', '-shortest', outAbs
   );
   return runFfmpeg(args, log, tag);
 }
@@ -136,6 +151,14 @@ function writeSilenceMp3(slotSec, outPath, log) {
     log,
     'silence'
   );
+}
+
+function fitNarrationToSlot(inputPath, slotSec, outPath, log, opts = {}) {
+  return fitNarrationAudioToSlot(inputPath, slotSec, outPath, log, {
+    ffprobeDurationSec,
+    allowTrim: opts.allowTrim,
+    maxSpeedup: opts.maxSpeedup,
+  });
 }
 
 function fitAudioToSlot(inputPath, slotSec, outPath, log) {
@@ -319,65 +342,71 @@ async function synthesizeNarrationPerLine(db, log, opts) {
   }
 
   const naturalTotal = lineDurations.reduce((a, b) => a + b, 0);
-  const slotEps = 0.06;
-  const scale = naturalTotal > slotSec + slotEps ? slotSec / naturalTotal : 1;
-  const scaledDurations = lineDurations.map((d) => d * scale);
-
-  const srtEntries = [];
-  let offsetSec = 0;
-  const lineFitPaths = [];
-  for (let j = 0; j < effectiveLines.length; j++) {
-    const targetDur = scaledDurations[j];
-    const fitPath = path.join(tempRoot, `narr_line_fit_${shotIndex}_${j}.mp3`);
-    if (!fitAudioToSlot(lineRawPaths[j], targetDur, fitPath, log)) {
-      throw new Error(`旁白第 ${j + 1} 句时长对齐失败`);
-    }
-    lineFitPaths.push(fitPath);
-    const startMs = shotStartMs + Math.round(offsetSec * 1000);
-    const endMs = shotStartMs + Math.round((offsetSec + targetDur) * 1000);
-    srtEntries.push({ startMs, endMs, text: effectiveLines[j] });
-    offsetSec += targetDur;
-  }
-
-  const narrFit = path.join(tempRoot, `narr_fit_${shotIndex}.mp3`);
-  if (lineFitPaths.length === 1) {
-    try { fs.copyFileSync(lineFitPaths[0], narrFit); } catch (_) { throw new Error('旁白片段复制失败'); }
-  } else if (!concatMp3List(lineFitPaths, narrFit, log)) {
+  const narrNatural = path.join(tempRoot, `narr_line_natural_${shotIndex}.mp3`);
+  if (lineRawPaths.length === 1) {
+    try { fs.copyFileSync(lineRawPaths[0], narrNatural); } catch (_) { throw new Error('旁白片段复制失败'); }
+  } else if (!concatMp3List(lineRawPaths, narrNatural, log)) {
     throw new Error('旁白逐句拼接失败');
   }
-  if (offsetSec < slotSec - slotEps) {
-    const padded = path.join(tempRoot, `narr_fit_pad_${shotIndex}.mp3`);
-    if (!fitAudioToSlot(narrFit, slotSec, padded, log)) throw new Error('旁白补静音失败');
-    try { fs.copyFileSync(padded, narrFit); } catch (_) { throw new Error('旁白片段复制失败'); }
-  }
 
-  return { narrFitPath: narrFit, srtEntries };
-}
-
-/**
- * 使用预生成旁白音频时，按逐句拆分与可读字权重分配字幕时间轴（不再重复 TTS）
- */
-function buildSrtEntriesFromPrebuiltNarration(narrText, slotSec, shotStartMs = 0) {
-  const lines = splitNarrationLines(narrText);
-  const effectiveLines = lines.length ? lines : [String(narrText || '').trim()].filter(Boolean);
-  if (!effectiveLines.length || !Number.isFinite(slotSec) || slotSec <= 0) return [];
-
-  const weights = effectiveLines.map((line) => {
-    const readable = String(line).replace(/[^\u4e00-\u9fff\w]/g, '');
-    return Math.max(1, readable.length || String(line).length || 1);
-  });
-  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const plan = resolveNarrationSlotPlan(naturalTotal, slotSec);
+  const speechSec = plan.preferExtendVideo
+    ? naturalTotal
+    : Math.min(slotSec, naturalTotal);
+  const lineWeights = computeNarrationLineWeights(effectiveLines);
+  const totalWeight = lineWeights.reduce((a, b) => a + b, 0);
   const srtEntries = [];
   let offsetSec = 0;
   for (let j = 0; j < effectiveLines.length; j++) {
-    const targetDur = slotSec * (weights[j] / totalWeight);
+    const targetDur = speechSec * (lineWeights[j] / totalWeight);
     const startMs = shotStartMs + Math.round(offsetSec * 1000);
     const endMs = shotStartMs + Math.round((offsetSec + targetDur) * 1000);
     srtEntries.push({ startMs, endMs, text: effectiveLines[j] });
     offsetSec += targetDur;
   }
   if (srtEntries.length) {
-    srtEntries[srtEntries.length - 1].endMs = shotStartMs + Math.round(slotSec * 1000);
+    srtEntries[srtEntries.length - 1].endMs = shotStartMs + Math.round(speechSec * 1000);
+  }
+
+  const narrFit = path.join(tempRoot, `narr_fit_${shotIndex}.mp3`);
+  if (!fitNarrationToSlot(narrNatural, plan.outputSlotSec, narrFit, log, { allowTrim: true })) {
+    throw new Error('旁白时长对齐失败');
+  }
+
+  return { narrFitPath: narrFit, srtEntries };
+}
+
+/**
+ * 使用预生成旁白音频时，按逐句拆分与可读字权重分配字幕时间轴（不再重复 TTS）。
+ * @param {string} narrText
+ * @param {number} slotSec 本镜视频/槽位总时长
+ * @param {number} [shotStartMs=0]
+ * @param {{ speechSec?: number }} [opts] speechSec=实际配音自然时长（不含末尾静音）；字幕只铺在这段上，与配音对齐
+ */
+function buildSrtEntriesFromPrebuiltNarration(narrText, slotSec, shotStartMs = 0, opts = {}) {
+  const lines = splitNarrationLines(narrText);
+  const effectiveLines = lines.length ? lines : [String(narrText || '').trim()].filter(Boolean);
+  if (!effectiveLines.length || !Number.isFinite(slotSec) || slotSec <= 0) return [];
+
+  const slot = Math.max(0.2, Number(slotSec) || 0);
+  let speechSec = opts.speechSec != null ? Number(opts.speechSec) : slot;
+  if (!Number.isFinite(speechSec) || speechSec <= 0) speechSec = slot;
+  // 配音短于视频时：字幕只铺在语音段；配音被加速塞进槽位时：铺满槽位
+  speechSec = Math.min(slot, Math.max(0.2, speechSec));
+
+  const weights = computeNarrationLineWeights(effectiveLines);
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const srtEntries = [];
+  let offsetSec = 0;
+  for (let j = 0; j < effectiveLines.length; j++) {
+    const targetDur = speechSec * (weights[j] / totalWeight);
+    const startMs = shotStartMs + Math.round(offsetSec * 1000);
+    const endMs = shotStartMs + Math.round((offsetSec + targetDur) * 1000);
+    srtEntries.push({ startMs, endMs, text: effectiveLines[j] });
+    offsetSec += targetDur;
+  }
+  if (srtEntries.length) {
+    srtEntries[srtEntries.length - 1].endMs = shotStartMs + Math.round(speechSec * 1000);
   }
   return srtEntries;
 }
@@ -401,7 +430,7 @@ async function synthesizeNarrationWhole(db, log, opts) {
   const narrAbs = synth.abs_path || path.join(storageRoot, synth.local_path.replace(/\//g, path.sep));
   if (!fs.existsSync(narrAbs)) throw new Error('旁白 TTS 文件不存在');
   try { fs.copyFileSync(narrAbs, segRaw); } catch (_) { throw new Error('复制旁白 TTS 失败'); }
-  if (!fitAudioToSlot(segRaw, slotSec, narrFit, log)) {
+  if (!fitNarrationToSlot(segRaw, slotSec, narrFit, log, { allowTrim: true })) {
     throw new Error(`旁白时长对齐失败 #${shotIndex}`);
   }
   return { narrFitPath: narrFit, srtEntries: null };
@@ -456,6 +485,8 @@ async function runMergedEpisodePostProcess(db, log, opts) {
     let alignedAudioPath = null;
     let srtPath = null;
     let srtLines = [];
+    let videoForMux = mergedAbsPath;
+    let outputVideoDur = videoDur;
 
     if (needAudio) {
       let tMs = 0;
@@ -498,7 +529,14 @@ async function runMergedEpisodePostProcess(db, log, opts) {
             }
           } else if (prebuiltNarrAbs) {
             if (perLine && narrText) {
-              const srtEntries = buildSrtEntriesFromPrebuiltNarration(narrText, slotSec, shotStartMs);
+              const naturalNarrDur = ffprobeDurationSec(prebuiltNarrAbs);
+              const speechSec =
+                naturalNarrDur != null && naturalNarrDur > 0
+                  ? Math.min(slotSec, naturalNarrDur)
+                  : slotSec;
+              const srtEntries = buildSrtEntriesFromPrebuiltNarration(narrText, slotSec, shotStartMs, {
+                speechSec,
+              });
               for (const entry of srtEntries) {
                 srtLines.push(
                   String(srtIdx++),
@@ -508,10 +546,20 @@ async function runMergedEpisodePostProcess(db, log, opts) {
                 );
               }
             } else if (narrText) {
-              const durMs = Math.round(slotSec * 1000);
-              srtLines.push(String(srtIdx++), `${formatSrtTimestamp(shotStartMs)} --> ${formatSrtTimestamp(shotStartMs + durMs)}`, narrText, '');
+              const naturalNarrDur = ffprobeDurationSec(prebuiltNarrAbs);
+              const speechSec =
+                naturalNarrDur != null && naturalNarrDur > 0
+                  ? Math.min(slotSec, naturalNarrDur)
+                  : slotSec;
+              const durMs = Math.round(speechSec * 1000);
+              srtLines.push(
+                String(srtIdx++),
+                `${formatSrtTimestamp(shotStartMs)} --> ${formatSrtTimestamp(shotStartMs + durMs)}`,
+                narrText,
+                ''
+              );
             }
-            if (!fitAudioToSlot(prebuiltNarrAbs, slotSec, narrFit, log)) {
+            if (!fitNarrationToSlot(prebuiltNarrAbs, slotSec, narrFit, log, { allowTrim: true })) {
               return { ok: false, error: `旁白配音时长对齐失败 #${i}` };
             }
           } else if (perLine) {
@@ -587,8 +635,28 @@ async function runMergedEpisodePostProcess(db, log, opts) {
       }
 
       alignedAudioPath = path.join(tempRoot, 'aligned_mix.mp3');
-      if (!alignAudioToVideoDuration(concatOut, videoDur, alignedAudioPath, log)) {
+      if (wantNarr) {
+        const align = alignNarrationAudioToVideoDuration(
+          concatOut, videoDur, alignedAudioPath, log, ffprobeDurationSec
+        );
+        if (!align.ok) {
+          return { ok: false, error: '旁白音轨与视频总时长对齐失败' };
+        }
+        outputVideoDur = align.outputVideoDur;
+      } else if (!alignAudioToVideoDuration(concatOut, videoDur, alignedAudioPath, log)) {
         return { ok: false, error: '音轨与视频总时长对齐失败' };
+      }
+
+      if (wantNarr && outputVideoDur > videoDur + 0.05) {
+        const extendedVideo = path.join(tempRoot, 'merged_extended.mp4');
+        if (!extendVideoToDuration(mergedAbsPath, outputVideoDur, extendedVideo, log, ffprobeDurationSec)) {
+          return { ok: false, error: '旁白长于成片且延长视频失败' };
+        }
+        videoForMux = extendedVideo;
+        log.info('merged post: extended video to match narration (no audio speedup)', {
+          video_dur: videoDur,
+          output_dur: outputVideoDur,
+        });
       }
 
       if (wantNarr && srtLines.length > 0) {
@@ -602,7 +670,20 @@ async function runMergedEpisodePostProcess(db, log, opts) {
     const outAbs = path.join(path.dirname(mergedAbsPath), `${baseName}_post.mp4`);
 
     const hasSubs = !!(srtPath && fs.existsSync(srtPath));
-    const subtitleStyle = resolveSubtitleForceStyle(db, episodeId);
+    let dramaId = null;
+    if (episodeId) {
+      try {
+        dramaId = db.prepare('SELECT drama_id FROM episodes WHERE id = ?').get(episodeId)?.drama_id ?? null;
+      } catch (_) {}
+    }
+    const subtitleStyle = await resolveSubtitleForceStyleAsync(db, log, {
+      dramaId,
+      episodeId,
+      videoAbsPath: videoForMux || mergedAbsPath,
+      videoDurSec: outputVideoDur || videoDur,
+      fullNarration: false,
+      mergeOpts,
+    });
     const filterComplex = buildVideoFilterParts(hasSubs ? srtPath : null, watermarkText, tempRoot, subtitleStyle);
     let subsBurnSkipped = false;
 
@@ -610,10 +691,10 @@ async function runMergedEpisodePostProcess(db, log, opts) {
       if (!alignedAudioPath || !fs.existsSync(alignedAudioPath)) {
         return { ok: false, error: '内部错误：缺少对齐音轨' };
       }
-      if (!muxVideoWithAudio(mergedAbsPath, alignedAudioPath, outAbs, filterComplex, log, 'mux_av')) {
+      if (!muxVideoWithAudio(videoForMux, alignedAudioPath, outAbs, filterComplex, log, 'mux_av')) {
         if (hasSubs && filterComplex) {
           log.warn('merged post: subtitle burn failed, retrying audio-only mux');
-          if (!muxVideoWithAudio(mergedAbsPath, alignedAudioPath, outAbs, '', log, 'mux_audio_only')) {
+          if (!muxVideoWithAudio(videoForMux, alignedAudioPath, outAbs, '', log, 'mux_audio_only')) {
             return { ok: false, error: '混音失败（请确认 ffmpeg 含 libx264 与 ffprobe 可用）' };
           }
           subsBurnSkipped = true;
@@ -688,16 +769,18 @@ function ffprobeHasAudio(filePath) {
 async function runStoryboardNarrationPostProcess(db, log, opts) {
   const { videoAbsPath, storageRoot, storyboardId, dramaId } = opts;
   const videoClient = require('./videoClient');
-  if (!videoClient.isDramaFullNarrationVideoMode(db, dramaId)) {
+  const sbMeta = db.prepare(
+    'SELECT narration, duration, narration_audio_local_path, is_intro FROM storyboards WHERE id = ? AND deleted_at IS NULL'
+  ).get(storyboardId);
+  const isIntro = Number(sbMeta?.is_intro) === 1;
+  if (!isIntro && !videoClient.isDramaFullNarrationVideoMode(db, dramaId)) {
     return { ok: false, error: 'NOT_FULL_NARRATION' };
   }
   if (!videoAbsPath || !fs.existsSync(videoAbsPath)) {
     return { ok: false, error: '无效视频路径' };
   }
 
-  const sb = db.prepare(
-    'SELECT narration, duration, narration_audio_local_path FROM storyboards WHERE id = ? AND deleted_at IS NULL'
-  ).get(storyboardId);
+  const sb = sbMeta;
   const narrText = (sb?.narration && String(sb.narration).trim()) ? String(sb.narration).trim() : '';
   if (!narrText) {
     return { ok: false, error: 'NO_NARRATION' };
@@ -708,41 +791,54 @@ async function runStoryboardNarrationPostProcess(db, log, opts) {
     return { ok: false, error: '无法读取视频时长' };
   }
 
-  const mergeOpts = {
-    use_indextts_narration: true,
-    indextts_voice: 'gsv:008',
-    indextts_emotion: '自然流畅的解说语气，情绪饱满',
-  };
+  const prebuiltNarrAbs = resolveStorageAudioAbs(storageRoot, sb?.narration_audio_local_path);
+  if (!prebuiltNarrAbs) {
+    // 禁止现场合成：时长/语气与预生成配音不一致，会导致成片配音错乱
+    return { ok: false, error: 'MISSING_NARRATION_AUDIO' };
+  }
 
   const tempRoot = path.join(require('os').tmpdir(), 'drama-sb-narr-post', String(storyboardId), String(Date.now()));
   fs.mkdirSync(tempRoot, { recursive: true });
 
   try {
-    const prebuiltNarrAbs = resolveStorageAudioAbs(storageRoot, sb?.narration_audio_local_path);
-    let narrFitPath;
-    let srtEntries;
+    const naturalNarrDur = ffprobeDurationSec(prebuiltNarrAbs);
+    const plan = resolveNarrationSlotPlan(naturalNarrDur, videoDur);
+    const outputDur = plan.preferExtendVideo
+      ? Math.max(videoDur, plan.outputSlotSec)
+      : videoDur;
 
-    if (prebuiltNarrAbs) {
-      narrFitPath = path.join(tempRoot, 'narr_prebuilt_fit.mp3');
-      if (!fitAudioToSlot(prebuiltNarrAbs, videoDur, narrFitPath, log)) {
-        return { ok: false, error: '预生成旁白配音时长对齐失败' };
-      }
-      srtEntries = buildSrtEntriesFromPrebuiltNarration(narrText, videoDur, 0);
-      log.info('sb narr post: using prebuilt narration audio', { storyboard_id: storyboardId });
-    } else {
-      const synthResult = await synthesizeNarrationPerLine(db, log, {
-        narrText,
-        slotSec: videoDur,
-        tempRoot,
-        shotIndex: 0,
-        storageRoot,
-        mergeOpts,
-        shotStartMs: 0,
-      });
-      narrFitPath = synthResult.narrFitPath;
-      srtEntries = synthResult.srtEntries;
-      log.info('sb narr post: synthesized narration (no prebuilt audio)', { storyboard_id: storyboardId });
+    const narrFitPath = path.join(tempRoot, 'narr_prebuilt_fit.mp3');
+    if (!fitNarrationToSlot(prebuiltNarrAbs, plan.outputSlotSec, narrFitPath, log, { allowTrim: false })) {
+      return { ok: false, error: '预生成旁白配音时长对齐失败' };
     }
+
+    let videoForMux = videoAbsPath;
+    if (plan.preferExtendVideo && outputDur > videoDur + 0.05) {
+      const extendedVideo = path.join(tempRoot, 'video_extended.mp4');
+      if (!extendVideoToDuration(videoAbsPath, outputDur, extendedVideo, log, ffprobeDurationSec)) {
+        return { ok: false, error: '旁白长于视频且延长画面失败' };
+      }
+      videoForMux = extendedVideo;
+      log.info('sb narr post: extended video to match narration', {
+        storyboard_id: storyboardId,
+        video_dur: videoDur,
+        output_dur: outputDur,
+      });
+    }
+
+    const speechSec =
+      naturalNarrDur != null && naturalNarrDur > 0
+        ? Math.min(outputDur, naturalNarrDur)
+        : outputDur;
+    const srtEntries = buildSrtEntriesFromPrebuiltNarration(narrText, outputDur, 0, { speechSec });
+    log.info('sb narr post: using prebuilt narration audio', {
+      storyboard_id: storyboardId,
+      video_dur: videoDur,
+      output_dur: outputDur,
+      narr_natural: naturalNarrDur,
+      speech_sec: speechSec,
+      extend_video: plan.preferExtendVideo,
+    });
 
     if (!srtEntries || srtEntries.length === 0) {
       return { ok: false, error: '旁白字幕为空' };
@@ -759,11 +855,17 @@ async function runStoryboardNarrationPostProcess(db, log, opts) {
     fs.writeFileSync(srtPath, `\uFEFF${srtLines.join('\n')}\n`, 'utf8');
 
     const outAbs = path.join(path.dirname(videoAbsPath), `${baseName}_narr.mp4`);
-    const filterComplex = buildVideoFilterParts(srtPath, '', tempRoot, FULL_NARRATION_SUBTITLE_FORCE_STYLE);
+    const subtitleStyle = await resolveSubtitleForceStyleAsync(db, log, {
+      dramaId,
+      videoAbsPath: videoForMux,
+      videoDurSec: outputDur,
+      fullNarration: true,
+    });
+    const filterComplex = buildVideoFilterParts(srtPath, '', tempRoot, subtitleStyle);
     let subsBurnSkipped = false;
 
-    if (!muxVideoWithAudio(videoAbsPath, narrFitPath, outAbs, filterComplex, log, 'sb_narr_mux')) {
-      if (filterComplex && !muxVideoWithAudio(videoAbsPath, narrFitPath, outAbs, '', log, 'sb_narr_mux_audio')) {
+    if (!muxVideoWithAudio(videoForMux, narrFitPath, outAbs, filterComplex, log, 'sb_narr_mux')) {
+      if (filterComplex && !muxVideoWithAudio(videoForMux, narrFitPath, outAbs, '', log, 'sb_narr_mux_audio')) {
         return { ok: false, error: '旁白混音失败（请确认 ffmpeg 含 libx264 与 ffprobe 可用）' };
       }
       subsBurnSkipped = true;

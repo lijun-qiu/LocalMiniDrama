@@ -7,7 +7,7 @@ import { parseDramaMetadata } from '@/utils/canvasLayout'
 import { getDramaGenerationOptions } from '@/utils/canvasWorkflow'
 import { runImageStep, runVideoStep } from '@/composables/useCanvasWorkflowRunner'
 import { hasStoryboardImage, hasStoryboardVideo } from '@/utils/storyboardMedia'
-import { CANVAS_NODE_STATUS_LABELS } from '@/composables/useCanvasNodeStatus'
+import { NARRATION_CHARS_PER_SEC_DEFAULT } from '@/utils/narrationMetrics'
 
 async function pollTask(taskId, onTick, maxAttempts = 450, interval = 2000) {
   if (!taskId) return { status: 'completed' }
@@ -59,7 +59,7 @@ export function useCanvasEpisodeGenerate(deps) {
       aspect_ratio: gen.aspectRatio,
       include_narration: !!meta.storyboard_include_narration,
       full_narration_video_mode: !!meta.storyboard_full_narration_video_mode,
-      narration_chars_per_sec: Number(meta.narration_chars_per_sec) || 5,
+      narration_chars_per_sec: Number(meta.narration_chars_per_sec) || NARRATION_CHARS_PER_SEC_DEFAULT,
       universal_omni_storyboard: !!meta.storyboard_universal_omni,
     }
   }

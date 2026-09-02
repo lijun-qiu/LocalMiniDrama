@@ -52,6 +52,7 @@ function getById(db, id) {
   return {
     id: r.id,
     drama_id: r.drama_id,
+    episode_id: r.episode_id != null ? Number(r.episode_id) : null,
     name: r.name,
     type: r.type,
     description: r.description,
@@ -150,7 +151,10 @@ async function generatePropPromptOnly(db, log, cfg, propId, modelName, style) {
   ].filter(Boolean).join('\n') || prop.name || '';
 
   const systemPrompt = promptI18n.getPropPolishPrompt(polishCfg);
-  const userPrompt = `请为以下道具生成**一段英文**图片提示词。\n**约束**：最终英文中不得出现人名、地名、组织名、台词或任何剧本专有信息（若下列「道具名称/描述」中含此类词，请改写为泛化物体描述）；只写已给出的可见外观信息，不要扩写未提及的细节。\n\n${descText}`;
+  const isEnProject = promptI18n.isEnglish(polishCfg);
+  const userPrompt = isEnProject
+    ? `Generate ONE English image prompt for the prop below.\nConstraints: no personal names, place names, org names, dialogue, or script-specific labels in the final English (rewrite to generic object visuals if present); only use visual facts already given — do not invent details; single prop on seamless solid-color studio backdrop only.\n\n${descText}`
+    : `请为以下道具生成**一段中文**图片提示词。\n**约束**：最终提示词中不得出现人名、地名、组织名、台词或任何剧本专有信息（若下列「道具名称/描述」中含此类词，请改写为泛化物体描述）；只写已给出的可见外观信息，不要扩写未提及的细节；必须是单一道具 + 纯色棚拍背景。\n\n${descText}`;
 
   log.info('[道具提示词] 开始生成', { prop_id: propId, name: prop.name });
 

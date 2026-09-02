@@ -657,12 +657,20 @@ async function processImageGeneration(db, log, imageGenId) {
     db.prepare('UPDATE image_generations SET status = ?, updated_at = ? WHERE id = ?').run('processing', now, imageGenId);
     const imageServiceType = row.storyboard_id ? 'storyboard_image' : 'image';
 
+    // 尽早加载 cfg：Step2 场景参考图解析也会用到（原先放在 Step3，会 TDZ：Cannot access 'cfg' before initialization）
+    const loadConfig = require('../config').loadConfig;
+    const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+    let cfg = loadConfig();
+    if (row.drama_id) {
+      try {
+        const dr = db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(row.drama_id);
+        cfg = mergeCfgStyleWithDrama(cfg, dr || {});
+      } catch (_) {}
+    }
+
     // ── 四宫格模式：先生成4帧提示词，再拼装组合提示词 ──────────────────
     if (row.frame_type === 'quad_grid' && row.storyboard_id) {
       try {
-        const loadConfig = require('../config').loadConfig;
-        const cfg = loadConfig();
-
         // 先检查同一分镜是否已有已完成的四宫格提示词缓存
         const cachedRow = db.prepare(
           `SELECT prompt FROM image_generations
@@ -702,9 +710,6 @@ async function processImageGeneration(db, log, imageGenId) {
     // ── 九宫格模式：先生成9帧提示词，再拼装组合提示词 ──────────────────
     if (row.frame_type === 'nine_grid' && row.storyboard_id) {
       try {
-        const loadConfig = require('../config').loadConfig;
-        const cfg = loadConfig();
-
         const NINE_CACHE_MARKER = 'worm\'s eye view';
         const cachedRow = db.prepare(
           `SELECT prompt FROM image_generations
@@ -838,22 +843,15 @@ async function processImageGeneration(db, log, imageGenId) {
         const refs = [];
         const refLabels = [];
         if (sb.scene_id) {
-          const scene = db.prepare('SELECT image_url, local_path, ref_image, location FROM scenes WHERE id = ? AND deleted_at IS NULL').get(sb.scene_id);
+          const scene = db.prepare(
+            'SELECT id, image_url, local_path, ref_image, location, polished_prompt, polished_prompt_single FROM scenes WHERE id = ? AND deleted_at IS NULL'
+          ).get(sb.scene_id);
           if (scene) {
             const locationName = scene.location || 'scene';
-            let sceneRef = pickStoryboardEntityRef(scene);
-            let isPanel = false;
-            if (!sceneRef) {
-              const scenePanel = db.prepare(
-                `SELECT local_path, image_url FROM image_generations
-                 WHERE scene_id = ? AND frame_type = 'quad_panel_0' AND status = 'completed'
-                 ORDER BY id DESC LIMIT 1`
-              ).get(sb.scene_id);
-              if (scenePanel && (scenePanel.local_path || scenePanel.image_url)) {
-                sceneRef = scenePanel.local_path || scenePanel.image_url;
-                isPanel = true;
-              }
-            }
+            const { pickSceneRefForVideoAsync, resolveStorageRoot } = require('../utils/sceneRefPicker');
+            const picked = await pickSceneRefForVideoAsync(db, log, scene, resolveStorageRoot(cfg));
+            const sceneRef = picked.ref;
+            const isPanel = picked.isPanel;
             if (sceneRef && imageClient.canAddStoryboardObjectRef(refLabels, refLimits)) {
               refs.push(sceneRef);
               refLabels.push(`Image ${refs.length}: scene background reference for "${locationName}"${sceneRefLabelSuffix(scene, isPanel)} `);
@@ -1153,15 +1151,6 @@ async function processImageGeneration(db, log, imageGenId) {
     }
 
     // ── Step 3: 计算尺寸 ────────────────────────────────────────────
-    const loadConfig = require('../config').loadConfig;
-    const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
-    let cfg = loadConfig();
-    if (row.drama_id) {
-      try {
-        const dr = db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(row.drama_id);
-        cfg = mergeCfgStyleWithDrama(cfg, dr || {});
-      } catch (_) {}
-    }
     const filesBaseUrl = (cfg.storage && cfg.storage.base_url) ? String(cfg.storage.base_url).replace(/\/$/, '') : '';
     const storageLocalPath = path.isAbsolute(cfg.storage?.local_path)
       ? cfg.storage.local_path
@@ -1707,29 +1696,44 @@ function syncStoryboardCharacters(db, log, storyboardId) {
 }
 
 /**
- * 分镜入库后按台词/动作/旁白补全漏掉的道具（只增不减）。
- * 与角色补全同策略：文本出现道具名则写入 storyboard_props。
+ * 分镜入库后按台词/动作/旁白合理分配道具（可增可减错配）。
+ * 全剧道具参与匹配；设备族冲突消歧；同分优先本集。
  */
 function syncStoryboardProps(db, log, storyboardId) {
   const added = [];
+  const removed = [];
   try {
     const sb = db.prepare(
       'SELECT id, episode_id, action, dialogue, narration, result, description, title FROM storyboards WHERE id = ? AND deleted_at IS NULL'
     ).get(Number(storyboardId));
-    if (!sb) return { added };
+    if (!sb) return { added, removed };
 
     let dramaId = null;
     try {
       const ep = db.prepare('SELECT drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL').get(sb.episode_id);
       dramaId = ep?.drama_id ?? null;
     } catch (_) {}
-    if (!dramaId) return { added };
+    if (!dramaId) return { added, removed };
 
-    const scanText = [sb.action, sb.dialogue, sb.narration, sb.result, sb.description, sb.title]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase();
-    if (!scanText) return { added };
+    const {
+      listPropsForStoryboardPrompt,
+      allocatePropIds,
+      normalizeScanText,
+      scorePropAgainstText,
+    } = require('../utils/episodeAssetScope');
+
+    const scanText = normalizeScanText(
+      sb.action,
+      sb.dialogue,
+      sb.narration,
+      sb.result,
+      sb.description,
+      sb.title
+    );
+    if (!scanText) return { added, removed };
+
+    const allProps = listPropsForStoryboardPrompt(db, dramaId, sb.episode_id);
+    const allocated = new Set(allocatePropIds(allProps, scanText, sb.episode_id));
 
     let existingIds = [];
     try {
@@ -1741,27 +1745,106 @@ function syncStoryboardProps(db, log, storyboardId) {
     } catch (_) {
       existingIds = [];
     }
-    const covered = new Set(existingIds);
 
-    const allProps = db
-      .prepare('SELECT id, name FROM props WHERE drama_id = ? AND deleted_at IS NULL')
-      .all(Number(dramaId));
     const ins = db.prepare('INSERT OR IGNORE INTO storyboard_props (storyboard_id, prop_id) VALUES (?, ?)');
-    for (const p of allProps) {
-      const name = String(p.name || '').trim();
-      if (!name || covered.has(Number(p.id))) continue;
-      if (!scanText.includes(name.toLowerCase())) continue;
-      ins.run(Number(storyboardId), Number(p.id));
-      covered.add(Number(p.id));
-      added.push(name);
+    const del = db.prepare('DELETE FROM storyboard_props WHERE storyboard_id = ? AND prop_id = ?');
+    const propById = new Map(allProps.map((p) => [Number(p.id), p]));
+
+    for (const id of allocated) {
+      if (existingIds.includes(id)) continue;
+      ins.run(Number(storyboardId), id);
+      added.push(propById.get(id)?.name || String(id));
     }
-    if (added.length && log) {
-      log.info('[分镜道具补全] 补全完成', { storyboard_id: storyboardId, added });
+
+    for (const id of existingIds) {
+      if (allocated.has(id)) continue;
+      const p = propById.get(id);
+      // 无文本依据或设备族冲突（负分）→ 剔除错配
+      const score = p ? scorePropAgainstText(p, scanText, sb.episode_id) : 0;
+      if (score >= 40) continue;
+      del.run(Number(storyboardId), id);
+      removed.push(p?.name || String(id));
+    }
+
+    if ((added.length || removed.length) && log) {
+      log.info('[分镜道具分配]', { storyboard_id: storyboardId, added, removed });
     }
   } catch (err) {
-    if (log) log.warn('[分镜道具补全] 异常', { storyboard_id: storyboardId, error: err.message });
+    if (log) log.warn('[分镜道具分配] 异常', { storyboard_id: storyboardId, error: err.message });
   }
-  return { added };
+  return { added, removed };
+}
+
+/**
+ * 按镜头地点/时间/旁白合理分配 scene_id（有更匹配则覆盖；无匹配不硬清）。
+ */
+function syncStoryboardScene(db, log, storyboardId) {
+  try {
+    const sb = db.prepare(
+      'SELECT id, episode_id, scene_id, location, time, action, dialogue, narration, result, description, title FROM storyboards WHERE id = ? AND deleted_at IS NULL'
+    ).get(Number(storyboardId));
+    if (!sb) return { changed: false };
+
+    let dramaId = null;
+    try {
+      const ep = db.prepare('SELECT drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL').get(sb.episode_id);
+      dramaId = ep?.drama_id ?? null;
+    } catch (_) {}
+    if (!dramaId) return { changed: false };
+
+    const {
+      listScenesForStoryboardPrompt,
+      allocateSceneId,
+      scoreSceneAgainstShot,
+      normalizeScanText,
+    } = require('../utils/episodeAssetScope');
+
+    const scenes = listScenesForStoryboardPrompt(db, dramaId, sb.episode_id);
+    const allocatedId = allocateSceneId(scenes, sb, sb.episode_id);
+    if (allocatedId == null) return { changed: false };
+
+    const currentId = sb.scene_id != null ? Number(sb.scene_id) : null;
+    if (currentId === allocatedId) return { changed: false };
+
+    // 若已有场景且分不低于新分配，则保留（避免无意义抖动）
+    if (currentId != null) {
+      const current = scenes.find((s) => Number(s.id) === currentId);
+      const next = scenes.find((s) => Number(s.id) === allocatedId);
+      const scanText = normalizeScanText(
+        sb.action,
+        sb.narration,
+        sb.dialogue,
+        sb.description,
+        sb.title,
+        sb.location,
+        sb.time
+      );
+      const curScore = current
+        ? scoreSceneAgainstShot(current, { location: sb.location, time: sb.time, scanText }, sb.episode_id)
+        : 0;
+      const nextScore = next
+        ? scoreSceneAgainstShot(next, { location: sb.location, time: sb.time, scanText }, sb.episode_id)
+        : 0;
+      if (curScore >= nextScore) return { changed: false };
+    }
+
+    db.prepare('UPDATE storyboards SET scene_id = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
+      allocatedId,
+      new Date().toISOString(),
+      Number(storyboardId)
+    );
+    if (log) {
+      log.info('[分镜场景分配]', {
+        storyboard_id: storyboardId,
+        from: currentId,
+        to: allocatedId,
+      });
+    }
+    return { changed: true, scene_id: allocatedId };
+  } catch (err) {
+    if (log) log.warn('[分镜场景分配] 异常', { storyboard_id: storyboardId, error: err.message });
+    return { changed: false };
+  }
 }
 
 module.exports = {
@@ -1775,4 +1858,6 @@ module.exports = {
   aspectRatioToSize,
   syncStoryboardCharacters,
   syncStoryboardProps,
+  syncStoryboardScene,
+  splitQuadGridToImages,
 };

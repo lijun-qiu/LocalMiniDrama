@@ -28,12 +28,23 @@ describe('prepareAgnesVideoPrompt', () => {
     assert.ok(prompt.includes('禁止人物开口'));
   });
 
+  it('forceSilent strips quoted dialogue that causes burned-in captions', () => {
+    const raw =
+      '分镜1： 3秒: @图片2 说："你怎么又迟到了"，转身离开。人物闭口无口型。';
+    const { prompt, useSilentNegative } = prepareAgnesVideoPrompt(raw, { forceSilent: true });
+    assert.equal(useSilentNegative, true);
+    assert.ok(!prompt.includes('你怎么又迟到了'));
+    assert.ok(prompt.includes('人物闭口无口型'));
+    assert.ok(prompt.includes('禁止画面字幕') || prompt.includes('禁画面字'));
+  });
+
   it('forceSilent always adds negative cue even without speech fields', () => {
     const { prompt, useSilentNegative } = prepareAgnesVideoPrompt('场景：街道。动作：行走。', {
       forceSilent: true,
     });
     assert.equal(useSilentNegative, true);
     assert.ok(prompt.includes('禁止人物开口'));
+    assert.ok(prompt.startsWith('【最高优先级·禁画面字】'));
   });
 });
 

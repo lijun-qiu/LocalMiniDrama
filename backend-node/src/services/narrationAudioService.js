@@ -7,6 +7,10 @@ const { randomUUID } = require('crypto');
 const { spawnSync } = require('child_process');
 const { getFfmpegPath, getFfprobePath } = require('../utils/ffmpegPath');
 const { countNarrationSpeechChars } = require('./episodeStoryboardService');
+const {
+  detectSilenceEnds,
+  refineSplitBoundaries,
+} = require('../utils/narrationAudioFit');
 
 function ffprobeDurationSec(filePath) {
   const probe = getFfprobePath();
@@ -176,6 +180,20 @@ function splitFullNarrationToStoryboards(db, log, episodeId, storageRoot) {
   if (!totalDur) throw new Error('无法读取整段配音时长');
 
   const durs = computeProportionalDurations(totalDur, rows.map((r) => r.narration));
+  let refinedDurs = durs;
+  try {
+    const silenceEnds = detectSilenceEnds(fullAbs, log);
+    if (silenceEnds.length) {
+      refinedDurs = refineSplitBoundaries(durs, totalDur, silenceEnds);
+      log.info('[narration-audio] split boundaries refined to silence', {
+        episode_id: episodeIdNum,
+        silence_points: silenceEnds.length,
+      });
+    }
+  } catch (err) {
+    log?.warn?.('[narration-audio] silence refine skipped', { error: err.message });
+  }
+
   const audioDir = path.join(storageRoot, 'audio');
   fs.mkdirSync(audioDir, { recursive: true });
 
@@ -185,7 +203,7 @@ function splitFullNarrationToStoryboards(db, log, episodeId, storageRoot) {
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const dur = durs[i];
+    const dur = refinedDurs[i];
     const baseName = `tts_sb${row.id}_${randomUUID().slice(0, 8)}.mp3`;
     const outAbs = path.join(audioDir, baseName);
     const localPath = `audio/${baseName}`;
@@ -198,11 +216,9 @@ function splitFullNarrationToStoryboards(db, log, episodeId, storageRoot) {
       deleteStorageRelPath(storageRoot, row.narration_audio_local_path, log, `sb${row.id}:old-narr`);
     }
 
-    db.prepare('UPDATE storyboards SET narration_audio_local_path = ?, updated_at = ? WHERE id = ?').run(
-      localPath,
-      now,
-      row.id
-    );
+    db.prepare(
+      'UPDATE storyboards SET narration_audio_local_path = ?, narration_prompt_aligned_at = NULL, updated_at = ? WHERE id = ?'
+    ).run(localPath, now, row.id);
 
     results.push({
       storyboard_id: row.id,
@@ -264,6 +280,28 @@ function syncStoryboardDurationsFromNarrationAudio(db, log, episodeId, storageRo
     }
     const durSec = Math.min(120, Math.max(0.5, Math.round(dur * 100) / 100));
     db.prepare('UPDATE storyboards SET duration = ?, updated_at = ? WHERE id = ?').run(durSec, now, row.id);
+
+    // 全能片段：各拍秒数按配音时长缩放，避免改 duration 后 beat 仍是旧合计
+    try {
+      const sb = db.prepare('SELECT universal_segment_text, creation_mode FROM storyboards WHERE id = ?').get(row.id);
+      const uni = sb?.universal_segment_text && String(sb.universal_segment_text).trim();
+      if (uni && (sb.creation_mode === 'universal' || /分镜\s*\d+\s*[：:]/.test(uni))) {
+        const { syncUniversalSegmentDurationPair } = require('./universalSegmentDurationSync');
+        const sync = syncUniversalSegmentDurationPair({
+          universalSegmentText: uni,
+          durationSec: durSec,
+          narrationDerivedDuration: true,
+        });
+        if (sync.synced && sync.universalSegmentText) {
+          db.prepare('UPDATE storyboards SET universal_segment_text = ?, updated_at = ? WHERE id = ?').run(
+            sync.universalSegmentText,
+            now,
+            row.id
+          );
+        }
+      }
+    } catch (_) {}
+
     updated += 1;
   }
 
@@ -281,6 +319,48 @@ function syncStoryboardDurationsFromNarrationAudio(db, log, episodeId, storageRo
     skipped_no_narration: skippedNoNarration,
     total: rows.length,
   };
+}
+
+/**
+ * 单镜旁白配音完成后：用实测时长写 duration，并缩放全能片段各拍秒数。
+ * @returns {number|null} 写入的秒数
+ */
+function applyNarrationAudioDurationToStoryboard(db, log, storyboardId, storageRoot, audioRelPath) {
+  const id = Number(storyboardId);
+  const rel = audioRelPath && String(audioRelPath).trim();
+  if (!id || !rel || !storageRoot) return null;
+  const abs = path.join(storageRoot, rel.replace(/\//g, path.sep));
+  if (!fs.existsSync(abs)) return null;
+  const dur = ffprobeDurationSec(abs);
+  if (!dur) return null;
+  const durSec = Math.min(120, Math.max(0.5, Math.round(dur * 100) / 100));
+  const now = new Date().toISOString();
+  db.prepare('UPDATE storyboards SET duration = ?, updated_at = ? WHERE id = ?').run(durSec, now, id);
+
+  try {
+    const sb = db.prepare('SELECT universal_segment_text, creation_mode FROM storyboards WHERE id = ?').get(id);
+    const uni = sb?.universal_segment_text && String(sb.universal_segment_text).trim();
+    if (uni && (sb.creation_mode === 'universal' || /分镜\s*\d+\s*[：:]/.test(uni))) {
+      const { syncUniversalSegmentDurationPair } = require('./universalSegmentDurationSync');
+      const sync = syncUniversalSegmentDurationPair({
+        universalSegmentText: uni,
+        durationSec: durSec,
+        narrationDerivedDuration: true,
+      });
+      if (sync.synced && sync.universalSegmentText) {
+        db.prepare('UPDATE storyboards SET universal_segment_text = ?, updated_at = ? WHERE id = ?').run(
+          sync.universalSegmentText,
+          now,
+          id
+        );
+      }
+    }
+  } catch (e) {
+    log?.warn?.('[narration-audio] scale universal beats after TTS failed', { id, error: e.message });
+  }
+
+  log?.info?.('[narration-audio] applied TTS duration to storyboard', { id, duration: durSec });
+  return durSec;
 }
 
 function clearEpisodeFullNarrationAudio(db, log, episodeId, storageRoot) {
@@ -302,6 +382,7 @@ module.exports = {
   synthesizeEpisodeFullNarration,
   splitFullNarrationToStoryboards,
   syncStoryboardDurationsFromNarrationAudio,
+  applyNarrationAudioDurationToStoryboard,
   clearEpisodeFullNarrationAudio,
   ffprobeDurationSec,
 };

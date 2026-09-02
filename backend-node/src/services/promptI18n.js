@@ -282,6 +282,14 @@ function getStoryboardSystemPrompt(cfg) {
  */
 function getUniversalOmniMultiBeatFormatSpec(cfg) {
   const { DEFAULT_LINE3 } = require('./universalOmniMultiBeatFormat');
+  const {
+    GEN_TIME_TIMELINE_CONTRACT_ZH,
+    GEN_TIME_TIMELINE_CONTRACT_EN,
+    MULTI_PLACE_ACTIVITY_TEMPLATE_ZH,
+    MULTI_PLACE_ACTIVITY_TEMPLATE_EN,
+    MENTION_NE_APPEAR_TEMPLATE_ZH,
+    MENTION_NE_APPEAR_TEMPLATE_EN,
+  } = require('./universalAgnesTimelineContract');
   if (isEnglish(cfg)) {
     return `
 [UNIVERSAL_SEGMENT_TEXT — MULTI-BEAT BLOCK FORMAT ONLY]
@@ -295,9 +303,15 @@ Lines 4..(3+M): 分镜k： Tk秒: <cinematic Chinese prose for that slice; camer
 Sum(T1..TM) MUST equal this shot's JSON "duration" seconds exactly.
 
 Reference tokens: @图片1 = scene/environment only; @图片2+ = characters in characters[] order; then props if any.
-Dialogue: @图片2 says:"verbatim line" or …嗓音…："line". No speech: end with 无对白。
-Narration: 旁白（画面无声）："verbatim narration"
-Each beat: rich motion picture prose (push in, pull back, rack focus), not a static snapshot caption.`;
+CRITICAL: Follow SUBJECT_IDENTITY_LOCK / PRIMARY_SUBJECT — never swap who acts or speaks onto another character's @图片N.
+Dialogue: speaker's mapped @图片N says:"verbatim line". No speech: end with 无对白。 or 人物闭口无口型，无对白。
+**Narration field separation**: NARRATION lives in storyboard.narration and is added post via IndexTTS. **FORBIDDEN** inside beat lines: 旁白（画面无声）："…" or copying narration verbatim. Each beat must be **visual-only** cinematic prose (camera, @图片N action, light, blocking) that **shows** what NARRATION means — never paste VO text into the beat body.
+**M selection**: choose M from narration/action semantic beats — NOT a fixed 3. Short single-beat VO → M=1–2; multi-sentence VO → split by sentence/action. Never pad empty beats to force three shots.
+**AV sync**: in each beat, visible action must match the **same semantic moment** as the corresponding NARRATION excerpt (from STORYBOARD_FIELDS) — keep picture and VO in sync. Forbid empty camera moves with no visual payoff for that beat's narration slice.
+${MENTION_NE_APPEAR_TEMPLATE_EN}
+${GEN_TIME_TIMELINE_CONTRACT_EN}
+${MULTI_PLACE_ACTIVITY_TEMPLATE_EN}
+Each beat: rich motion picture prose (push in, pull back, rack focus).`;
   }
   return `
 【universal_segment_text — 多子分镜段落格式（与「生成全能提示词」「润色」完全一致）】
@@ -312,18 +326,30 @@ Each beat: rich motion picture prose (push in, pull back, rack focus), not a sta
 
 子分镜正文写法（电影化中文长句，参考产品范例）：
 - **参考图**：仅用 @图片1、@图片2…（阿拉伯数字）；@图片1 只写环境/光影/陈设；角色从 @图片2 起按 characters[] 顺序；有道具则继续 @图片3 …
+- **主人公锁定（最高优先级）**：必须遵守 SUBJECT_IDENTITY_LOCK / PRIMARY_SUBJECT；ACTION 里谁做主戏，正文只能绑到其映射的 @图片N；禁止把甲的动作/表情/台词写到乙的 @图片槽。
 - **运镜**：每段含至少两步运镜（如 缓推、横移、跟拍、拉回、俯拍特写），与人物动作同步。
-- **对白**：有 dialogue 时必须写出原文，格式如 @图片2 的嗓音…："对白原文" 或 @图片2 说："对白原文"；无对白则句末写 **无对白。**
-- **解说**：有 narration 时写在合适子分镜：**旁白（画面无声）："解说原文"**
-- **禁止**：概括式台词（如「他说了一句重要的话」）、@人物N、markdown、SoulLens 段标签
+- **对白**：有 dialogue 时必须写出原文，且说话人必须用 DIALOGUE_SPEAKER_MAP 指定的 @图片N（如 @图片3 说："对白原文"）；无对白则句末写 **无对白。** 或 **人物闭口无口型，无对白。**
+- **解说与节拍（最高优先级之一）**：
+  - **旁白不进 beat 正文**：旁白原文仅存在于分镜字段 narration，成片由 IndexTTS 后期叠加。**禁止**在「分镜k」行内写「旁白（画面无声）："…"」或照抄旁白原文；须将旁白语义**转写为可视动作/场景/运镜**（谁在 @图片N 做什么、镜头如何运动、光线氛围）。
+  - **M 按旁白/动作语义分配**，禁止机械固定三镜或照抄「约每 5 秒一拍」。单句短旁白或单一动作 → M=1～2；多句旁白/多步动作 → 按句或动作拆分；秒数不够则合并相邻短句，**禁止为空镜硬凑 M=3**。
+  - **旁白时间轴（硬性）**：T1+…+TM=本镜 duration；**各 Tk 按 NARRATION 可读字权重分配**（与 IndexTTS/字幕一致），**禁止机械均分**（9s 勿默认 3+3+3）。每个 beat 的画面动作须落在该拍时间窗内对应旁白语义；例：9s 为 3+2+4，「你推开门」约在 4.5s → 属分镜2（3～5s），推门须写在分镜2。
+  - **声画同步**：每个语义点的可见动作/结果须与 STORYBOARD_FIELDS 中 **NARRATION 对应摘录** 同一时段对齐（画面与旁白同步发生，不要求画面提前也不滞后）。禁止前几行只有空运镜、末行堆整段旁白原文。
+  - **旁白「你/您」= PRIMARY_SUBJECT**：第二人称须绑到 SUBJECT_IDENTITY_LOCK 中的主人公 @图片N，禁止写成无绑定的路人/剪影/另一张脸。
+  - **旁白多地点列举（你在A…你在B…）**：同一人不同时空片段，**不是**三个不同角色；每格/每拍须 @图片N 同一张脸。
+  ${MULTI_PLACE_ACTIVITY_TEMPLATE_ZH}
+  - 多句旁白按时间顺序拆到各「分镜k」的**画面动作**；每行只覆盖本子时段正在发生的可见事件。
+  ${GEN_TIME_TIMELINE_CONTRACT_ZH}
+- **禁止**：概括式台词（如「他说了一句重要的话」）、@人物N、markdown、SoulLens 段标签、角色串槽、beat 内嵌旁白引文
 
-范例结构（勿照抄剧情，仅学排版）：
-画面风格和类型: 真人写实, 电影风格, 高清画质, 日本动漫画风
-生成一个由以下3个分镜组成的视频。
+范例结构（勿照抄剧情或固定三镜；M 可为 1/2/4…，仅学排版与纯画面写法）：
+画面风格和类型: 真人写实, 电影风格, 高清画质, 纪录片质感
+生成一个由以下2个分镜组成的视频。
 ${DEFAULT_LINE3}
-分镜1： 5秒: 镜头从 @图片1 … 无对白。
-分镜2： 5秒: … @图片2 …："台词原文"
-分镜3： 5秒: … 旁白（画面无声）："解说原文"`;
+分镜1： 6秒: 镜头缓推，@图片2 抬手指向窗外雨幕并起身走向窗边，人物闭口无口型，无对白。
+分镜2： 4秒: 镜头定近，@图片2 望向远处街灯，情绪落定，人物闭口无口型，无对白。
+
+多时空模板范例（同一人多地点；勿照抄；M=1 单行或 M=3 每地一拍）：
+分镜1： 12秒: 【运镜】镜头沿时间线缓推——【定格1·地点A】@图片2 + 该地具体动作与光线；【定格2·地点B】@图片2 同一张脸 + 另一地动作；【定格3·地点C】@图片2 同一张脸；人物闭口无口型，无对白。`;
 }
 
 /**
@@ -366,39 +392,31 @@ function getStoryboardFullNarrationModeInstructions(cfg, opts = {}) {
   const limits = opts.narrationLimits || resolveFullNarrationLimits();
   const {
     NARRATION_CHARS_PER_SEC: charsPerSec,
-    FULL_NARRATION_TARGET_SEC: targetSegmentSec,
     FULL_NARRATION_MAX_SEC: maxSegmentSec,
     FULL_NARRATION_DURATION_MIN_SEC: durationMinSec,
-    FULL_NARRATION_TARGET_CHARS: targetCharsPerShot,
     FULL_NARRATION_MAX_CHARS: maxCharsPerShot,
   } = limits;
   const exampleFloor = Math.round(durationMinSec * charsPerSec);
-  const exampleTarget = targetCharsPerShot;
   const exampleMax = maxCharsPerShot;
   if (isEnglish(cfg)) {
     return `
 
-【FULL VERBATIM NARRATION VIDEO MODE — STRICT】
-- The script above is the **only** narration source. Each shot's "narration" = **verbatim** continuous excerpt (**target ~${targetCharsPerShot} speech chars / ~${targetSegmentSec}s; hard max ${maxCharsPerShot} chars / ${maxSegmentSec}s**).
-- Pack at punctuation only: fill toward ~${targetCharsPerShot} chars; if adding the next clause would exceed ${maxCharsPerShot}, **back up to the previous punctuation**. Last shot may be shorter; if last remainder > ${maxCharsPerShot}, split into two shots at punctuation — **never cut mid-word**.
-- **duration formula**: ceil(speech char count ÷ ${charsPerSec}) seconds, clamped to **${durationMinSec}–${maxSegmentSec}s**. Speech chars = Chinese/letters/digits only. Examples: ${exampleFloor}→${durationMinSec}s, ${exampleTarget}→~${targetSegmentSec}s, ${exampleMax}→${maxSegmentSec}s.
-- **Forbidden**: rewriting, summarizing, merging unrelated paragraphs, or inventing narration not in the script.
-- "dialogue" must be **empty** unless the script explicitly contains labeled character lines (Name: "line").
-- "action" / "result" / visuals: illustrate what the narration segment describes; on-screen characters stay **silent with closed lips** (VO only).
-- Order shots strictly along the script; do not reorder or skip text.
-- **Shot 1** is a title/establishing card: "narration" MUST be empty; copy scene/characters/props from shot 2; duration 6s. **Narration script starts at shot 2** (segment 1 in binding).`;
+【FULL VERBATIM NARRATION — PERIOD SPLIT (classic / universal unified)】
+- The script is the **only** narration source. Split by **。** (each sentence is one unit); merge **consecutive sentences** into one shot while combined speech chars ≤ **${maxCharsPerShot} (~${maxSegmentSec}s)**; start a new shot when the next sentence would exceed the limit (no sentence-count cap).
+- Each shot's "narration" = **verbatim** excerpt.
+- **duration**: ceil(speech chars ÷ ${charsPerSec}) seconds, clamped to **${durationMinSec}–${maxSegmentSec}s**.
+- **Forbidden**: rewriting, summarizing, or inventing narration. "dialogue" empty unless labeled character lines exist.
+- **Shot 1**: open with the first narration segment (non-empty). Do **not** insert an empty title-card shot.`;
   }
   return `
 
-【全文解说旁白视频模式 — 硬性要求】
-- 上方剧本正文即**唯一旁白来源**；每镜 "narration" = 原文**逐字连续摘录**（**目标约 ${targetCharsPerShot} 字 / ${targetSegmentSec} 秒，硬上限 ${maxCharsPerShot} 字 / ${maxSegmentSec} 秒**）。
-- **只在标点处切分**：尽量装到约 ${targetCharsPerShot} 字；再加下一段会超过 ${maxCharsPerShot} 字时，**退回上一符号成镜**。末镜可短于目标；末段仍超 ${maxCharsPerShot} 字则再拆成两镜；**禁止在词语中间截断**。
-- 每镜 **duration 计算公式**：ceil(旁白可读字数 ÷ ${charsPerSec}) 秒，限制在 **${durationMinSec}～${maxSegmentSec} 秒**。可读字数 = 汉字/字母/数字，**不含标点**；例：${exampleFloor}字→${durationMinSec}秒，${exampleTarget}字→约${targetSegmentSec}秒，${exampleMax}字→${maxSegmentSec}秒。
-- **禁止**：改写、缩写、概括、合并不相邻段落、编造剧本中不存在的旁白。
-- "dialogue" 一律留空，除非剧本中明确写了角色对白（如 角色名：「台词」）。
-- "action" / "result" / 画面：配合该段旁白内容设计镜头；画内人物**闭口无口型**（仅画外解说）。
-- 分镜顺序严格沿原文从头到尾，不得跳段、重排或遗漏句子。
-- **第 1 镜**为片头/标题氛围镜：narration 必须留空；场景/角色/物品与第 2 镜一致即可；duration 6 秒。**旁白原文从第 2 镜开始**绑定。`;
+【全文解说旁白视频模式 — 硬性要求（经典 / 全能统一）】
+- 上方剧本正文即**唯一旁白来源**；以**。**切分为句段，**连续多句**合并为一镜（合计可读字数不超过 **${maxCharsPerShot} 字 / ${maxSegmentSec} 秒**，无句数上限）；再加下一句会超限则新开一镜。
+- 每镜 "narration" = 原文**逐字连续摘录**。
+- 每镜 **duration**：ceil(旁白可读字数 ÷ ${charsPerSec}) 秒，限制在 **${durationMinSec}～${maxSegmentSec} 秒**。可读字数 = 汉字/字母/数字，**不含标点**；例：${exampleFloor}字→${durationMinSec}秒，${exampleMax}字→${maxSegmentSec}秒。
+- **禁止**：改写、缩写、概括、编造旁白。"dialogue" 一律留空（除非剧本有明确角色对白）。
+- "action" / "result" / 画面：配合该段旁白设计镜头；画内人物**闭口无口型**（仅画外解说）。
+- **第 1 镜**即从原文第一个字开始旁白（非空）。**不要**插入空旁白的片头镜。`;
 }
 
 /** 全文解说旁白视频模式：系统提示词最高优先级覆盖 */
@@ -406,25 +424,21 @@ function getStoryboardFullNarrationSystemOverride(cfg, opts = {}) {
   const { resolveFullNarrationLimits } = require('./fullNarrationConstants');
   const limits = opts.narrationLimits || resolveFullNarrationLimits();
   const {
-    FULL_NARRATION_TARGET_CHARS: targetCharsPerShot,
     FULL_NARRATION_MAX_CHARS: maxCharsPerShot,
+    FULL_NARRATION_MAX_SEC: maxSegmentSec,
   } = limits;
   if (isEnglish(cfg)) {
     return `
 
-[HIGHEST PRIORITY — FULL VERBATIM NARRATION VIDEO MODE]
-This OVERRIDES conflicting rules (one-action-one-shot, plot-driven merge, short VO snippets, 10–50 char narration limits).
-- Split by **narration script punctuation**, not by dramatic beats alone.
-- Every "narration" field (shots 2+): verbatim excerpt; **target ~${targetCharsPerShot} speech chars, hard max ${maxCharsPerShot}**; pack at punctuation and back up if exceeding max; shots 2–end narration concatenated must cover the full script.
-- **Shot 1**: title card only — empty "narration". **Shot 2** starts at the **first words** of the script; last narration shot ends at the **last words**.`;
+[HIGHEST PRIORITY — FULL NARRATION PERIOD SPLIT]
+- Split script by **。**; merge consecutive sentences per shot while combined speech chars ≤ ${maxCharsPerShot} (~${maxSegmentSec}s); no sentence-count cap.
+- Every "narration" (from shot 1): verbatim. Do not insert an empty title-card shot.`;
   }
   return `
 
-【最高优先级——全文解说旁白视频模式】
-本模式覆盖与之冲突的一切规则（一动作一镜、情节驱动合并、每镜过短旁白等）。
-- 按**旁白原文标点**拆镜，而非仅按戏剧节拍随意合并。
-- 每镜 "narration"（第 2 镜起）必须是用户剧本的逐字摘录；**目标约 ${targetCharsPerShot} 字，硬上限 ${maxCharsPerShot} 字**；只在标点处装段，超上限则退回上一符号；第 2 镜至最后一镜旁白拼接后须完整覆盖用户原文。
-- **第 1 镜**为片头：narration 留空。**第 2 镜**从原文**第一个字**开始；最后一镜旁白止于原文**最后一个字**。`;
+【最高优先级——全文解说：句号切分合并】
+- 以**。**切句；连续多句合并为一镜（合计不超过 ${maxCharsPerShot} 字 / ${maxSegmentSec} 秒），无句数上限；再加下一句会超限则新开一镜。
+- 从第 1 镜起 narration 必须逐字摘录原文；不要插入空旁白片头镜。`;
 }
 
 /** 分镜生成勾选「解说旁白」时追加到用户提示词末尾 */
@@ -459,12 +473,12 @@ function formatUserPrompt(cfg, key, ...args) {
       script_content_label: '【Script Content】',
       task_label: '【Task】',
       character_list_label: '【Available Character List】',
-      scene_list_label: '【Extracted Scene Backgrounds】',
+      scene_list_label: '【Extracted Scene Backgrounds (prefer this episode)】',
       task_instruction: 'Break down the novel script into storyboard shots based on **independent action units**.',
       character_constraint: '**Important** — characters field rules:\n1. Only use character IDs (numbers) from the above character list. Do not invent IDs.\n2. Only include characters who **physically appear and act** in this specific shot. Do NOT list characters who are merely mentioned, offscreen, or appear in the overall scene but not in this shot.\n3. The number of characters listed must match who is described in the action/dialogue fields. If the action only describes one person, list only that one character.\n4. **MUST fill**: if action/dialogue/narration names a character from the list who is on screen, their ID **must** appear in characters — never leave characters as [] when someone is clearly in the shot.\n5. **Video/voice call or remote meeting**: use the **person who answers/receives the call** as the on-screen subject. characters must list only that receiver; the remote party may appear only on a phone/screen inset or as voice — never both people physically in the same frame.',
-      scene_constraint: '**Important**: In the scene_id field, select the most matching background ID (number) from the above background list. If no suitable background exists, use null.',
-      prop_list_label: '【Available Prop List】',
-      prop_constraint: '**Important** — props field rules:\n1. Only use prop IDs (numbers) from the above prop list. Do not invent IDs.\n2. Only include props that are **visually present and actively used or prominently featured** in this specific shot.\n3. **MUST fill**: if action/dialogue/narration clearly shows a listed prop on screen, include its ID — do not default to [] out of caution.\n4. If no props from the list appear in the shot, use an empty array [].',
+      scene_constraint: '**Important** — scene_id rules:\n1. Choose the best-matching background ID from the list above (prefer this episode\'s scenes).\n2. Match the shot\'s actual location; do not reuse a wrong-location scene just because it is available.\n3. If no suitable background exists, use null.',
+      prop_list_label: '【Available Prop List (prefer this episode)】',
+      prop_constraint: '**Important** — props field rules:\n1. Only use prop IDs (numbers) from the above prop list. Do not invent IDs.\n2. Only include props that are **visually present and actively used or prominently featured** in this specific shot.\n3. **Exact object match**: the prop name must match the object in action/dialogue/narration (e.g. computer ≠ phone; photo wall ≠ paper note). Never substitute a similar "digital carrier" from another context.\n4. **MUST fill**: if action/dialogue/narration clearly shows a listed prop on screen, include its ID — do not default to [] out of caution.\n5. If no props from the list appear in the shot, use an empty array [].',
       frame_info: 'Shot information:\n%s\n\nPlease directly generate the image prompt for the first frame without any explanation:',
       key_frame_info: 'Shot information:\n%s\n\nPlease directly generate the image prompt for the key frame without any explanation:',
       last_frame_info: 'Shot information:\n%s\n\nPlease directly generate the image prompt for the last frame without any explanation:',
@@ -487,12 +501,12 @@ function formatUserPrompt(cfg, key, ...args) {
       script_content_label: '【剧本内容】',
       task_label: '【任务】',
       character_list_label: '【本剧可用角色列表】',
-      scene_list_label: '【本剧已提取的场景背景列表】',
+      scene_list_label: '【本集已提取的场景背景列表】',
       task_instruction: '将小说剧本按**独立动作单元**拆解为分镜头方案。',
       character_constraint: '**重要** — characters字段填写规则：\n1. 只能使用上述角色列表中的角色ID（数字），不得自创ID。\n2. 只填写在**本镜头中实际出现并有具体行为**的角色。不要把"提到的"、"画面外的"、或整个场景里有但本镜头动作中未描述的角色也列进去。\n3. characters数量必须与action/dialogue中实际描写的人物数量一致。如果action只描述了一个人的动作，characters里就只填那一个人的ID。\n4. **必须填写**：若 action/dialogue/narration 中点名且画面内出现列表中的角色，则 characters **必须**包含其ID，禁止在有人出镜时仍填空数组[]。\n5. **视频电话/语音电话/远程会议**：以**接听方**为主镜构图，characters只填接听方一人；对方仅可在手机/屏幕小窗或画外音中出现，禁止两人实体同框。',
-      scene_constraint: '**重要**：在scene_id字段中，必须从上述背景列表中选择最匹配的背景ID（数字）。如果没有合适的背景，则填null。',
+      scene_constraint: '**重要** — scene_id填写规则：\n1. 必须从上述背景列表中选择最匹配的背景ID（数字），优先匹配本集场景。\n2. 地点必须与镜头实际地点一致，禁止用错误地点的场景凑数。\n3. 如果没有合适的背景，则填null。',
       prop_list_label: '【本集可用道具列表】',
-      prop_constraint: '**重要** — props字段填写规则：\n1. 只能使用上述道具列表中的道具ID（数字），不得自创ID。\n2. 只填写在**本镜头中视觉上出现并被使用或显著展示**的道具。\n3. **必须填写**：若 action/dialogue/narration 明确写出列表中的道具出现在画面中，则 props **必须**包含其ID，禁止因保守而一律填[]。\n4. 如果本镜头中没有列表中的道具出现，则填空数组[]。',
+      prop_constraint: '**重要** — props字段填写规则：\n1. 只能使用上述道具列表中的道具ID（数字），不得自创ID。\n2. 只填写在**本镜头中视觉上出现并被使用或显著展示**的道具。\n3. **物体必须一致**：道具名须与 action/dialogue/narration 中的实物一致（如电脑≠手机、照片墙≠纸条），禁止用近似「数字信息载体」跨场景顶替。\n4. **必须填写**：若 action/dialogue/narration 明确写出列表中的道具出现在画面中，则 props **必须**包含其ID，禁止因保守而一律填[]。\n5. 如果本镜头中没有列表中的道具出现，则填空数组[]。',
       frame_info: '镜头信息：\n%s\n\n请直接生成首帧的图像提示词（JSON 的 prompt 字段必须全文中文），不要任何解释：',
       key_frame_info: '镜头信息：\n%s\n\n请直接生成关键帧的图像提示词（JSON 的 prompt 字段必须全文中文），不要任何解释：',
       last_frame_info: '镜头信息：\n%s\n\n请直接生成尾帧的图像提示词（JSON 的 prompt 字段必须全文中文），不要任何解释：',
@@ -934,18 +948,20 @@ function getPropExtractionPrompt(cfg) {
   const style = [base, propExtra].filter(Boolean).join(', ');
   const imageRatio = cfg?.style?.default_prop_ratio || cfg?.style?.default_image_ratio || '16:9';
   if (isEnglish(cfg)) {
-    return `You are a professional script prop analyst, skilled at extracting key props with visual characteristics from scripts.
+    return `You are a professional script prop analyst, skilled at extracting visually actionable props from scripts.
 
-Your task is to extract and organize all key props that are important to the plot or have special visual characteristics from the provided script content.
+Your task is to extract and organize **all clearly mentioned props** that characters use, hold, look at, or that appear as important on-screen objects in the provided script.
 
 [Requirements]
-1. Extract ONLY key props that are important to the plot or have special visual characteristics.
-2. Do NOT extract common daily items (e.g., normal cups, pens) unless they have special plot significance.
-3. If a prop has a clear owner, note it **only** in "description" (Chinese OK). **Never** put character names, nicknames, or relationship words in "image_prompt".
-4. "image_prompt" must be **English**, written as a **professional catalog / product-hero** shot for a single prop: describe shape, material, color, wear, scale cues, and finish in detail.
-5. In "image_prompt" you **must** specify: **one seamless solid-color studio backdrop** (matte, no gradient), **only the prop as the sole subject**, **soft even studio lighting** (readable micro-detail, no dramatic movie lighting), and explicitly forbid people, hands, furniture, floors, tables, scenery, packaging (unless the prop *is* the package), text, logos, dust/debris, or any secondary objects.
-6. **No script leakage in "image_prompt"**: forbid character names, place names, organization names, dialogue, plot beats, and other **original-script identifiers**. Replace with generic visual terms (e.g. "engraved serif lettering" instead of a name). The **only** exception is text that is **visibly printed or engraved on the prop itself** as part of its graphic design—describe that text generically if possible ("small engraved inscription") unless the script explicitly requires exact wording on the object.
-7. **Strict, non-expanding "image_prompt"**: include **only** attributes grounded in the script or the "description" you output—**no** invented accessories, era/brand backstory, mood adjectives unrelated to materials, or "hero story" filler. Prefer a **tight** prompt over a long one.
+1. **Be comprehensive for explicit props**: extract every tangible object the script clearly names when it is used, searched on, held, opened, read, shown, or drives a beat (e.g. computer, phone, tablet, keys, letters, notes, photos, albums, weapons, boxes, jewelry, documents, maps).
+2. **Must extract information/query devices**: if the script says someone borrows/uses a computer, phone, tablet, or map app to search or navigate, that device **must** be a separate prop (do not skip as "daily item").
+3. Still skip pure ambient furniture that is only set dressing with no beat (generic chairs, walls) — those belong to the scene, not props. But if an item is named and acted on (e.g. "a pen on the desk", "a note on the door"), extract it.
+4. Prefer **one prop per distinct object**; do not merge computer and phone into a vague "digital carrier".
+5. If a prop has a clear owner, note it **only** in "description". **Never** put character names, nicknames, or relationship words in "image_prompt".
+6. "image_prompt" must be **English**, written as a **professional catalog / product-hero** shot for a single prop: describe shape, material, color, wear, scale cues, and finish in detail.
+7. In "image_prompt" you **must** specify: **one seamless solid-color studio backdrop** (matte, no gradient), **only the prop as the sole subject**, **soft even studio lighting** (readable micro-detail, no dramatic movie lighting), and explicitly forbid people, hands, furniture, floors, tables, scenery, packaging (unless the prop *is* the package), text, logos, dust/debris, or any secondary objects.
+8. **No script leakage in "image_prompt"**: forbid character names, place names, organization names, dialogue, plot beats, and other **original-script identifiers**. Replace with generic visual terms. The **only** exception is text that is **visibly printed or engraved on the prop itself**.
+9. **Strict, non-expanding "image_prompt"**: include **only** attributes grounded in the script or the "description" you output—**no** invented accessories or filler. Prefer a **tight** prompt over a long one.
 - **Style Requirement**: ${style}
 - **Image Ratio**: ${imageRatio}
 
@@ -962,19 +978,21 @@ Each object containing:
   if (_propOverride) {
     return _propOverride + _propLocked;
   }
-  return `你是一位专业的剧本道具分析师，擅长从剧本中提取具有视觉特征的关键道具。
+  return `你是一位专业的剧本道具分析师，擅长从剧本中提取角色会使用、持有、查看或作为重要出镜物体的道具。
 
-你的任务是根据提供的剧本内容，提取并整理所有对剧情有重要作用或有特殊视觉特征的关键道具。
+你的任务是根据提供的剧本内容，**全面提取剧本中明确提到、且会进入画面或推动情节的可见道具**。
 
 要求：
-1. 只提取对剧情发展有重要作用、或有特殊视觉特征的关键道具。
-2. 普通的生活用品（如普通的杯子、笔）如果无特殊剧情意义不需要提取。
-3. 若道具有明确归属者，**仅**写在 "description" 中（可用中文人名）；**禁止**在 "image_prompt" 中出现任何角色名、昵称、称谓或人际关系用语。
-4. **description 字段强制纯中文**：必须输出**纯中文、80-150字**的详细视觉外观描述 + 该道具在剧中的核心作用/归属/剧情功能。必须严格遵循本项目一贯的中文影视提示词「语音」：融入符合道具所属时代的真实物理尺度意识、材质工艺细节、磨损痕迹、柔和棚拍光质感、电影化构图暗示。严禁任何英文单词/句子，严禁只写剧情不写可用于画图的外观细节，严禁空泛或翻译腔。
-5. "image_prompt" 按项目语言撰写（**中文项目必须输出纯中文提示词**、英文项目用英文），按**影视资产库 / 电商主图级**单道具产品照标准：写清轮廓、材质、颜色、磨损与工艺细节、体量感。必须完整匹配项目中文影视提示词「语音」（融入真实尺度铁律、次要道具原则、电影化细节、纯色无缝背景、柔和均匀棚光）。
-6. "image_prompt" 中**必须**写明：**单一无缝纯色棚拍背景**（哑光、无渐变）、**画面中仅有该道具一个主体**、**柔和均匀的棚拍光**（便于看清细节，避免电影化强反差光），并**明确禁止**：人物、手、家具、地面/台面、室内外环境、散落杂物、其他道具、文字商标、包装（除非该道具本身就是包装）、烟尘粒子等任何多余元素。
-7. **image_prompt 禁止泄漏剧本特征**：不得出现剧本人名、地名、组织名、台词、情节梗专有称呼等；一律改写为**泛化视觉描述**（如用 "刻有细小铭文" 而非具体人名）。**唯一例外**：文字**实体印/刻在道具表面**且剧本明确要求还原该字样时，可保留该可见字样；否则用泛化描述。
-8. **image_prompt 严格不扩展**：只写剧本与你在本对象 "description" 中已交代、且**肉眼可见**的外观信息；禁止凭空增加配饰、品牌故事、时代煽情形容词、叙事性铺垫；宁可**短而准**，不要为凑字数扩写。必须自然融入「符合时代的真实物理比例」等项目铁律。
+1. **明显提到的道具都要提取**：凡剧本点名、且被使用/持有/打开/阅读/搜索/展示/推动情节的实物，均应提取（如电脑、手机、平板、钥匙、信件、纸条、照片、相册、武器、盒子、首饰、文件、地图等）。
+2. **查询/通讯设备强制提取**：若剧本写借电脑、用手机、看平板、用地图软件查询或导航等，该设备**必须**单独成条道具，不得当作「普通日用品」跳过。
+3. 仍可跳过纯布景家具（仅当背景、无人互动的椅子/墙面等，应归场景而非道具）；但只要被点名并发生互动（如「桌上的钢笔」「门上的纸条」），就必须提取。
+4. **一物一条**：不同物体分开提取；禁止把电脑与手机合并成含糊的「数字信息载体」。
+5. 若道具有明确归属者，**仅**写在 "description" 中（可用中文人名）；**禁止**在 "image_prompt" 中出现任何角色名、昵称、称谓或人际关系用语。
+6. **description 字段强制纯中文**：必须输出**纯中文、80-150字**的详细视觉外观描述 + 该道具在剧中的核心作用/归属/剧情功能。必须严格遵循本项目一贯的中文影视提示词「语音」：融入符合道具所属时代的真实物理尺度意识、材质工艺细节、磨损痕迹、柔和棚拍光质感、电影化构图暗示。严禁任何英文单词/句子，严禁只写剧情不写可用于画图的外观细节，严禁空泛或翻译腔。
+7. "image_prompt" 按项目语言撰写（**中文项目必须输出纯中文提示词**、英文项目用英文），按**影视资产库 / 电商主图级**单道具产品照标准：写清轮廓、材质、颜色、磨损与工艺细节、体量感。必须完整匹配项目中文影视提示词「语音」（融入真实尺度铁律、次要道具原则、电影化细节、纯色无缝背景、柔和均匀棚光）。
+8. "image_prompt" 中**必须**写明：**单一无缝纯色棚拍背景**（哑光、无渐变）、**画面中仅有该道具一个主体**、**柔和均匀的棚拍光**（便于看清细节，避免电影化强反差光），并**明确禁止**：人物、手、家具、地面/台面、室内外环境、散落杂物、其他道具、文字商标、包装（除非该道具本身就是包装）、烟尘粒子等任何多余元素。
+9. **image_prompt 禁止泄漏剧本特征**：不得出现剧本人名、地名、组织名、台词、情节梗专有称呼等；一律改写为**泛化视觉描述**。**唯一例外**：文字**实体印/刻在道具表面**且剧本明确要求还原该字样时，可保留该可见字样；否则用泛化描述。
+10. **image_prompt 严格不扩展**：只写剧本与你在本对象 "description" 中已交代、且**肉眼可见**的外观信息；禁止凭空增加配饰、品牌故事、时代煽情形容词、叙事性铺垫；宁可**短而准**，不要为凑字数扩写。必须自然融入「符合时代的真实物理比例」等项目铁律。
 - **风格要求**：${style}
 - **图片比例**：${imageRatio}
 
@@ -987,23 +1005,34 @@ Each object containing:
 - image_prompt: **纯中文**（中文项目）单道具主图提示词（纯色无缝背景、仅主体、无杂物无场景、柔和棚拍光；融入项目真实尺度铁律与次要道具语音；无剧本人名地名等；只写有依据的外观词，简练不扩写）`;
 }
 
-function getSceneExtractionPrompt(cfg, style) {
+function getSceneExtractionPrompt(cfg, style, existingLocations) {
   const styleText = (style || '').toString().trim();
   const s = styleText || styleTextForCfgLang(cfg);
   const imageRatio = cfg?.style?.default_image_ratio || '16:9';
+  const existingList = Array.isArray(existingLocations)
+    ? existingLocations.map((x) => String(x || '').trim()).filter(Boolean)
+    : [];
+  const existingBlockEn = existingList.length
+    ? `\n7. **Reuse existing drama locations (CRITICAL for visual consistency)**: The drama already has these scene names:\n${existingList.map((n) => `   - ${n}`).join('\n')}\n   When the script refers to the **same place** (e.g. "apartment" vs "apartment bedroom"), output the **exact existing location string** above. Do NOT invent a near-duplicate name.`
+    : '';
+  const existingBlockZh = existingList.length
+    ? `\n7. **复用本剧已有地点名（画面一致性铁律）**：本剧已有以下场景名称：\n${existingList.map((n) => `   - ${n}`).join('\n')}\n   若剧本描述的是**同一处空间**（例如「公寓」与「公寓卧室」），location **必须原样使用上方已有名称**，禁止另造近义短名/长名导致拆成两个场景资产。`
+    : '';
   if (isEnglish(cfg)) {
     return `[Task] Extract all unique scene backgrounds from the script
 
 [Requirements]
-1. Identify all different scenes (location + time combinations) in the script
-2. Generate detailed **English** image generation prompts for each scene
-3. **Important**: Scene descriptions must be **pure backgrounds** without any characters, people, or actions
-4. Prompt requirements:
+1. **Be comprehensive**: identify **every clearly mentioned distinct location** in the script (location + time), including transitional places (library, clinic, street, alley, factory, apartment, cafe, etc.). Do not skip a place just because it is brief.
+2. Split when the location clearly changes (e.g. library interior vs clinic interior vs abandoned factory vs outdoor street are separate scenes).
+3. Generate detailed **English** image generation prompts for each scene
+4. **Important**: Scene descriptions must be **pure backgrounds** without any characters, people, or actions
+5. Prompt requirements:
    - Must use **English**, no Chinese characters
    - Detailed description of scene, time, atmosphere, style
    - Must explicitly specify "no people, no characters, empty scene"
    - **Style Requirement**: ${s}
    - **Image Ratio**: ${imageRatio}
+${existingBlockEn}
 
 [Output Format]
 **CRITICAL: Return ONLY a valid JSON array. Do NOT include any markdown code blocks. Start directly with [ and end with ].**
@@ -1012,17 +1041,19 @@ Each element: location, time, prompt (English image generation prompt for pure b
   const _sceneLocked = `\n5. **风格要求**：${s}\n   - **图片比例**：${imageRatio}\n\n【输出格式】\n**重要：必须只返回纯JSON数组，不要包含任何markdown代码块。直接以 [ 开头，以 ] 结尾。**\n每个元素包含：location（地点）, time（时间）, prompt（完整的中文图片生成提示词，纯背景，明确说明无人物）。`;
   const _sceneOverride = _overrideCache['scene_extraction'];
   if (_sceneOverride) {
-    return _sceneOverride + _sceneLocked;
+    return _sceneOverride + _sceneLocked + (existingBlockZh ? `\n${existingBlockZh}` : '');
   }
   return `【任务】从剧本中提取所有唯一的场景背景
 
 【要求】
-1. 识别剧本中所有不同的场景（地点+时间组合）
-2. 为每个场景生成详细的**中文**图片生成提示词（Prompt）
-3. **重要**：场景描述必须是**纯背景**，不能包含人物、角色、动作等元素
-4. **重要**：prompt 字段必须为中文，不得使用英文（风格词如 realistic 可保留）
-5. **风格要求**：${s}
+1. **全面提取**：识别剧本中**所有明确提到的不同地点**（地点+时间组合），包括过渡性场所（图书馆、诊所、街道、小巷、工厂、公寓、咖啡馆等），不得因戏份短就漏提。
+2. 地点明显切换时必须拆分（如图书馆内景、诊所内景、废弃工厂、室外街道应分为不同场景）。
+3. 为每个场景生成详细的**中文**图片生成提示词（Prompt）
+4. **重要**：场景描述必须是**纯背景**，不能包含人物、角色、动作等元素
+5. **重要**：prompt 字段必须为中文，不得使用英文（风格词如 realistic 可保留）
+6. **风格要求**：${s}
    - **图片比例**：${imageRatio}
+${existingBlockZh}
 
 【输出格式】
 **重要：必须只返回纯JSON数组，不要包含任何markdown代码块。直接以 [ 开头，以 ] 结尾。**
@@ -1115,10 +1146,10 @@ function getDefaultPromptBody(key) {
       return '你是一个专业的角色分析师，擅长从剧本中提取和分析角色信息。\n\n**【语言要求】所有字段的值必须使用中文，禁止出现英文内容（role字段的值除外，固定为 main/supporting/minor）。**\n\n你的任务是根据提供的剧本内容，提取并整理剧中出现的所有有名字角色的设定。\n\n要求：\n1. 提取所有有名字的角色（忽略无名路人或背景角色）\n2. 对每个角色，提取以下信息（全部用中文填写）：\n   - name: 角色名字（中文）\n   - role: 角色类型，固定值之一：main / supporting / minor\n   - appearance: 外貌描述（中文，100-200字，包含性别、年龄、体型、面部特征、发型、服装风格等，不含任何场景或环境信息）\n   - description: 背景故事和角色关系（中文，50-100字）\n3. 主要角色外貌要详细，次要角色可以简化';
 
     case 'scene_extraction':
-      return '【任务】从剧本中提取所有唯一的场景背景\n\n【要求】\n1. 识别剧本中所有不同的场景（地点+时间组合）\n2. 为每个场景生成详细的**中文**图片生成提示词（Prompt）\n3. **重要**：场景描述必须是**纯背景**，不能包含人物、角色、动作等元素\n4. **重要**：prompt 字段必须为中文，不得使用英文（风格词如 realistic 可保留）';
+      return '【任务】从剧本中提取所有唯一的场景背景\n\n【要求】\n1. **全面提取**：识别剧本中**所有明确提到的不同地点**（地点+时间组合），包括过渡性场所（图书馆、诊所、街道、小巷、工厂、公寓、咖啡馆等），不得因戏份短就漏提。\n2. 地点明显切换时必须拆分（如图书馆内景、诊所内景、废弃工厂、室外街道应分为不同场景）。\n3. 为每个场景生成详细的**中文**图片生成提示词（Prompt）\n4. **重要**：场景描述必须是**纯背景**，不能包含人物、角色、动作等元素\n5. **重要**：prompt 字段必须为中文，不得使用英文（风格词如 realistic 可保留）';
 
     case 'prop_extraction':
-      return '你是一位专业的剧本道具分析师，擅长从剧本中提取具有视觉特征的关键道具。\n\n你的任务是根据提供的剧本内容，提取并整理所有对剧情有重要作用或有特殊视觉特征的关键道具。\n\n要求：\n1. 只提取对剧情发展有重要作用、或有特殊视觉特征的关键道具。\n2. 普通的生活用品（如普通的杯子、笔）如果无特殊剧情意义不需要提取。\n3. 归属者、剧中人名等**只**写在 "description"，**不要**写进 "image_prompt"。\n4. "image_prompt" 按项目语言撰写（中文项目优先用中文），按「产品主图 / 资产白模照」标准撰写：只描述该道具本体（造型、材质、颜色、工艺与磨损），并强制纯色无缝棚拍背景、无场景无杂物。匹配项目中文提示词语音（融入真实尺度、次要元素原则）。\n5. "image_prompt" 须明确排除人物、手、家具、台面、其他物体与环境叙事元素。\n6. "image_prompt" **禁止**出现剧本人名、地名、组织名、台词、剧情专有词；用泛化视觉词替代，且**禁止无依据扩写**（不凭空加配饰、品牌叙事、煽情形容词）。';
+      return '你是一位专业的剧本道具分析师，擅长从剧本中提取角色会使用、持有、查看或作为重要出镜物体的道具。\n\n你的任务是根据提供的剧本内容，**全面提取剧本中明确提到、且会进入画面或推动情节的可见道具**。\n\n要求：\n1. **明显提到的道具都要提取**：凡剧本点名、且被使用/持有/打开/阅读/搜索/展示/推动情节的实物，均应提取（如电脑、手机、平板、钥匙、信件、纸条、照片、相册、武器、盒子、首饰、文件、地图等）。\n2. **查询/通讯设备强制提取**：若剧本写借电脑、用手机、看平板、用地图软件查询或导航等，该设备**必须**单独成条道具，不得当作「普通日用品」跳过。\n3. 仍可跳过纯布景家具（仅当背景、无人互动的椅子/墙面等，应归场景而非道具）；但只要被点名并发生互动（如「桌上的钢笔」「门上的纸条」），就必须提取。\n4. **一物一条**：不同物体分开提取；禁止把电脑与手机合并成含糊的「数字信息载体」。\n5. 归属者、剧中人名等**只**写在 "description"，**不要**写进 "image_prompt"。\n6. "image_prompt" 按项目语言撰写（中文项目优先用中文），按「产品主图 / 资产白模照」标准撰写：只描述该道具本体（造型、材质、颜色、工艺与磨损），并强制纯色无缝棚拍背景、无场景无杂物。匹配项目中文提示词语音（融入真实尺度、次要元素原则）。\n7. "image_prompt" 须明确排除人物、手、家具、台面、其他物体与环境叙事元素。\n8. "image_prompt" **禁止**出现剧本人名、地名、组织名、台词、剧情专有词；用泛化视觉词替代，且**禁止无依据扩写**（不凭空加配饰、品牌叙事、煽情形容词）。';
 
     case 'storyboard_user_suffix':
       return '【分镜要素】每个分镜聚焦一个叙事节拍（可包含内部多切镜序列），描述要详尽具体：\n1. **镜头标题(title)**：用3-5个字概括该镜头的核心内容或情绪\n2. **时间**：[清晨/午后/深夜/具体时分+详细光线描述]\n3. **地点**：[场景完整描述+空间布局+环境细节]\n4. **镜头设计**：**景别(shot_type)**、**镜头角度(angle)**、**运镜方式(movement)**\n5. **人物行为**：**详细动作描述**\n6. **对话/独白**：提取该镜头中的完整对话或独白内容（如无对话则为空字符串）\n7. **画面结果**：动作的即时后果+视觉细节+氛围变化\n8. **环境氛围**：光线质感+色调+声音环境+整体氛围\n9. **声音设计**：bgm_prompt 必须填空字符串""或"无背景音乐/禁BGM"；不要为单个片段设计背景音乐。sound_effect 只写现场环境声、动作音效、对白/旁白音色与口型同步要求\n10. **观众情绪**：[情绪类型]（[强度：↑↑↑/↑↑/↑/→/↓]）\n\n**dialogue字段说明**：角色名："台词内容"。无对话时填空字符串""。\n**scene_id**：从上方场景列表中选择最匹配的背景ID，如无合适背景则填null。\n**duration时长**：综合对话、动作、情绪估算每镜时长（具体目标秒数由系统自动注入）。\n**声音一致性**：所有镜头默认无BGM；若有对白/旁白，sound_effect 须补充音色与情绪强度。';
@@ -1171,27 +1202,29 @@ function getScenePolishPromptSingle(cfg) {
   return `# 场景单图参考图生成器
 
 ## 你的身份
-你是专业的影视美术设计师，负责将场景描述转换为AI绘图标准单图场景参考图提示词（**非四宫格**）。
+你是专业的影视美术设计师，负责将场景描述转换为AI绘图标准**空场景**单图参考图提示词（**非四宫格**）。
 
 ## 核心规则
 
 ### 提取与统一
 - **单张连续画面**：生成一段完整、统一的场景描述，用于绘制**一张**图片
 - **完整展示**：必须包含场景的全貌、主要建筑结构、地面材质、关键陈设、光线/时段、氛围
-- **禁止出现**：角色、人物剪影、文字标注、水印、四宫格/分格/第1格/第2格等字样
-- **真实可信**：建筑风格、材质、植被必须符合场景所属时代和地域${style ? '\n- **画风风格**：' + style : ''}
+- **空场景铁律（最高优先级）**：画面中**绝对禁止**出现人物、角色、路人、剪影、人体局部、人影；只写空间与陈设
+- **禁止出现**：四宫格/分格/第1格/第2格等字样、文字标注、水印
+- **忠于输入**：只展开地点/时段/场景描述中已有的空间信息，**禁止**凭空加入剧情动作或人物
+- **真实可信**：建筑风格、材质、植被必须符合场景所属时代和地域${style ? '\n- **画风风格**（仅作用于空场景环境渲染，忽略画风中的人物词）：' + style : ''}
 
 ### 单图内容设计原则
 - 用最宽/最合适的视角一次性展示整体空间关系，不遗漏边界
-- 清晰呈现人物最常活动的区域（对话区/行动区）
+- 清晰呈现主要活动区的**空间与陈设**（地面、家具落位、通道），用空镜表达，**不要写人**
 - 突出最具场景辨识度的标志性细节
 - 强调光线、材质、氛围的统一性
 
 ### 避免与生图侧重复
-- **不要**写四宫格顺序、无人物、无文字水印等与版面/负面清单相关的长段说明（生图 API 会统一注入）；只写场景可视信息与完整画面内容
+- **不要**写四宫格顺序、版面长段说明；但**必须**在输出中自然写明「无人空镜 / 无人物 / empty location」类约束（否则生图易加人）
 
 ## 输出要求
-直接输出一段连贯的场景描述文字，不要分段落标题，不要出现「第X格」字样。`;
+直接输出一段连贯的场景描述文字，不要分段落标题，不要出现「第X格」字样；全文保持无人空场景。`;
 
 }
 
@@ -1213,20 +1246,20 @@ function getScenePolishPrompt(cfg) {
 - **真实可信**：建筑风格、材质、植被必须符合场景所属时代和地域${style ? '\n- **画风风格**：' + style : ''}
 
 ### 四格内容设计原则
-- 第1格用最宽视角展示整体空间关系，不遗漏边界
-- 第2格聚焦人物最常活动的区域（对话区/行动区），中景视角
+- 第1格用最宽视角展示整体空间关系，不遗漏边界（空镜）
+- 第2格聚焦主要活动区的空间与陈设（地面、家具、通道），中景，**仍为无人空镜**
 - 第3格选择最具场景辨识度的标志性细节进行特写
 - 第4格使用与第1格不同的机位角度（如微俯/高俯/仰视/斜角），展示同一场景的空间纵深与结构关系
 
 ### 避免与生图侧重复
-- **不要**写四宫格顺序、无人物、无文字水印、四格建筑一致等与版面/负面清单相关的长段说明（生图 API 会统一注入）；只写场景可视信息与各格差异化镜头内容
+- **不要**写四宫格顺序、版面长段说明；但各格描述须保持无人空场景，可自然写「无人物」
 
 ## 四格固定顺序
 
 | 位置 | 视图类型 | 构图与功能 |
 |------|---------|-----------|
 | 第1格 | 全景建立镜头 | 最宽视角，展示完整空间格局、建筑边界、环境背景，无人物 |
-| 第2格 | 主体焦点区域 | 主要活动区域中景，清晰展示人物站位空间、地面细节、主要陈设 |
+| 第2格 | 主体焦点区域 | 主要活动区域中景，清晰展示地面细节、主要陈设与站位空间（无人） |
 | 第3格 | 环境特征细节 | 场景最具辨识度的标志性元素特写（建筑纹理、招牌、装饰品等） |
 | 第4格 | 角度变体 | 相同场景、相同光线/时段，但不同机位角度（如微俯/高俯/仰视/斜角），展示空间纵深 |
 
@@ -1253,7 +1286,7 @@ function getScenePolishPrompt(cfg) {
 无人物，无道具遮挡，展示完整空间边界
 
 【第2格-主体焦点区域】
-活动核心区、地面与陈设；中景、光线落点；功能（对话区/打斗区等，勿复述「无人物」等禁令）
+活动核心区的地面与陈设；中景、光线落点；功能分区（对话区/行动区等空间用途）；明确无人空镜
 
 【第3格-环境特征细节】
 标志性元素的材质/纹理/色彩；特写与景深；该元素的指示意义
@@ -1268,9 +1301,9 @@ function getScenePolishPrompt(cfg) {
 function getSceneGenerateImagePrompt() {
   return `Scene environment reference sheet — image only, no text reply.
 
-ONE image: 2×2 grid. TL=establishing wide (full space, boundaries, context). TR=main activity zone medium shot (floor, key furnishings). BL=signature environmental detail close-up. BR=alternate angle view (same place, same lighting/time/weather, different camera angle such as elevated/low/high/oblique).
+ONE image: 2×2 grid. TL=establishing wide (full space, boundaries, context). TR=main activity zone medium shot (floor, key furnishings, empty staging). BL=signature environmental detail close-up. BR=alternate angle view (same place, same lighting/time/weather, different camera angle such as elevated/low/high/oblique).
 
-No people: no characters, silhouettes, human shadows. No text/labels/watermarks/location lettering. Same architecture, terrain, ground materials, and key props across all panels; same light, time, and weather; only focal length and camera angle may change. Unified palette and depth; high detail. Follow ART STYLE / 画风 block at the start of the user message if present.`;
+HARD RULE all panels: empty location only — no people, no characters, silhouettes, human shadows, faces, hands, or figures. No text/labels/watermarks/location lettering. Same architecture, terrain, ground materials, and key props across all panels; same light, time, and weather; only focal length and camera angle may change. Unified palette and depth; high detail. Apply ART STYLE only to environment; ignore character/costume words in style block.`;
 }
 
 /**
@@ -1280,9 +1313,10 @@ function getSceneGenerateSingleImagePrompt() {
   return `Scene environment reference — image only, no text reply.
 
 ONE single continuous image (no grid, no split panels, no collage).
-Show the complete scene in one unified view: wide establishing shot capturing the full space, key architectural features, lighting, atmosphere, and environmental details.
-No people: no characters, silhouettes, human shadows. No text/labels/watermarks/location lettering.
-Follow ART STYLE / 画风 block at the start of the user message if present.`;
+Show the complete EMPTY scene in one unified wide establishing view: full space, key architecture, furnishings, lighting, atmosphere.
+HARD RULE: empty location only — zero people, zero characters, zero silhouettes, zero human shadows, zero faces/hands/figures.
+No text/labels/watermarks/location lettering.
+Apply ART STYLE only to environment materials and lighting; ignore any character/costume words in the style block.`;
 }
 
 /**
@@ -1494,7 +1528,7 @@ function getUniversalOmniSegmentPrompt() {
   const specZh = getUniversalOmniMultiBeatFormatSpec({ language: 'zh' });
   return `You write the main prompt for multi-reference video (e.g. Kling Omni-Video, Volcengine Seedance omnivideo) "片段描述" in Chinese.
 
-The USER message includes MULTI_BEAT_OUTPUT, TOTAL_CLIP_SECONDS, SHOT_PACING_AND_POSITION, EPISODE_SCRIPT, NEIGHBOR_* detail, IMAGE_SLOT_MAP, LINE3_REQUIRED, STYLE_HINT, and storyboard fields.
+The USER message includes MULTI_BEAT_OUTPUT, TOTAL_CLIP_SECONDS, SHOT_PACING_AND_POSITION, EPISODE_SCRIPT (full episode), NARRATION_LOCAL_CONTEXT (current narration ±~100 chars), NEIGHBOR_* detail, IMAGE_SLOT_MAP, LINE3_REQUIRED, STYLE_HINT, and storyboard fields.
 
 FORBIDDEN output styles: SoulLens single-line (主体:/叙事动态:/[禁BGM]); @人物N as image tokens. Use ONLY the multi-beat block below — same as「全能分镜模式」batch storyboard output.
 ${specZh}
@@ -1512,24 +1546,38 @@ Line 2 — exactly (M must match count of 分镜k lines):
 Line 3 — copy LINE3_REQUIRED from the USER message verbatim.
 
 Lines 4 through (3+M) — for each k, one full line:
-分镜k： Tk秒: <Rich cinematic Chinese prose for this slice only: camera motion chain (≥2 moves when Tk≥3s), @图片N bindings per IMAGE_SLOT_MAP, light, emotion. Dialogue: …说："verbatim" or …："verbatim". No speech: 无对白。 Narration: 旁白（画面无声）："verbatim". Avoid static snapshot captions.>
+分镜k： Tk秒: <Rich cinematic Chinese prose for this slice only: camera motion chain (≥2 moves when Tk≥3s), @图片N bindings per IMAGE_SLOT_MAP, light, emotion. Dialogue: …说："verbatim" or …："verbatim". No speech: 人物闭口无口型，无对白。 **FORBIDDEN in beat body**: 旁白（画面无声）："…" or pasting NARRATION verbatim — VO is post IndexTTS only; show NARRATION meaning visually. Album montage: use 【运镜】→【定格1·scene】→【定格2·…】 with @图片N per panel.>
 
 DIALOGUE — CRITICAL (when USER message contains DIALOGUE_VERBATIM):
 - Every line listed under「必须逐字出现在输出中的台词」MUST appear in some子分镜 line inside 「」, character-for-character (only spacing around @图片N may vary).
 - NEVER replace dialogue with summaries like「他选择了一个亿」「说完台词」without the actual quoted words.
 - Distribute lines across beats by story order; longer Tk beats that contain speech must include the full quoted line(s), not paraphrase.
-- If DIALOGUE / DESCRIPTION【对话】/ VIDEO_PROMPT_对话段 / EPISODE_SCRIPT imply spoken lines, include them verbatim even when CURRENT_UNIVERSAL_SEGMENT omitted them.
+- If DIALOGUE / DESCRIPTION【对话】/ VIDEO_PROMPT_对话段 / EPISODE_SCRIPT / NARRATION_LOCAL_CONTEXT imply spoken lines, include them verbatim even when CURRENT_UNIVERSAL_SEGMENT omitted them.
 - Silent shots: state silence explicitly; do not invent dialogue.
 
 Reference images — CRITICAL (applies to every子分镜 line’s prose):
 - Use ONLY IMAGE_SLOT_MAP tokens @图片1, @图片2, … (Arabic digits).
-- Follow CHARACTER_IMAGE_BINDING. When @图片1 is 场景, never put character face/body/costume on @图片1; characters start at @图片2 as mapped.
+- Follow CHARACTER_IMAGE_BINDING and SUBJECT_IDENTITY_LOCK. When @图片1 is 场景, never put character face/body/costume on @图片1; characters start at @图片2 as mapped.
+- PRIMARY_SUBJECT lock: the beat protagonist is PRIMARY_SUBJECT's @图片N. Do NOT attribute that character's actions, expressions, blocking, or dialogue to another slot. Do NOT put another character's performance onto the primary slot.
+- DIALOGUE_SPEAKER_MAP: each spoken line MUST be prefixed with the mapped speaker @图片N (e.g. @图片3 说："…"). Never assign 甲's line to 乙's image tag.
+- **Asset lock (anti-hallucination)**: NEVER invent people, faces, crowds, or locations outside IMAGE_SLOT_MAP / ORDERED_CHARACTER_NAMES / ORDERED_PROP_NAMES. Do NOT pull neighbor-shot or episode-script characters into this clip as on-screen bodies unless they already have a mapped @图片N (mention ≠ appear). Do NOT write unnamed extras (路人/群众/侍卫) unless SCRIPT+FIELDS explicitly require them AND a slot exists.
+- **Local narration window**: design this shot's visuals primarily from NARRATION + NARRATION_LOCAL_CONTEXT【当前镜旁白】; use EPISODE_SCRIPT for continuity/tone only — do not film later events early; when VO quotes a forum/post/screen text, prefer device/UI POV over inventing those named people on set.
+${require('./universalAgnesTimelineContract').MENTION_NE_APPEAR_TEMPLATE_EN}
+- **Second person 你/您**: when NARRATION uses 你/您, it means PRIMARY_SUBJECT only — bind every visible body to PRIMARY_SUBJECT's @图片N; no anonymous silhouettes or different faces.
+- **Multi-place same person**: 「你在A…你在B…你在C…」= ONE person (PRIMARY_SUBJECT from SUBJECT_IDENTITY_LOCK), not three strangers. Every panel/beat must use the SAME face on the mapped @图片N.
+${require('./universalAgnesTimelineContract').MULTI_PLACE_ACTIVITY_TEMPLATE_EN}
+${require('./universalAgnesTimelineContract').GEN_TIME_TIMELINE_CONTRACT_EN}
+- **No burned-in captions**: NEVER write 「字幕浮现」「滚动字幕」「画面下方字幕」「烧录字幕」. Subtitles are burned in post; on-screen device text may be described as UI/info bars, not film caption overlays.
 - Spacing: ASCII space after each @图片N before following Chinese/Latin.
 - No @姓名 as image token; no markdown.
+- Identity conservation across beats: when M>1, each「分镜k」may change camera/focus but MUST keep the same name↔@图片N mapping; no mid-clip identity swap.
 
-Pacing & M selection (professional):
-- Read SHOT_PACING_AND_POSITION, EPISODE_SCRIPT, NEIGHBOR_* , STORYBOARD FIELDS (movement, shot_type, dialogue density). Increase M for rapid reversals / climax / montage-like pressure; use M=1 for a single sustained long-take feel when the script implies it.
+Pacing & M selection (professional — NARRATION/ACTION first):
+- Choose M from **NARRATION sentence/clause count and ACTION steps**, plus SHOT_PACING_AND_POSITION / movement / climax. **FORBIDDEN**: mechanically always M=3 or copying M_HEURISTIC when content is a single short beat.
+- Short single-sentence VO or one continuous action → prefer M=1–2; multi-sentence VO → one beat per semantic unit (merge if seconds are tight). Do **not** invent empty establishing beats to pad to three.
+- **AV sync**: within each「分镜k」, visible motion must match the same semantic moment as the corresponding NARRATION excerpt (from STORYBOARD_FIELDS) — keep picture and VO in sync. Split narration **meaning** across beats as visual action; never dump narration text into beat lines; never dump the whole VO on the last line while earlier lines are empty camera moves.
 - Never change the **total** seconds: T1+…+TM must equal TOTAL_CLIP_SECONDS.
+- **Narration-weighted beat seconds**: allocate Tk by NARRATION readable-char weights (same as IndexTTS/SRT), NOT equal splits (9s ≠ 3+3+3 by default). Place each visual action in the beat whose time window covers when that narration clause is spoken. Example: 9s = 3+2+4, "you push the door" at ~4.5s → belongs in beat2 (3–5s), not beat3.
 
 Scene reference layout — CRITICAL (when SCENE_REFERENCE_LAYOUT applies):
 - Reference may be multi-panel; do NOT make the final video mimic grids. Each子分镜 line’s prose should reinforce: one continuous full frame, no split-screen collage in the delivered clip.
@@ -1552,14 +1600,14 @@ OUTPUT FORMAT — labeled clauses joined by 「。」 (omit empty labels; if nar
 
 FULL-NARRATION RULES:
 1. **Narration-driven visuals**: design concrete action, environment, and emotional payoff that match NARRATION verbatim; viewers must "see what the VO describes".
+1b. **AV sync**: 「动作：」must show the same event as the VO at the same time — keep picture and narration in sync (not ahead, not waiting for VO to finish).
 2. **Narration verbatim**: when NARRATION is non-empty, copy it exactly after 「解说旁白：」.
 3. **Silent clip**: motion serves off-screen VO; no lip sync; BGM/SFX = ambience only.
-4. **Title shot (empty narration)**: shot 1 = establishing/title mood; omit 「解说旁白：」 clause.
-5. **Dialogue field**: keep in 「对话：」 if present, but action still treats speech as silent (no mouth movement).
-6. **Fact conservation**: do not change duration seconds, =VideoRatio, angle English parentheticals, or invent plot.
-6b. **Asset lock (polish/generate wording only):** do NOT change the shot's bound scene, character roster, or props; do not add/remove/replace people, places, or props vs storyboard fields.
-7. **Dynamic video language**: camera motion and pacing must fit duration seconds.
-8. **Content moderation**: soften explicit romance/violence/harassment while keeping causality.
+4. **Dialogue field**: keep in 「对话：」 if present, but action still treats speech as silent (no mouth movement).
+5. **Fact conservation**: do not change duration seconds, =VideoRatio, angle English parentheticals, or invent plot.
+5b. **Asset lock (polish/generate wording only):** do NOT change the shot's bound scene, character roster, or props; do not add/remove/replace people, places, or props vs storyboard fields.
+6. **Dynamic video language**: camera motion and pacing must fit duration seconds.
+7. **Content moderation**: soften explicit romance/violence/harassment while keeping causality.
 9. Weave VISUAL_STYLE into 「风格：」 naturally.`;
   }
 
@@ -1571,15 +1619,15 @@ FULL-NARRATION RULES:
 
 【全文解说模式专用规则】
 1. **旁白驱动画面**：根据 NARRATION 原文设计与之匹配的**具体可视动作、环境细节与情绪落幅**；画面须让观众「看见旁白在讲什么」，禁止与旁白无关的空镜或无意义走动。
+1.5. **声画同步**：「动作：」须写出与旁白语义对应的可见事件，并与解说**同一时段对齐**（不要求画面提前，也不滞后）；禁止只写静态站位等旁白念完、或画面与旁白错位。
 2. **解说旁白逐字保留**：STORYBOARD_FIELDS 中 narration 非空时，「解说旁白：」后须**逐字照抄**原文，禁止改写、缩写或概括。
 3. **无声成片约束**：动作/结果/运镜须服务于「画外解说 + 画面无人说话」；人物闭口、无口型；「配乐：」「音效：」仅写环境声与氛围音乐侧写，不写对白/旁白配音要求。
-4. **片头镜（narration 为空）**：第 1 镜为标题/定场氛围镜，动作为慢运镜或象征性画面，**省略**「解说旁白：」分句。
-5. **对话字段**：若有 dialogue，保留在「对话：」分句（逐字），但动作描述仍按无声处理——人物不张口说话。
-6. **事实守恒**：不得删改场景、动作要点、结果、景别、镜头角度（含括号内完整英文技术描述）、运镜、**时长：Xs**、**=VideoRatio:**；禁止编造剧本与字段未写的情节。
-6.5. **资产守恒（只润色/生成文案）**：不得改变本镜绑定的场景、角色名单、道具；不得增删或替换出场人物/地点/道具。
-7. **动态视频语言**：运镜、切镜、节奏须与本镜 duration 秒数匹配；首帧参考图已锁定人物/场景外观，文案负责动效与节奏。
-8. **内容合规**：弱化露骨婚恋/性暗示/暴力/骚扰等敏感表述，保留剧情因果；USER_INSTRUCTION 优先。
-9. 自然融入 VISUAL_STYLE 至「风格：」分句；保留角色姓名。`;
+4. **对话字段**：若有 dialogue，保留在「对话：」分句（逐字），但动作描述仍按无声处理——人物不张口说话。
+5. **事实守恒**：不得删改场景、动作要点、结果、景别、镜头角度（含括号内完整英文技术描述）、运镜、**时长：Xs**、**=VideoRatio:**；禁止编造剧本与字段未写的情节。
+5.5. **资产守恒（只润色/生成文案）**：不得改变本镜绑定的场景、角色名单、道具；不得增删或替换出场人物/地点/道具。
+6. **动态视频语言**：运镜、切镜、节奏须与本镜 duration 秒数匹配；首帧参考图已锁定人物/场景外观，文案负责动效与节奏。
+7. **内容合规**：弱化露骨婚恋/性暗示/暴力/骚扰等敏感表述，保留剧情因果；USER_INSTRUCTION 优先。
+8. 自然融入 VISUAL_STYLE 至「风格：」分句；保留角色姓名。`;
 }
 
 /**
@@ -1597,12 +1645,12 @@ function getClassicVideoPromptSystemPrompt(cfg, opts = {}) {
       return `${base}
 
 GENERATE MODE:
-From STORYBOARD_FIELDS, neighbors, FULL_EPISODE_SCRIPT and AUTO_COMPOSED_VIDEO_PROMPT, **generate** a complete video_prompt from scratch. AUTO_COMPOSED shows label order only — expand action and camera from narration meaningfully.`;
+From STORYBOARD_FIELDS, neighbors, FULL_EPISODE_SCRIPT, NARRATION_LOCAL_CONTEXT and AUTO_COMPOSED_VIDEO_PROMPT, **generate** a complete video_prompt from scratch. AUTO_COMPOSED shows label order only — expand action and camera from narration meaningfully.`;
     }
     return `${base}
 
 【生成模式】
-根据 STORYBOARD_FIELDS、邻镜、FULL_EPISODE_SCRIPT 与 AUTO_COMPOSED_VIDEO_PROMPT，**从零生成**完整 video_prompt。AUTO_COMPOSED 仅作标签顺序与字段底线参考，须据旁白语义合理扩展动作、运镜与氛围，不得机械照抄拼装句。`;
+根据 STORYBOARD_FIELDS、邻镜、FULL_EPISODE_SCRIPT、NARRATION_LOCAL_CONTEXT（当前旁白±约100字）与 AUTO_COMPOSED_VIDEO_PROMPT，**从零生成**完整 video_prompt。AUTO_COMPOSED 仅作标签顺序与字段底线参考，须据旁白语义合理扩展动作、运镜与氛围，不得机械照抄拼装句。`;
   }
   if (isEnglish(cfg)) {
     return `${base}
@@ -1659,13 +1707,16 @@ HARD RULES:
 function getUniversalOmniPolishPrompt() {
   return `${getUniversalOmniSegmentPrompt()}
 
-ADDITIONAL_POLISH_MODE (short drama enhancement — still MUST obey MULTI_BEAT_OUTPUT, TOTAL_CLIP_SECONDS sum, IMAGE_SLOT_MAP, LINE3_REQUIRED above):
-- You receive FULL_EPISODE_SCRIPT plus NEIGHBOR blocks and structured fields. Use them only for **continuity** and **information completeness**; do NOT invent plot absent from SCRIPT + STORYBOARD FIELDS + CURRENT omni draft.
+ADDITIONAL_POLISH_MODE (short drama enhancement — still MUST obey MULTI_BEAT_OUTPUT, TOTAL_CLIP_SECONDS sum, IMAGE_SLOT_MAP, SUBJECT_IDENTITY_LOCK, LINE3_REQUIRED above):
+- You receive FULL_EPISODE_SCRIPT plus NARRATION_LOCAL_CONTEXT (current narration ±~100 chars) plus NEIGHBOR blocks and structured fields. Use the full script for **continuity**; design this shot's visuals primarily from NARRATION_LOCAL_CONTEXT; do NOT invent plot absent from SCRIPT + STORYBOARD FIELDS + CURRENT omni draft.
 - **Information parity**: every script-relevant fact must appear across the子分镜 lines (lines 4…3+M), without losing information when expanding; if the draft was an old SoulLens single-line, **rewrite** into this multi-beat block; keep the same facts and total seconds.
-- **Re-polish / anti-stagnation**: USER may click polish repeatedly on the same draft. Each response MUST deliver **substantially rephrased** Chinese on lines 1, 2 (if M changes), and all子分镜 body lines — same facts, same total seconds, same @图片 bindings, but **not** a copy-paste of CURRENT_OMNI_DRAFT except line 3 which must stay **character-identical** to LINE3_REQUIRED. If you would otherwise output nearly identical prose, deliberately vary verbs, clause order, and camera wording while preserving meaning.
+- **Re-polish / anti-stagnation**: USER may click polish repeatedly on the same draft. Each response MUST deliver **substantially rephrased** Chinese on lines 1, 2 (if M changes), and all子分镜 body lines — same facts, same total seconds, **same name↔@图片N bindings and same speaker ownership**, but **not** a copy-paste of CURRENT_OMNI_DRAFT except line 3 which must stay **character-identical** to LINE3_REQUIRED. If you would otherwise output nearly identical prose, deliberately vary verbs, clause order, and camera wording while preserving meaning. **FORBIDDEN while rephrasing**: swapping protagonists, swapping who speaks which line, or moving 甲's action onto 乙's @图片N.
+- **Subject lock**: If CURRENT_OMNI_DRAFT already mistags a character, **correct** it to match SUBJECT_IDENTITY_LOCK / DIALOGUE_SPEAKER_MAP / PRIMARY_SUBJECT (prefer lock table over a wrong draft).
 - **Short drama rhythm**: vertical-drama density — stakes, micro-expressions, blocking, camera motion; distribute across beats when M>1.
-- **Inner monologue & dialogue**: brief 心想 / 「」 only when supported by DIALOGUE / NARRATION / SCRIPT / draft. When DIALOGUE_VERBATIM is present, **every** listed line must remain verbatim in 「」 after polish; rephrase motion/camera text freely but **not** quoted dialogue.
-- **Neighbors**: align entry/exit with NEIGHBOR_* ; no redundant retelling of the previous shot.
+- **M & narration re-check on polish**: if CURRENT_OMNI_DRAFT dumps narration inline or uses vague panel labels without @图片N, rewrite using 【运镜】→【定格】 structure for album shots, or visual-only prose otherwise; strip 旁白（画面无声） quotes.
+- **AV sync on polish**: each beat body must keep visible action aligned with NARRATION semantics in the same slice; fix drafts where picture and VO are out of sync; **remove inline narration quotes** from beat bodies.
+- **Inner monologue & dialogue**: brief 心想 / 「」 only when supported by DIALOGUE / NARRATION / SCRIPT / draft. When DIALOGUE_VERBATIM is present, **every** listed line must remain verbatim in 「」 after polish; rephrase motion/camera text freely but **not** quoted dialogue or its speaker↔@图片N mapping.
+- **Neighbors**: align entry/exit with NEIGHBOR_* ; no redundant retelling of the previous shot; do NOT pull neighbor-shot characters into this clip unless they are in IMAGE_SLOT_MAP / SUBJECT_IDENTITY_LOCK.
 - Language: Chinese for子分镜 prose; lines 1–3 format as in base prompt; M must match line 2 and match the count of「分镜k」lines.`;
 }
 
@@ -1779,8 +1830,9 @@ Rules:
  * 将道具描述转换为精准的 AI 绘图提示词（单图，突出道具本体）
  */
 function getPropPolishPrompt(cfg) {
-  const styleZh = styleTextZhForPolish(cfg);
-  const styleEn = styleTextEnForImage(cfg);
+  const { sanitizeStyleForProp } = require('../utils/assetImageStyle');
+  const styleZh = sanitizeStyleForProp(styleTextZhForPolish(cfg));
+  const styleEn = sanitizeStyleForProp(styleTextEnForImage(cfg));
   if (isEnglish(cfg)) {
     return `# 道具图片提示词生成器
 
@@ -1804,10 +1856,11 @@ function getPropPolishPrompt(cfg) {
 
 ### 硬性排除
 - 禁止：人物、手、身体任何部分、文字水印、商标（除非剧情指定且为道具本体一部分）、叙事性场景词、**任何专有名词式剧本标签**。${styleZh ? '\n- **画风风格**（仅作用于渲染质感，不改变「单道具 + 纯色底」版式）：' + styleZh : ''}
+- **Reflective surface rule**: if the prop is a mirror, glass, screen, or water — reflection must be empty (solid color / blank). **Never** reflect a person, face, costume character, or silhouette.
 
 ### 输出格式
 直接输出**一段**英文 prompt（约 **45–90 词**，能更短则更短），不要解释、标题、列表或引号。
-**必须**在同一段内显式包含短语或等价表达：**single prop only**, **seamless solid-color studio backdrop**, **no extra objects**, **no people**, **no hands**, **no environment**；末尾再接画风：${styleEn ? styleEn + ' render style' : 'photorealistic product hero shot'}`;
+**必须**在同一段内显式包含短语或等价表达：**single prop only**, **seamless solid-color studio backdrop**, **no extra objects**, **no people**, **no hands**, **no environment**；镜子类须含 **empty reflection**；末尾再接画风：${styleEn ? styleEn + ' render style' : 'photorealistic product hero shot'}`;
   }
 
   // 中文版：根据项目「语音」（专业影视中文提示词风格 + 真实尺度铁律 + 次要元素原则）输出中文图生提示词
@@ -1833,11 +1886,12 @@ function getPropPolishPrompt(cfg) {
 - **光**：柔和均匀的棚拍光，仅允许**极轻**的接触阴影以锚定体量，**禁止**戏剧轮廓光、强逆光、体积光、镜头眩光、色散、电影级低 key 高反差。
 
 ### 硬性排除
-- 禁止：人物、手、身体任何部分、文字水印、商标（除非剧情指定且为道具本体一部分）、叙事性场景词、**任何专有名词式剧本标签**。${styleZh ? '\n- **画风风格**（仅作用于渲染质感，不改变「单道具 + 纯色底」版式）：' + styleZh : ''}
+- **硬性排除**：禁止：人物、手、身体任何部分、文字水印、商标（除非剧情指定且为道具本体一部分）、叙事性场景词、**任何专有名词式剧本标签**。${styleZh ? '\n- **画风风格**（仅作用于渲染质感，不改变「单道具 + 纯色底」版式）：' + styleZh : ''}
+- **镜面/反光面铁律**：若道具是镜子、玻璃、屏幕、水面等可反射物体，**镜中/反光中必须为空**（纯色或空白倒影），**严禁**反射人物、人脸、古装角色或任何人体剪影。
 
 ### 输出格式
 直接输出**一段**中文提示词（约 **45–90 字**，能更短则更短），不要解释、标题、列表或引号。
-**必须**在同一段内自然包含以下关键约束的中文表述（或等价流畅说法）：单一主体、纯色无缝棚拍背景、无多余物体、无人物、无手、无环境；并融入真实尺度与次要元素要求；末尾再接画风：${styleZh ? styleZh + ' 渲染质感' : '写实产品主图质感'}`;
+**必须**在同一段内自然包含以下关键约束的中文表述（或等价流畅说法）：单一主体、纯色无缝棚拍背景、无多余物体、无人物、无手、无环境；若为镜子/玻璃须写「镜面无人物反射」；并融入真实尺度与次要元素要求；末尾再接画风：${styleZh ? styleZh + ' 渲染质感' : '写实产品主图质感'}`;
 }
 
 
@@ -1895,11 +1949,11 @@ Reuse STORYBOARD_FIELDS / AUTO_COMPOSED / neighbors / ASSETS from the user messa
 按字段存在情况输出标签分句（narration 非空时「解说旁白：」必填）：
 场景：…。镜头标题：…。动作：…。对话：…。解说旁白：…。结果：…。景别：…。镜头角度：…。运镜：…。氛围：…。情绪：…。情绪强度：…。配乐：…。音效：…。时长：Xs。风格：…。=VideoRatio: 16:9
 1. 旁白驱动画面；解说旁白须**逐字照抄** NARRATION（非空时）
+1b. **声画同步**：动作须贴合旁白语义，并与解说同一时段对齐（不要求画面提前）
 2. 成片画面无声、人物闭口；配乐/音效仅环境侧写
-3. 片头镜（旁白为空）省略「解说旁白：」
-4. 事实守恒：不改 duration 秒数与 =VideoRatio；不编造情节
-5. 允许动态运镜语言（仅 video_prompt）
-6. 自然融入 VISUAL_STYLE；保留角色姓名
+3. 事实守恒：不改 duration 秒数与 =VideoRatio；不编造情节
+4. 允许动态运镜语言（仅 video_prompt）
+5. 自然融入 VISUAL_STYLE；保留角色姓名
 
 依据用户消息中的 STORYBOARD_FIELDS、AUTO_COMPOSED、邻镜、ASSETS、画风等生成。`;
 }

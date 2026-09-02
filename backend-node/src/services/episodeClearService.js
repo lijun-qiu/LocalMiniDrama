@@ -126,7 +126,7 @@ function clearEpisodeExceptScript(db, log, episodeId) {
   };
 
   const txn = db.transaction(() => {
-    const sbPurge = purgeAllEpisodeStoryboards(db, log, epId, storageRoot);
+    const sbPurge = purgeAllEpisodeStoryboards(db, log, epId, storageRoot, { preserveIntro: false });
     stats.storyboards = sbPurge.storyboards;
     stats.images += sbPurge.images;
     stats.videos += sbPurge.videos;
@@ -158,6 +158,12 @@ function clearEpisodeExceptScript(db, log, episodeId) {
       stats.images += ch.images;
     }
     db.prepare('DELETE FROM episode_characters WHERE episode_id = ?').run(epId);
+    try {
+      db.prepare('DELETE FROM episode_props WHERE episode_id = ?').run(epId);
+    } catch (_) {}
+    try {
+      db.prepare('DELETE FROM episode_scenes WHERE episode_id = ?').run(epId);
+    } catch (_) {}
 
     const propRows = db.prepare('SELECT id FROM props WHERE episode_id = ?').all(epId);
     const propIds = propRows.map((r) => r.id);
@@ -167,7 +173,10 @@ function clearEpisodeExceptScript(db, log, episodeId) {
 
     const now = new Date().toISOString();
     db.prepare(
-      `UPDATE episodes SET video_url = NULL, thumbnail = NULL, description = NULL, duration = 0, status = 'draft', updated_at = ?
+      `UPDATE episodes SET video_url = NULL, thumbnail = NULL, description = NULL, duration = 0, status = 'draft',
+        bgm_local_path = NULL, bgm_music_id = NULL, sfx_local_path = NULL, sfx_music_id = NULL, bgm_video_url = NULL,
+        foley_events_json = NULL, foley_status = NULL, foley_error = NULL, foley_video_url = NULL, foley_task_id = NULL,
+        updated_at = ?
        WHERE id = ?`
     ).run(now, epId);
   });
@@ -182,11 +191,11 @@ function clearEpisodeExceptScript(db, log, episodeId) {
   };
 }
 
-const CLEAR_MEDIA_KINDS = new Set(['narration_audio', 'images', 'videos']);
+const CLEAR_MEDIA_KINDS = new Set(['narration_audio', 'images', 'videos', 'prompts']);
 
 /**
- * 按类型清空本集分镜媒体（保留分镜文本与角色/场景/道具）。硬删除。
- * @param {'narration_audio'|'images'|'videos'} kind
+ * 按类型清空本集分镜媒体或提示词（保留分镜文本与角色/场景/道具）。硬删除媒体文件。
+ * @param {'narration_audio'|'images'|'videos'|'prompts'} kind
  */
 function clearEpisodeMedia(db, log, episodeId, kind) {
   const type = String(kind || '').trim();
@@ -206,17 +215,43 @@ function clearEpisodeMedia(db, log, episodeId, kind) {
   const now = new Date().toISOString();
   const epId = Number(episodeId);
   const storageRoot = getStorageRoot();
-  const stats = { kind: type, storyboards: 0, images: 0, videos: 0, narration_audio: 0, files: 0 };
+  const stats = {
+    kind: type,
+    storyboards: 0,
+    images: 0,
+    videos: 0,
+    narration_audio: 0,
+    prompts: 0,
+    files: 0,
+  };
 
   const txn = db.transaction(() => {
     const sbRows = db
-      .prepare('SELECT id FROM storyboards WHERE episode_id = ? AND deleted_at IS NULL')
+      .prepare(
+        'SELECT id FROM storyboards WHERE episode_id = ? AND deleted_at IS NULL AND COALESCE(is_intro, 0) = 0'
+      )
       .all(epId);
     const sbIds = sbRows.map((r) => r.id);
     stats.storyboards = sbIds.length;
     if (sbIds.length === 0) return;
 
     const ph = placeholders(sbIds.length);
+
+    if (type === 'prompts') {
+      const r = db
+        .prepare(
+          `UPDATE storyboards SET
+             polished_prompt = NULL,
+             video_prompt = NULL,
+             universal_segment_text = NULL,
+             narration_prompt_aligned_at = NULL,
+             updated_at = ?
+           WHERE id IN (${ph}) AND deleted_at IS NULL`
+        )
+        .run(now, ...sbIds);
+      stats.prompts = r.changes;
+      return;
+    }
 
     if (type === 'narration_audio') {
       const epRow = db.prepare('SELECT full_narration_audio_local_path FROM episodes WHERE id = ?').get(episodeId);
@@ -320,7 +355,10 @@ function clearEpisodeMedia(db, log, episodeId, kind) {
       ).run(now, ...sbIdsVideoLocalPath);
     }
     db.prepare(
-      `UPDATE episodes SET video_url = NULL, thumbnail = NULL, duration = 0, updated_at = ? WHERE id = ?`
+      `UPDATE episodes SET video_url = NULL, thumbnail = NULL, duration = 0,
+        bgm_video_url = NULL, foley_video_url = NULL, foley_events_json = NULL,
+        foley_status = NULL, foley_error = NULL, foley_task_id = NULL,
+        updated_at = ? WHERE id = ?`
     ).run(now, epId);
   });
 

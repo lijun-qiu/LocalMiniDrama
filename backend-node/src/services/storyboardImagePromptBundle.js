@@ -254,7 +254,7 @@ async function batchPolishStoryboardImagePromptsForEpisode(db, log, episodeId, o
   const rows = db
     .prepare(
       `SELECT id FROM storyboards
-       WHERE episode_id = ? AND deleted_at IS NULL
+       WHERE episode_id = ? AND deleted_at IS NULL AND COALESCE(is_intro, 0) = 0
        ORDER BY storyboard_number ASC`
     )
     .all(episodeIdNum);

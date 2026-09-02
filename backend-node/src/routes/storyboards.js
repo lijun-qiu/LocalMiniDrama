@@ -13,6 +13,8 @@ const {
 const angleService = require('../services/angleService');
 const { buildUniversalSegmentUserPromptBundle } = require('../services/universalSegmentPromptBundle');
 const { normalizeUniversalSegmentShotDurations } = require('../services/universalSegmentDurationNormalize');
+const { stripInlineNarrationFromUniversalText, chooseBeatCount } = require('../services/universalOmniMultiBeatFormat');
+const { alignUniversalBeatSecondsToNarration } = require('../services/universalNarrationBeatTimeline');
 const {
   loadClassicVideoPromptContext,
   generateClassicVideoPromptWithAi,
@@ -70,6 +72,41 @@ function normalizeUniversalSegmentAtImageSpacing(text) {
     /@图片(\d+)(?=[\u4e00-\u9fffA-Za-z「『【（])/gu,
     '@图片$1 '
   );
+}
+
+/** 生成/润色后：时长对齐、旁白时间轴加权、@图片 空格、剔除 beat 内嵌旁白 */
+function finalizeUniversalSegmentText(text, durationLabel, durationSec, opts = {}) {
+  let out = normalizeUniversalSegmentShotDurations(text, durationLabel, durationSec);
+  const narr = opts.narration != null ? String(opts.narration).trim() : '';
+  if (narr) {
+    const M = opts.beatM || chooseBeatCount(durationSec, { narration: narr });
+    out = alignUniversalBeatSecondsToNarration(out, durationSec, narr, M);
+  }
+  out = normalizeUniversalSegmentAtImageSpacing(out);
+  out = stripInlineNarrationFromUniversalText(out);
+  return out;
+}
+
+/** 有旁白配音时，生成/重生成全能片段也写入对齐时间戳（解锁生视频门槛） */
+function saveUniversalSegmentText(db, sbId, text, nowIso) {
+  const row = db
+    .prepare(
+      'SELECT narration_audio_local_path FROM storyboards WHERE id = ? AND deleted_at IS NULL'
+    )
+    .get(sbId);
+  const hasNarrAudio = !!(row?.narration_audio_local_path && String(row.narration_audio_local_path).trim());
+  if (hasNarrAudio) {
+    db.prepare(
+      `UPDATE storyboards
+       SET universal_segment_text = ?, narration_prompt_aligned_at = ?, updated_at = ?
+       WHERE id = ? AND deleted_at IS NULL`
+    ).run(text, nowIso, nowIso, sbId);
+    return nowIso;
+  }
+  db.prepare(
+    'UPDATE storyboards SET universal_segment_text = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL'
+  ).run(text, nowIso, sbId);
+  return null;
 }
 
 function routes(db, log) {
@@ -225,6 +262,28 @@ function routes(db, log) {
         response.badRequest(res, err.message || '拆镜失败');
       }
     },
+    regenerateOne: async (req, res) => {
+      try {
+        const id = Number(req.params.id);
+        if (!id) return response.badRequest(res, '缺少分镜 id');
+        const body = req.body || {};
+        const sb = await episodeStoryboardService.regenerateSingleStoryboardAsync(db, log, id, {
+          rebindAssets: body.rebind_assets === true || body.rebindAssets === true,
+          userInstruction: body.user_instruction ?? body.userInstruction,
+          model: body.model || req.query?.model,
+        });
+        if (!sb) return response.notFound(res, '分镜不存在');
+        response.success(res, {
+          ...sb,
+          message: body.rebind_assets || body.rebindAssets
+            ? '本镜脚本已重新生成，并已按 AI 结果重新绑定资产'
+            : '本镜脚本已重新生成（保留原资产绑定）',
+        });
+      } catch (err) {
+        log.error('storyboards regenerateOne', { error: err.message, id: req.params.id });
+        response.badRequest(res, err.message || '重新生成本镜失败');
+      }
+    },
     episodeStoryboardsGenerate: (req, res) => {
       try {
         const taskId = episodeStoryboardService.generateStoryboard(
@@ -290,7 +349,7 @@ function routes(db, log) {
       }
     },
 
-    /** 全文解说经典：按旁白配音实际时长刷新各镜 duration 并 AI 生成 polished + video 提示词 */
+    /** 全文解说：按旁白配音实际时长刷新 duration；经典再生成 polished+video，全能仅同步时长 */
     generatePromptsFromAudioDuration: async (req, res) => {
       try {
         const episodeId = Number(req.params.episode_id);
@@ -303,9 +362,12 @@ function routes(db, log) {
           { force }
         );
         const synced = result.duration_sync?.updated ?? 0;
+        const message = result.mode === 'universal_duration_sync'
+          ? (result.message || `已按配音时长更新 ${synced} 镜 duration`)
+          : `已生成 ${result.rebuilt ?? 0} 镜提示词（${synced} 镜 duration 已按配音时长更新）`;
         response.success(res, {
           ...result,
-          message: `已生成 ${result.rebuilt ?? 0} 镜提示词（${synced} 镜 duration 已按配音时长更新）`,
+          message,
         });
       } catch (err) {
         log.error('episode generate prompts from audio', { error: err.message, episode_id: req.params.episode_id });
@@ -344,7 +406,7 @@ function routes(db, log) {
           if (built.code === 'not_found') return response.notFound(res, built.message);
           return response.badRequest(res, built.message);
         }
-        const { userPrompt, durationLabel, durationSec } = built;
+        const { userPrompt, durationLabel, durationSec, narration, beatM } = built;
         const out = await aiClient.generateText(
           db,
           log,
@@ -357,16 +419,18 @@ function routes(db, log) {
           return response.badRequest(res, 'AI 返回内容过短，请检查文本模型配置');
         }
         let text = String(out).trim();
-        text = normalizeUniversalSegmentShotDurations(text, durationLabel, durationSec);
-        text = normalizeUniversalSegmentAtImageSpacing(text);
+        text = finalizeUniversalSegmentText(text, durationLabel, durationSec, { narration, beatM });
         const nowIso = new Date().toISOString();
-        db.prepare('UPDATE storyboards SET universal_segment_text = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
-          text,
-          nowIso,
-          sbId
-        );
-        log.info('[分镜] generateUniversalSegmentPrompt 完成', { id: sbId, len: text.length, duration_sec: durationSec });
-        response.success(res, { universal_segment_text: text });
+        const alignedAt = saveUniversalSegmentText(db, sbId, text, nowIso);
+        log.info('[分镜] generateUniversalSegmentPrompt 完成', {
+          id: sbId,
+          len: text.length,
+          duration_sec: durationSec,
+          aligned: !!alignedAt,
+        });
+        const payload = { universal_segment_text: text };
+        if (alignedAt) payload.narration_prompt_aligned_at = alignedAt;
+        response.success(res, payload);
       } catch (err) {
         log.error('storyboards generateUniversalSegmentPrompt', { error: err.message });
         response.internalError(res, err.message);
@@ -381,7 +445,7 @@ function routes(db, log) {
         if (built.code === 'not_found') return response.notFound(res, built.message);
         return response.badRequest(res, built.message);
       }
-      const { userPrompt, durationLabel, durationSec } = built;
+      const { userPrompt, durationLabel, durationSec, narration, beatM } = built;
 
       res.status(200);
       res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
@@ -420,21 +484,23 @@ function routes(db, log) {
         return res.end();
       }
       let text = String(finalRaw).trim();
-      text = normalizeUniversalSegmentShotDurations(text, durationLabel, durationSec);
-      text = normalizeUniversalSegmentAtImageSpacing(text);
+      text = finalizeUniversalSegmentText(text, durationLabel, durationSec, { narration, beatM });
       const nowIso = new Date().toISOString();
-      db.prepare('UPDATE storyboards SET universal_segment_text = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
-        text,
-        nowIso,
-        sbId
-      );
-      log.info('[分镜] generateUniversalSegmentStream 完成', { id: sbId, len: text.length, duration_sec: durationSec });
-      writeNd({ type: 'done', universal_segment_text: text });
+      const alignedAt = saveUniversalSegmentText(db, sbId, text, nowIso);
+      log.info('[分镜] generateUniversalSegmentStream 完成', {
+        id: sbId,
+        len: text.length,
+        duration_sec: durationSec,
+        aligned: !!alignedAt,
+      });
+      const donePayload = { type: 'done', universal_segment_text: text };
+      if (alignedAt) donePayload.narration_prompt_aligned_at = alignedAt;
+      writeNd(donePayload);
       res.end();
     },
 
     /**
-     * 全能片段润色：结合整集剧本与邻镜全能/分镜字段，流式返回 NDJSON（delta + done）。
+     * 全能片段润色：结合整集剧本、当前旁白局部上下文（±约100字）与邻镜全能/分镜字段，流式返回 NDJSON（delta + done）。
      * body.draft_universal_segment_text 必填（与编辑器一致，可为未保存到 DB 的当前文本）
      */
     polishUniversalSegmentStream: async (req, res) => {
@@ -454,7 +520,7 @@ function routes(db, log) {
         if (built.code === 'not_found') return response.notFound(res, built.message);
         return response.badRequest(res, built.message);
       }
-      const { userPrompt: baseUser, durationLabel, durationSec, episodeId, storyboardNumber } = built;
+      const { userPrompt: baseUser, durationLabel, durationSec, episodeId, storyboardNumber, narration, beatM } = built;
 
       let scriptText = '';
       try {
@@ -484,13 +550,45 @@ function routes(db, log) {
       } catch (_) {}
 
       const polishPassStamp = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
-      const polishUserPrompt = [
+      const userInstruction =
+        req.body && req.body.user_instruction != null ? String(req.body.user_instruction).trim() : '';
+      const beatIndexRaw = req.body?.regenerate_beat_index ?? req.body?.beat_index;
+      const beatIndex = beatIndexRaw != null ? Number(beatIndexRaw) : NaN;
+      const regenerateOneBeat = Number.isFinite(beatIndex) && beatIndex >= 1;
+
+      let polishUserPrompt = regenerateOneBeat
+        ? [
+            'TASK: REGENERATE_SINGLE_BEAT',
+            `REGENERATE_BEAT_INDEX: ${beatIndex}`,
+            `POLISH_PASS_STAMP: ${polishPassStamp}`,
+            ...(userInstruction
+              ? [
+                  'USER_INSTRUCTION（用户要求；优先满足，但不得破坏其它分镜行与总秒数）:',
+                  userInstruction,
+                  '',
+                ]
+              : []),
+            `只重写「分镜${beatIndex}： Tk秒: …」这一行的正文（运镜/动作/情绪/@图片绑定），Tk 秒数必须与 CURRENT_OMNI_DRAFT 中该分镜行一致。`,
+            '第1–3行以及其余「分镜k」行必须与 CURRENT_OMNI_DRAFT **逐字一致**（仅允许 @图片N 后空格微调）。',
+            '输出完整多子分镜块（含未改动的其它行），禁止只输出单行。',
+            '遵守 SUBJECT_IDENTITY_LOCK / IMAGE_SLOT_MAP / PRIMARY_SUBJECT，禁止串角色。',
+            'CURRENT_OMNI_DRAFT:',
+            draft,
+            '',
+            '--- BASE_OMNI_CONTRACT ---',
+            baseUser,
+          ].join('\n')
+        : [
         'TASK: POLISH_UNIVERSAL_OMNI_SEGMENT',
         `POLISH_PASS_STAMP: ${polishPassStamp}`,
+        ...(userInstruction
+          ? ['USER_INSTRUCTION（用户润色要求；优先满足）:', userInstruction, '']
+          : []),
         'POLISH_REFRESH（多次点击「润色」时强制）: 在严格遵守 MULTI_BEAT_OUTPUT、子分镜秒数之和=TOTAL_CLIP_SECONDS、IMAGE_SLOT_MAP、不编造剧本外情节的前提下，**本轮输出须与 CURRENT_OMNI_DRAFT 在中文表述上有明显差异**（换动词/语序、合并或拆分从句、加强或收紧运镜与情绪描写均可；**第3行仍须与 LINE3_REQUIRED 完全一致**）。除第3行外，**禁止**与草稿逐字相同或仅标点差异；若 M 与秒数分配不变，子分镜正文也须重写措辞。',
         'DIALOGUE_RETENTION（硬性，与 system 全能润色一致）: BASE_OMNI_CONTRACT 内 STORYBOARD FIELDS 的 DIALOGUE、NARRATION、VIDEO_PROMPT 及 CURRENT_OMNI_DRAFT 中一切对白/旁白/引号句，成稿各「分镜k」行须**逐条以「」或明确旁白写出**，保留笑点、数字、剧名、奖项名等关键信息；禁止用「两人对话」「念词带过」等概括替代具体台词。总秒数与各 Tk 不变前提下提高信息密度：台词与反应优先，少写无推进的纯氛围叠句。',
         'You are refining the CURRENT omni multi-beat prompt for a short drama vertical-video shot.',
         `FULL_EPISODE_SCRIPT（本集完整剧本，用于信息对齐与连戏；不得引入剧本未写的情节）:\n${scriptText || '(本集剧本正文为空，请仅依据下方 STORYBOARD FIELDS 与邻镜信息)'}`,
+        '本镜画面设计优先对齐 BASE_OMNI_CONTRACT 内的 NARRATION_LOCAL_CONTEXT（当前旁白±约100字）；整集剧本仅作因果/语气，勿把后文提前拍完。',
         '',
         'NEIGHBOR_PREV（上一分镜：含其全能片段与其它提示词字段，供衔接）:',
         formatNeighborShotPolishContext(prevRow),
@@ -501,7 +599,7 @@ function routes(db, log) {
         'CURRENT_OMNI_DRAFT（用户当前全能片段文本，必须在此基础上增强而非另起无关故事）:',
         draft,
         '',
-        '--- BASE_OMNI_CONTRACT（与生成接口相同的约束与分镜字段块）---',
+        '--- BASE_OMNI_CONTRACT（与生成接口相同的约束与分镜字段块；含 EPISODE_SCRIPT + NARRATION_LOCAL_CONTEXT）---',
         baseUser,
       ].join('\n');
 
@@ -542,16 +640,37 @@ function routes(db, log) {
         return res.end();
       }
       let text = String(finalRaw).trim();
-      text = normalizeUniversalSegmentShotDurations(text, durationLabel, durationSec);
-      text = normalizeUniversalSegmentAtImageSpacing(text);
+      if (regenerateOneBeat) {
+        const { parseUniversalMultiBeatText, replaceBeatInUniversalText } = require('../services/universalMultiBeatParse');
+        const fromAi = parseUniversalMultiBeatText(text);
+        const fromDraft = parseUniversalMultiBeatText(draft);
+        const aiBeat = fromAi.beats.find((b) => Number(b.index) === beatIndex);
+        const draftBeat = fromDraft.beats.find((b) => Number(b.index) === beatIndex);
+        if (aiBeat && draftBeat) {
+          const merged = replaceBeatInUniversalText(draft, beatIndex, aiBeat.body, draftBeat.seconds);
+          if (merged.ok) text = merged.text;
+        } else if (!fromAi.ok && fromDraft.ok) {
+          // 模型可能只回了一行正文
+          const oneLine = text.replace(/^分镜\s*\d+\s*[：:]\s*[\d.]+\s*秒\s*[：:]\s*/u, '').trim();
+          const merged = replaceBeatInUniversalText(draft, beatIndex, oneLine || text, draftBeat?.seconds);
+          if (merged.ok) text = merged.text;
+        }
+      }
+      text = finalizeUniversalSegmentText(text, durationLabel, durationSec, { narration, beatM });
       const nowIso = new Date().toISOString();
-      db.prepare('UPDATE storyboards SET universal_segment_text = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
-        text,
-        nowIso,
-        sbId
-      );
-      log.info('[分镜] polishUniversalSegmentStream 完成', { id: sbId, len: text.length, duration_sec: durationSec });
-      writeNd({ type: 'done', universal_segment_text: text });
+      // 全文解说生视频门槛：润色成功即视为已按配音对齐（单拍重生成也刷新时间戳）
+      db.prepare(
+        `UPDATE storyboards
+         SET universal_segment_text = ?, narration_prompt_aligned_at = ?, updated_at = ?
+         WHERE id = ? AND deleted_at IS NULL`
+      ).run(text, nowIso, nowIso, sbId);
+      log.info('[分镜] polishUniversalSegmentStream 完成', {
+        id: sbId,
+        len: text.length,
+        duration_sec: durationSec,
+        regenerate_beat: regenerateOneBeat ? beatIndex : null,
+      });
+      writeNd({ type: 'done', universal_segment_text: text, narration_prompt_aligned_at: nowIso });
       res.end();
     },
 

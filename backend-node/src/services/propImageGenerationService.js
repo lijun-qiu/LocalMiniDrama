@@ -6,6 +6,10 @@ const propService = require('./propService');
 const uploadService = require('./uploadService');
 const storageLayout = require('./storageLayout');
 const { aspectRatioToSize } = require('./imageService');
+const {
+  PROP_STUDIO_NEGATIVE_PROMPT,
+  scrubAndReinforcePropPrompt,
+} = require('../utils/assetImageStyle');
 
 function appendPrompt(base, extra) {
   const add = (extra || '').toString().trim();
@@ -41,12 +45,11 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
     } catch (_) {}
   }
   const styleOverride = (opts && opts.style) ? String(opts.style).trim() : '';
-  const baseStyle = styleOverride || (cfg?.style?.default_style_en || cfg?.style?.default_style || '');
-  let style = '';
-  style = appendPrompt(style, baseStyle);
-  if (!styleOverride) {
-    style = appendPrompt(style, cfg?.style?.default_prop_style || '');
-  }
+  const styleEn = styleOverride || (cfg?.style?.default_style_en || cfg?.style?.default_style || '');
+  const styleZh = styleOverride || (cfg?.style?.default_style_zh || '');
+  const propStyleExtra = (!styleOverride && cfg?.style?.default_prop_style)
+    ? String(cfg.style.default_prop_style).trim()
+    : '';
   // 优先用项目 aspect_ratio 推导尺寸；兜底 1920x1920（满足 ≥3,686,400 像素要求）
   let imageSize = null;
   if (prop.drama_id) {
@@ -59,11 +62,15 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
     } catch (_) {}
   }
   if (!imageSize) imageSize = cfg?.style?.default_image_size || '1920x1920';
-  const fullPrompt = appendPrompt(String(prop.prompt).trim(), style);
+
+  let fullPrompt = scrubAndReinforcePropPrompt(String(prop.prompt).trim(), styleEn, styleZh);
+  if (propStyleExtra) fullPrompt = appendPrompt(fullPrompt, propStyleExtra);
+
   // 与角色/场景一致：使用前端「图片生成模型」选择的 model；未传时用 YAML default_image_provider 兜底
   const model = (opts && opts.model) ? String(opts.model).trim() || null : null;
   const preferredProvider = !model && cfg?.ai?.default_image_provider ? cfg.ai.default_image_provider : null;
-  const userNeg = imageClient.resolveAssetUserNegativeForApi(model, prop.negative_prompt);
+  const storedNeg = imageClient.resolveAssetUserNegativeForApi(model, prop.negative_prompt);
+  const userNeg = [PROP_STUDIO_NEGATIVE_PROMPT, storedNeg].filter(Boolean).join(', ');
 
   let result;
   try {

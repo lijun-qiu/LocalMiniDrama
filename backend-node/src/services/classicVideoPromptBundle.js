@@ -261,6 +261,17 @@ async function loadClassicVideoPromptContext(db, sbRow, body = {}) {
       .get(eid, num);
   } catch (_) {}
 
+  const {
+    extractNarrationLocalWindow,
+    buildNarrationLocalContextBlock,
+  } = require('./narrationLocalWindow');
+  const narrationLocalWin = extractNarrationLocalWindow(scriptText, sbRow.narration, {
+    radius: 100,
+    prevNarration: prevRow?.narration,
+    nextNarration: nextRow?.narration,
+  });
+  const narrationLocalBlock = buildNarrationLocalContextBlock(narrationLocalWin);
+
   let dramaTitle = '';
   let episodeTitle = '';
   let shotTotalInEpisode = 0;
@@ -354,6 +365,7 @@ async function loadClassicVideoPromptContext(db, sbRow, body = {}) {
     userInstruction,
     currentDraft,
     scriptText,
+    narrationLocalBlock,
     prevRow,
     nextRow,
     dramaTitle,
@@ -381,13 +393,13 @@ function buildClassicVideoPromptUserPrompt(ctx, sbRow, opts = {}) {
 
   const draftSection =
     mode === 'generate' && fullNarration && !ctx.currentDraft
-      ? '(empty — generate from STORYBOARD_FIELDS + NARRATION + script/neighbors; AUTO_COMPOSED 仅作字段顺序参考，须据旁白合理扩展动作与运镜)'
+      ? '(empty — generate from STORYBOARD_FIELDS + NARRATION + FULL_EPISODE_SCRIPT + NARRATION_LOCAL_CONTEXT/neighbors; AUTO_COMPOSED 仅作字段顺序参考，须据旁白合理扩展动作与运镜)'
       : ctx.currentDraft || '(empty — use AUTO_COMPOSED + FIELDS)';
 
   const polishRefreshLine =
     mode === 'polish'
       ? 'POLISH_REFRESH: 用户可多次润色；事实与时长不变，但须明显换表述；禁止与 CURRENT_VIDEO_DRAFT 仅标点或个别虚词差异。'
-      : 'GENERATE_REFRESH: 首次生成或重建；须完整覆盖字段与旁白，动作/运镜须与 narration 语义匹配。';
+      : 'GENERATE_REFRESH: 首次生成或重建；须完整覆盖字段与旁白，动作/运镜须与 narration 及 NARRATION_LOCAL_CONTEXT 语义匹配（整集剧本仅作因果/语气参考）。';
 
   return [
     `TASK: ${task}`,
@@ -404,6 +416,9 @@ function buildClassicVideoPromptUserPrompt(ctx, sbRow, opts = {}) {
     '',
     `FULL_EPISODE_SCRIPT（用于人物关系、因果与语气；勿编造剧本未出现的情节）:\n${ctx.scriptText || '(本集剧本正文为空)'}`,
     '',
+    ctx.narrationLocalBlock ||
+      'NARRATION_LOCAL_CONTEXT（当前镜旁白 ±100字）:\n(无可用旁白局部上下文)',
+    '',
     'NEIGHBOR_PREV（上一镜：用于入戏衔接、情绪与空间连贯）:',
     formatClassicVideoNeighborBlock('PREV', ctx.prevRow),
     '',
@@ -413,7 +428,7 @@ function buildClassicVideoPromptUserPrompt(ctx, sbRow, opts = {}) {
     'STORYBOARD_FIELDS（当前镜结构化事实）:',
     ctx.fieldLines || '(empty)',
     '',
-    'REQUIRED_COVERAGE_DIGEST（下列凡出现「- 维度：」行的，成稿必须全部体现其语义；可与邻镜/剧本融合叙述，禁止省略事实、禁止改旁白/对白原意、禁止改时长秒数）:',
+    'REQUIRED_COVERAGE_DIGEST（下列凡出现「- 维度：」行的，成稿必须全部体现其语义；可与邻镜/剧本/局部旁白融合叙述，禁止省略事实、禁止改旁白/对白原意、禁止改时长秒数）:',
     buildClassicRequiredCoverageDigest(sbRow, ctx.linkedSceneText),
     '',
     `FIRST_FRAME_VISUAL_ANCHOR（分镜参考静帧对应的英文/中文图提示摘要；动效须与此一致，禁止改换装、改人脸特征、改场景时代）:\n${
@@ -444,7 +459,6 @@ function hasClassicVideoPromptInputs(sbRow, ctx) {
   const draft = ctx.currentDraft || '';
   const composed = String(ctx.autoComposed || '').trim();
   if (ctx.fullNarration) {
-    if (Number(sbRow.storyboard_number) === 1 && !narr) return !!(title || action || composed);
     return !!(narr || draft || composed);
   }
   return !!(draft || composed || action || narr);

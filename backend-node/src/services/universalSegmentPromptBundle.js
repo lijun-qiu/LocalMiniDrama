@@ -1,3 +1,5 @@
+const { buildSubjectIdentityLockBlock, inferPrimarySubject } = require('./universalSubjectLock');
+
 /**
  * 全能片段（Omni / Seedance 多图参考）用户消息构建：供「生成」与「润色」共用。
  * @param {import('better-sqlite3').Database} db
@@ -9,6 +11,10 @@
 function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
   const bodyIn = reqBody && typeof reqBody === 'object' ? reqBody : {};
   const forceWithoutReferenceImages = !!bodyIn.force_without_reference_images;
+  const userInstruction =
+    bodyIn.user_instruction != null ? String(bodyIn.user_instruction).trim() : '';
+  const fieldOverrides =
+    bodyIn.field_overrides && typeof bodyIn.field_overrides === 'object' ? bodyIn.field_overrides : {};
 
   const sb = db.prepare(
     `SELECT id, episode_id, storyboard_number, scene_id, title, description, location, time,
@@ -19,6 +25,37 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
      FROM storyboards WHERE id = ? AND deleted_at IS NULL`
   ).get(sbId);
   if (!sb) return { ok: false, code: 'not_found', message: '分镜不存在' };
+
+  const pickField = (key) => {
+    if (Object.prototype.hasOwnProperty.call(fieldOverrides, key) && fieldOverrides[key] != null) {
+      return fieldOverrides[key];
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(bodyIn, key) &&
+      bodyIn[key] != null &&
+      key !== 'duration' &&
+      key !== 'field_overrides' &&
+      key !== 'force_without_reference_images' &&
+      key !== 'draft_universal_segment_text' &&
+      key !== 'user_instruction'
+    ) {
+      return bodyIn[key];
+    }
+    return sb[key];
+  };
+
+  // 编辑区未保存字段覆盖（主体锁定/正文 CONTEXT 必须与前端一致）
+  const fTitle = pickField('title');
+  const fDescription = pickField('description');
+  const fLocation = pickField('location');
+  const fTime = pickField('time');
+  const fAction = pickField('action');
+  const fDialogue = pickField('dialogue');
+  const fNarration = pickField('narration');
+  const fResult = pickField('result');
+  const fAtmosphere = pickField('atmosphere');
+  const fShotType = pickField('shot_type');
+  const fMovement = pickField('movement');
 
   let dramaId = null;
   let dramaRow = null;
@@ -50,24 +87,24 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     opts.universalSegmentOverride !== undefined ? opts.universalSegmentOverride : sb.universal_segment_text;
 
   const lines = [
-    chunk('TITLE', sb.title),
-    chunk('DESCRIPTION', sb.description),
-    chunk('LOCATION', sb.location),
-    chunk('TIME', sb.time),
-    chunk('ACTION', sb.action),
-    chunk('DIALOGUE', sb.dialogue),
-    chunk('NARRATION', sb.narration),
-    chunk('RESULT', sb.result),
-    chunk('ATMOSPHERE', sb.atmosphere),
+    chunk('TITLE', fTitle),
+    chunk('DESCRIPTION', fDescription),
+    chunk('LOCATION', fLocation),
+    chunk('TIME', fTime),
+    chunk('ACTION', fAction),
+    chunk('DIALOGUE', fDialogue),
+    chunk('NARRATION', fNarration),
+    chunk('RESULT', fResult),
+    chunk('ATMOSPHERE', fAtmosphere),
     chunk('IMAGE_PROMPT', sb.image_prompt),
     chunk('POLISHED_IMAGE_PROMPT', sb.polished_prompt),
     chunk('VIDEO_PROMPT', sb.video_prompt),
-    chunk('SHOT_TYPE', sb.shot_type),
+    chunk('SHOT_TYPE', fShotType),
     chunk('ANGLE', sb.angle),
     chunk('ANGLE_H', sb.angle_h),
     chunk('ANGLE_V', sb.angle_v),
     chunk('ANGLE_S', sb.angle_s),
-    chunk('MOVEMENT', sb.movement),
+    chunk('MOVEMENT', fMovement),
     chunk('LIGHTING', sb.lighting_style),
     chunk('DEPTH_OF_FIELD', sb.depth_of_field),
     chunk('CURRENT_UNIVERSAL_SEGMENT', universalForLine),
@@ -232,17 +269,20 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
 
   const charSlots = slots.filter((s) => s.kind === '角色');
   const sceneFirst = slots.length > 0 && slots[0].kind === '场景';
+  const primarySubject = inferPrimarySubject(fAction, fDialogue, charSlots, fNarration);
   const charBindingBlock =
     charSlots.length > 0
       ? [
           sceneFirst
             ? 'CHARACTER_IMAGE_BINDING（@图片1 仅为场景/环境；人物从 @图片2 起依次对应下列姓名，勿把人绑在 @图片1）:'
             : 'CHARACTER_IMAGE_BINDING（首张参考图非场景，以 IMAGE_SLOT_MAP 为准；人物与下列 @图片N 一一对应）:',
-          ...charSlots.map((s) =>
-            sceneFirst
-              ? `「${s.summary}」→ ${s.tag}（外貌/动作绑定 ${s.tag} ，示例：${s.tag} 的侧脸；禁止「@图片1 中的${s.summary}」）`
-              : `「${s.summary}」→ ${s.tag}（外貌/动作绑定 ${s.tag} ，示例：${s.tag} 的侧脸）`
-          ),
+          ...charSlots.map((s) => {
+            const isPrimary = primarySubject && primarySubject.name === String(s.summary || '').trim();
+            const primaryMark = isPrimary ? ' 【段落主人公】' : '';
+            return sceneFirst
+              ? `「${s.summary}」→ ${s.tag}${primaryMark}（外貌/动作/台词仅绑 ${s.tag}；示例：${s.tag} 的侧脸；禁止「@图片1 中的${s.summary}」；禁止把别人的戏写到 ${s.tag}）`
+              : `「${s.summary}」→ ${s.tag}${primaryMark}（外貌/动作/台词仅绑 ${s.tag}；示例：${s.tag} 的侧脸；禁止串槽）`;
+          }),
         ].join('\n')
       : slots.length === 0 && forceWithoutReferenceImages
         ? [
@@ -253,6 +293,15 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
         : [
             'CHARACTER_IMAGE_BINDING: 当前无「角色」参考槽位；若出现人物且 @图片1 为场景，勿将人物外貌写在 @图片1。',
           ].join('\n');
+
+  const subjectLockBlock = buildSubjectIdentityLockBlock({
+    charSlots,
+    action: fAction,
+    dialogue: fDialogue,
+    narration: fNarration,
+    description: fDescription,
+    sceneFirst,
+  });
 
   if (slots.length === 0 && !forceWithoutReferenceImages) {
     return {
@@ -321,12 +370,14 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
       ? [
           '- 当前为无图强制模式：视频 API 尚无参考图；可不写 @图片N，若写则仅为补图前占位，出片前须与实际上传顺序一致。',
           '- 禁止用 @场景、@姓名、@道具名 等形式指代参考图；将来有图时须一律改为 @图片N（与 MAP 一致）。',
+          '- 禁止编造 IMAGE_SLOT_MAP / ORDERED_CHARACTER_NAMES 以外的人物、路人或地点。',
         ]
       : [
           '- 绑定到某张参考图时，只能写 IMAGE_SLOT_MAP 里列出的 @图片N（阿拉伯数字，如 @图片1、@图片2）。',
-          '- 禁止用 @场景、@姓名、@林薇、@道具名 等形式指代参考图；需要指图时一律 @图片N。',
+          '- 禁止用 @场景、@姓名、@道具名 等形式指代参考图；需要指图时一律 @图片N。',
           '- 若 @图片1 为「场景」：只写环境/光影/陈设；人物外貌与动作按 CHARACTER_IMAGE_BINDING 从 @图片2 起。若首张参考图即角色，则以 MAP 为准。',
           '- 场景参考若为四宫格/九宫格等拼图：见 SCENE_REFERENCE_LAYOUT；成片须单镜头连续画面，禁止模仿拼图布局。',
+          '- **禁止脑补**：不得写入 MAP 以外的人物姓名、路人、群众、侍从，或未绑定的新地点；邻镜/整集剧本中的角色若本镜无 @图片 槽位，禁止拉入本片段。',
         ]),
     '- 每个 @图片N 与后随的中/英文字之间保留一个半角空格（后处理也会修正，但模型应直接写对）。',
     '- ORDERED_CHARACTER_NAMES 仅供理解剧情，不得当作图占位符。',
@@ -358,11 +409,22 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     }
   } catch (_) {}
   const SCRIPT_CAP = 20000;
-  if (episodeScript.length > SCRIPT_CAP) {
-    episodeScript = `${episodeScript.slice(0, SCRIPT_CAP)}\n...[EPISODE_SCRIPT_TRUNCATED]`;
+  let episodeScriptForPrompt = episodeScript;
+  if (episodeScriptForPrompt.length > SCRIPT_CAP) {
+    episodeScriptForPrompt = `${episodeScriptForPrompt.slice(0, SCRIPT_CAP)}\n...[EPISODE_SCRIPT_TRUNCATED]`;
   }
 
-  const mHeuristic = Math.min(8, Math.max(1, Math.round(durationSec / 5)));
+  const { chooseBeatCount } = require('./universalOmniMultiBeatFormat');
+  const mHeuristic = chooseBeatCount(durationSec, {
+    narration: fNarration,
+    action: fAction,
+    dialogue: fDialogue,
+  });
+  const { buildNarrationBeatTimelineBlock } = require('./universalNarrationBeatTimeline');
+  const narrationTimelineBlock =
+    fNarration && String(fNarration).trim()
+      ? buildNarrationBeatTimelineBlock(fNarration, durationSec, mHeuristic)
+      : '';
   let shotPacingBlock = '';
   try {
     const all = db
@@ -381,7 +443,15 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     shotPacingBlock = [
       'SHOT_PACING_AND_POSITION:',
       `TOTAL_CLIP_SECONDS: ${durationLabel}（本条数据库分镜 = 一次成片 API 的整段时长；下文 M 个子分镜仅为同一时间轴内节拍拆分）`,
-      `M_HEURISTIC_ONLY: 约 ${mHeuristic}（不得照抄为最终 M；须结合剧本高潮/对白密度/转场/机位与 movement 等自决 1～8 的整数 M）`,
+      `M_HEURISTIC_ONLY: 约 ${mHeuristic}（仅参考：由旁白/动作语义与时长推算；**禁止**机械照抄或固定三镜；须按 NARRATION 句读与 ACTION 步骤自决最终 M=1～8）`,
+      'NARRATION_VISUAL_SYNC:',
+      '- M 按本镜旁白句数/动作步数合理分配；短旁白或单一动作可用 M=1～2；禁止为空镜硬凑三镜。',
+      '- **旁白不进 beat**：NARRATION 在分镜字段 + IndexTTS 后期；「分镜k」行只写运镜、@图片N 动作、光影；**禁止** 旁白（画面无声）："…" 或照抄旁白原文。',
+      '- **声画同步**：每拍可见动作须与 NARRATION 对应语义时段对齐；将旁白**转写为画面**，不要求画面提前。',
+      '- 旁白「你/您」= PRIMARY_SUBJECT；多地点列举 = 同一人；多时空用统一【运镜→定格】或每拍一地模板 + 每格 @图片N，勿贴旁白原文。',
+      require('./universalAgnesTimelineContract').MENTION_NE_APPEAR_LINE_ZH,
+      '- 多句旁白按顺序拆到各拍的**可视动作**；禁止 beat 内堆旁白原文。',
+      '- **旁白时间轴**：各「分镜k」的 Tk 秒须按 NARRATION 可读字权重分配（见 NARRATION_BEAT_TIMELINE），禁止机械均分；动作须写在旁白发生的 beat 内。',
       `SHOT_ORDER: ${ix >= 0 ? ix + 1 : '?'} / ${totalShots}`,
       `SHOT_POSITION_TAG: ${posTag}`,
       chunk('SEGMENT_TITLE_PREV', prevSeg || null),
@@ -389,25 +459,28 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
       chunk('SEGMENT_TITLE_NEXT', nextSeg || null),
       segChange
         ? 'BOUNDARY_HINT: 段落标题相对上一镜已变化 → 转场/新叙事块概率高 → 可提高 M 或前几秒侧重空间/情绪铺垫再入冲突。'
-        : 'BOUNDARY_HINT: 同段落延续 → M 可保守；若 ACTION 内对白长、机位少，也可 M=1 但在单行内写满时间流动。',
+        : 'BOUNDARY_HINT: 同段落延续 → 优先按旁白/动作语义定 M；单句旁白可 M=1 在单行内写满声画同步内容。',
     ].join('\n');
   } catch (_) {
     shotPacingBlock = [
       'SHOT_PACING_AND_POSITION:',
       `TOTAL_CLIP_SECONDS: ${durationLabel}`,
-      `M_HEURISTIC_ONLY: 约 ${mHeuristic}`,
+      `M_HEURISTIC_ONLY: 约 ${mHeuristic}（不得照抄；按旁白/动作自决 M）`,
+      'NARRATION_VISUAL_SYNC: 声画同步；禁止固定三镜。',
     ].join('\n');
   }
 
   let neighborDetailBlock = '';
+  let prevFull = null;
+  let nextFull = null;
   try {
-    const prevFull = db
+    prevFull = db
       .prepare(
         `SELECT storyboard_number, title, segment_title, action, dialogue, narration, shot_type, movement, atmosphere
          FROM storyboards WHERE episode_id = ? AND storyboard_number < ? AND deleted_at IS NULL ORDER BY storyboard_number DESC LIMIT 1`
       )
       .get(sb.episode_id, sb.storyboard_number);
-    const nextFull = db
+    nextFull = db
       .prepare(
         `SELECT storyboard_number, title, segment_title, action, dialogue, narration, shot_type, movement, atmosphere
          FROM storyboards WHERE episode_id = ? AND storyboard_number > ? AND deleted_at IS NULL ORDER BY storyboard_number ASC LIMIT 1`
@@ -432,15 +505,29 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     neighborDetailBlock = [fmtN(prevFull, 'NEIGHBOR_PREV_DETAIL'), '', fmtN(nextFull, 'NEIGHBOR_NEXT_DETAIL')].join('\n');
   } catch (_) {}
 
+  const {
+    extractNarrationLocalWindow,
+    buildNarrationLocalContextBlock,
+  } = require('./narrationLocalWindow');
+  const narrationLocalWin = extractNarrationLocalWindow(episodeScript, fNarration, {
+    radius: 100,
+    prevNarration: prevFull?.narration,
+    nextNarration: nextFull?.narration,
+  });
+  const narrationLocalBlock = buildNarrationLocalContextBlock(narrationLocalWin);
+
   const multiBeatContract = [
     'MULTI_BEAT_OUTPUT（一条成片 API 内的多节拍文案）:',
     '- 总行数 = 3 + M。M 为你选择的子分镜条数（时间轴节拍），整数 1～8。',
+    '- **M 选择**：按 NARRATION 句读与 ACTION 步骤合理分配，**禁止固定三镜**或机械照抄 M_HEURISTIC；短旁白/单一动作 → M=1～2；多句旁白才提高 M；秒数不够则合并短句，禁止空镜凑数。',
+    '- **声画同步**：每个「分镜k」正文只写画面；可见动作须与 NARRATION 该拍语义对齐；**禁止** beat 内 旁白（画面无声）："…"。',
     '- 第1行：「画面风格和类型:」…',
     `- 第2行：必须为「生成一个由以下M个分镜组成的视频。」（将 M 替换为你的整数；与下文实际「分镜1…分镜M」条数一致）。`,
     '- 第3行：必须逐字等于 LINE3_REQUIRED（见下）。',
     '- 第4行到第(3+M)行：依次为「分镜1： T1秒:」「分镜2： T2秒:」…「分镜M： TM秒:」；每行冒号后先写秒数再写该子时段内的动态影像与运镜描写。',
     `- 约束：T1+T2+…+TM 必须严格等于 TOTAL_CLIP_SECONDS（数值与 ${durationLabel} 一致）；每个 Tk>0；子分镜序号连续无跳号。`,
-    '- 若 M=1：即仅一行「分镜1： TOTAL秒:」写满整段；若 M>1：每行只覆盖本子时段，前后行衔接成连续时间线，避免剧情跳跃或重复前一行已完成的动作。',
+    '- 若 M=1：即仅一行「分镜1： TOTAL秒:」写满整段（仍须声画同步）；若 M>1：每行只覆盖本子时段，前后行衔接成连续时间线，避免剧情跳跃或重复前一行已完成的动作。',
+    require('./universalAgnesTimelineContract').MULTI_BEAT_TIMELINE_LINE_ZH,
     '- 禁止额外说明行、markdown、英文小标题；禁止把「子分镜」写成多次独立成片 API。',
   ].join('\n');
 
@@ -448,15 +535,19 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     `TOTAL_CLIP_SECONDS: ${durationLabel}`,
     `DURATION_SECONDS: ${durationLabel}`,
     multiBeatContract,
+    narrationTimelineBlock || null,
     shotPacingBlock,
     neighborDetailBlock || null,
     'LINE3_REQUIRED（第3行必须与下面整句完全一致，含标点）:',
     line3Required,
-    `EPISODE_SCRIPT:\n${episodeScript || '(本集剧本为空；仅凭分镜与邻镜推断节奏，勿编造大段新剧情)'}`,
+    // 整集剧本保留（因果/语气）；同时注入当前旁白 ±100 字局部窗口引导本镜画面
+    `EPISODE_SCRIPT:\n${episodeScriptForPrompt || '(本集剧本为空；仅凭分镜与邻镜推断节奏，勿编造大段新剧情)'}`,
+    narrationLocalBlock,
     chunk('EPISODE_TABLE_TITLE', episodeTableTitle),
     imageSlotMapBlock,
     sceneLayoutBlock || null,
     charBindingBlock,
+    subjectLockBlock,
     styleHintBlock,
     refContract,
     assetLine,
@@ -465,6 +556,13 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     `CONTEXT_NEXT_SHORT: ${nextDesc}`,
     '--- STORYBOARD FIELDS ---',
     ...lines,
+    userInstruction
+      ? [
+          '',
+          'USER_INSTRUCTION（用户生成/润色要求；在不违背 MULTI_BEAT_OUTPUT、SUBJECT_IDENTITY_LOCK、总秒数守恒、LINE3_REQUIRED 前提下优先满足）:',
+          userInstruction,
+        ].join('\n')
+      : null,
   ]
     .filter(Boolean)
     .join('\n');
@@ -474,6 +572,8 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     userPrompt,
     durationLabel,
     durationSec,
+    narration: fNarration != null ? String(fNarration) : '',
+    beatM: mHeuristic,
     sbId,
     episodeId: Number(sb.episode_id) || 0,
     storyboardNumber: Number(sb.storyboard_number) || 0,

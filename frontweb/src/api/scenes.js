@@ -19,8 +19,12 @@ export const sceneAPI = {
   update(sceneId, data) {
     return request.put(`/scenes/${sceneId}`, data)
   },
-  delete(sceneId) {
-    return request.delete(`/scenes/${sceneId}`)
+  delete(sceneId, episodeId) {
+    const q = episodeId != null ? `?episode_id=${encodeURIComponent(episodeId)}` : ''
+    return request.delete(`/scenes/${sceneId}${q}`)
+  },
+  bindToEpisode(episodeId, sceneId) {
+    return request.post(`/episodes/${episodeId}/scenes/${sceneId}/bind`)
   },
   addToLibrary(sceneId, body = {}) {
     return request.post(`/scenes/${sceneId}/add-to-library`, body)
@@ -33,6 +37,10 @@ export const sceneAPI = {
   },
   extractFromImage(sceneId) {
     return request.post(`/scenes/${sceneId}/extract-from-image`, {})
+  },
+  /** 四宫格场景拆分为单格，供生视频参考（避免成片出现分格） */
+  ensureVideoRef(sceneId) {
+    return request.post(`/scenes/${sceneId}/ensure-video-ref`, {})
   },
   putRefImage(sceneId, refImagePath) {
     return request.put(`/scenes/${sceneId}`, { ref_image: refImagePath ?? null })

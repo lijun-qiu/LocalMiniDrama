@@ -2654,20 +2654,14 @@ function buildAgnesSubmitFailure(status, raw, fallbackPrefix) {
 /**
  * Agnes 视频入参图片策略（可单测）：
  * - 顶层 image 仅支持 string（服务端 Go 结构体不接受 array）
- * - 全能多图参考：extra_body.image 数组，且禁止 mode: keyframes
+ * - V2.0 ti2vid 仅支持单张 image；多参考图降级为首图 i2v（勿用 extra_body.image 数组）
  * - 经典首尾帧：extra_body.mode = keyframes + 恰好两张图
  */
 function buildAgnesVideoImagePayload({ useOmniReference, resolvedRefs, firstResolved, lastResolved }) {
   const refs = Array.isArray(resolvedRefs) ? resolvedRefs.filter(Boolean) : [];
-  if (useOmniReference && refs.length >= 2) {
+  if (useOmniReference && refs.length >= 1) {
     return {
-      strategy: 'omni_reference_extra_body',
-      extra_body: { image: refs.slice(0, 10) },
-    };
-  }
-  if (useOmniReference && refs.length === 1) {
-    return {
-      strategy: 'omni_reference_single',
+      strategy: refs.length > 1 ? 'omni_reference_single_first_only' : 'omni_reference_single',
       image: refs[0],
     };
   }
@@ -2751,12 +2745,51 @@ function buildAgnes25VideoBody({
   return { body, strategy: isFlash ? 'v25_flash_text' : 'v25_text' };
 }
 
-/** Agnes V2 原生音视频：允许 BGM/环境音，禁用人物说话/旁白/解说 */
+/** Agnes V2 原生音视频：允许 BGM/环境音，禁用人物说话/旁白/解说；同时压制画面字幕/花字 */
 const AGNES_SILENT_NEGATIVE_PROMPT =
-  'speech, dialogue, voiceover, talking, narration, lip sync, lip movement, English speech, subtitle, vocals, singing, announcer';
+  'speech, dialogue, voiceover, talking, narration, lip sync, lip movement, English speech, subtitle, subtitles, captions, on-screen text, text overlay, karaoke, lyrics, watermark, title text, lower third, burned-in text, Chinese characters, 字幕, 花字, 标题, 歌词, 弹幕, 画面文字, 烧录文字, vocals, singing, announcer';
 
 const AGNES_SILENT_SUFFIX =
-  '【音频约束】可有轻柔背景音乐与环境音；禁止人物开口、对白、旁白、解说配音；人物闭口无口型。【画面约束】禁止画面字幕、烧录文字、标题文字、歌词、任何 on-screen text / captions / subtitles（字幕由后期烧录）。';
+  '【音频约束】可有轻柔背景音乐与环境音；禁止人物开口、对白、旁白、解说配音；人物闭口无口型。【画面约束】禁止画面字幕、烧录文字、标题文字、歌词、花字、弹幕、角标、任何 on-screen text / captions / subtitles / Chinese characters as overlay（旁白字幕仅由后期 ffmpeg 烧录，成片像素中不得出现可读汉字条）。';
+
+/** 提交前强制置顶的禁字约束（模型对 prompt 开头权重更高） */
+const AGNES_NO_TEXT_PREFIX =
+  '【最高优先级·禁画面字】本段为无字幕成片：画面中禁止出现任何可读文字、字幕条、标题、歌词、花字、弹幕、水印、角标；禁止把台词/旁白画进画面。';
+
+/**
+ * 剥离会诱导模型「把字画进画面」的措辞与引号台词（全文解说旁白由后期烧录）。
+ */
+function stripPromptCuesThatCauseBurnedInText(raw) {
+  let p = (raw || '').toString();
+  if (!p) return p;
+  p = p
+    .replace(/解说旁白[：:][^。\n]*[。\n]?/g, '')
+    .replace(/对话[：:][^。\n]*[。\n]?/g, '')
+    .replace(/对白[：:][^。\n]*[。\n]?/g, '')
+    .replace(/\s*台词[：:][^。\n]*[。\n]?/g, '')
+    .replace(/旁白（画面无声）[：:]\s*[""「][^""」]*[""」]/g, '')
+    .replace(/第\d+秒\s*@人物\d+[：:]\s*[""「][^""」]*[""」]/g, '')
+    // 全能拍内常见：@图片N 说/道：「台词」→ 极易被画成字幕
+    .replace(
+      /@图片\s*(\d+)\s*(?:说|道|喊|叫|答|问|念|读|低语|怒吼)?[：:]\s*[「」""][^「」""]{0,120}[」""]/g,
+      '@图片$1 人物闭口无口型，无对白'
+    )
+    // 无说话者前缀的「说："…"」
+    .replace(/(?:说|道|喊|叫|答|问)[：:]\s*[「」""][^「」""]{0,120}[」""]/g, '人物闭口无口型')
+    .replace(/[「」""][^「」""]{2,80}[」""]\s*字幕浮现于画面[^，。；\n]*/g, '')
+    .replace(/字幕浮现于画面[^，。；\n]*/g, '')
+    .replace(/下方滚动字幕[^，。；\n]*/g, '屏幕下方信息条')
+    .replace(/滚动字幕[^，。；\n]*/g, '屏幕信息条')
+    .replace(/烧录字幕[^，。；\n]*/g, '')
+    .replace(/画面下方出现字幕[^，。；\n]*/g, '')
+    .replace(/画面内字幕[^，。；\n]*/g, '')
+    .replace(/下方字幕[^，。；\n]*/g, '')
+    .replace(/\[禁BGM\]/g, '')
+    .replace(/\[禁字幕\]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return p;
+}
 
 function isDramaFullNarrationVideoMode(db, dramaId) {
   if (!db || !dramaId) return false;
@@ -2771,29 +2804,48 @@ function isDramaFullNarrationVideoMode(db, dramaId) {
 }
 
 /**
- * 提交 Agnes 前剥离会触发原生配音的文案（解说/对白/旁白），并追加无对白约束（保留 BGM）。
- * 全文解说模式下旁白由分镜视频后处理 IndexTTS 叠加，不应让 Agnes 朗读。
+ * 提交 Agnes 前剥离会触发原生配音的文案（解说/对白/旁白），并追加无对白/无字幕约束（保留 BGM）。
+ * 全文解说模式下旁白由分镜视频后处理 IndexTTS 叠加，不应让 Agnes 朗读或画字。
  */
-function prepareAgnesVideoPrompt(rawPrompt, { forceSilent = false } = {}) {
+function prepareAgnesVideoPrompt(rawPrompt, { forceSilent = false, durationSec = null } = {}) {
   let p = (rawPrompt || '').toString().trim();
   if (!p) return { prompt: p, useSilentNegative: !!forceSilent };
 
+  try {
+    const {
+      adaptUniversalSegmentTextForAgnes,
+      isUniversalMultiBeatPrompt,
+      AGNES_SEQUENTIAL_ORDER_SUFFIX,
+    } = require('./agnesUniversalPromptAdapter');
+    if (isUniversalMultiBeatPrompt(p)) {
+      const dur = durationSec != null ? Number(durationSec) : null;
+      const { adapted, changed } = adaptUniversalSegmentTextForAgnes(p, {
+        durationSec: Number.isFinite(dur) && dur > 0 ? dur : null,
+      });
+      if (changed && adapted) p = adapted;
+      if (!p.includes('【顺序约束·最高优先级】')) {
+        p = p ? `${p}\n${AGNES_SEQUENTIAL_ORDER_SUFFIX}` : AGNES_SEQUENTIAL_ORDER_SUFFIX;
+      }
+    }
+  } catch (_) {
+    /* 适配失败则沿用原文 */
+  }
+
   const hadSpeechCue =
-    /解说旁白[：:]|对话[：:]|对白[：:]|台词[：:]|旁白（画面无声）|@人物\d+[：:]\s*[""「]/.test(p);
+    /解说旁白[：:]|对话[：:]|对白[：:]|台词[：:]|旁白（画面无声）|@人物\d+[：:]\s*[""「]|@图片\s*\d+\s*(?:说|道|喊)|[「」""][^「」""]{2,}[」""]/.test(
+      p
+    );
 
   if (forceSilent || hadSpeechCue) {
-    p = p
-      .replace(/解说旁白[：:][^。]*。?/g, '')
-      .replace(/对话[：:][^。]*。?/g, '')
-      .replace(/对白[：:][^。]*。?/g, '')
-      .replace(/\s*台词[：:][^。]*。?/g, '')
-      .replace(/旁白（画面无声）[：:]\s*[""「][^""」]*[""」]/g, '')
-      .replace(/第\d+秒\s*@人物\d+[：:]\s*[""「][^""」]*[""」]/g, '')
-      .replace(/\[禁BGM\]/g, '')
-      .replace(/\s{2,}/g, ' ')
-      .trim();
-    if (!p.includes('禁止人物开口')) {
+    p = stripPromptCuesThatCauseBurnedInText(p);
+    if (!p.includes('禁止人物开口') && !p.includes('禁止画面字幕')) {
       p = p ? `${p} ${AGNES_SILENT_SUFFIX}` : AGNES_SILENT_SUFFIX;
+    } else if (!p.includes('禁止画面字幕')) {
+      p = `${p} 【画面约束】禁止画面字幕、烧录文字、标题文字、歌词、花字、弹幕、任何 on-screen text / captions / subtitles（字幕由后期烧录）。`;
+    }
+    // 置顶再强调一次：Agnes 2.5 无 negative_prompt，只能靠正文权重
+    if (forceSilent && !p.startsWith('【最高优先级·禁画面字】')) {
+      p = `${AGNES_NO_TEXT_PREFIX}\n${p}`;
     }
   }
 
@@ -2815,6 +2867,7 @@ async function callAgnesVideoApi(db, config, log, opts) {
     video_gen_id,
     silent_video,
     seed,
+    preferred_key_index,
   } = opts;
 
   const base = (config.base_url || 'https://apihub.agnes-ai.com/v1').replace(/\/$/, '');
@@ -2825,7 +2878,10 @@ async function callAgnesVideoApi(db, config, log, opts) {
   const resolvedModel = normalizeAgnesVideoModel(model);
   const useV25Family = isAgnesVideo25FamilyModel(resolvedModel);
 
-  const prepared = prepareAgnesVideoPrompt(prompt, { forceSilent: !!silent_video });
+  const prepared = prepareAgnesVideoPrompt(prompt, {
+    forceSilent: !!silent_video,
+    durationSec: duration,
+  });
   let agnesPrompt = prepared.prompt || '';
 
   const rawRefList = Array.isArray(reference_urls) ? reference_urls.filter(Boolean) : [];
@@ -2955,6 +3011,13 @@ async function callAgnesVideoApi(db, config, log, opts) {
     last_resolved: lastResolved,
     image_strategy: imageStrategy,
   });
+  if (imageStrategy === 'omni_reference_single_first_only') {
+    log.warn('[Agnes] V2.0 ti2vid 仅支持单张参考图，已自动使用首张', {
+      video_gen_id,
+      submitted_count: 1,
+      dropped_count: resolvedRefs.length - 1,
+    });
+  }
 
   logVideoPostRequest(log, 'Agnes', url, body, video_gen_id, {
     model: body.model,
@@ -3059,9 +3122,17 @@ async function callAgnesVideoApi(db, config, log, opts) {
   const maxAttempts = 3; // 首次 1 次 + 报错后最多再试 2 次
   const retryIntervalMs = 60_000;
   let lastFail = null;
+  const basePrefer =
+    preferred_key_index != null && Number.isFinite(Number(preferred_key_index))
+      ? Number(preferred_key_index)
+      : null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // 串行/显式轮询：每次重试顺延一把 Key，避免同 Key 卡在 1 分钟冷却上
+    const preferIdx = basePrefer != null ? basePrefer + (attempt - 1) : null;
     const result = pool
-      ? await pool.run((apiKey, keyIndex) => submitWithKey(apiKey, keyIndex, attempt))
+      ? preferIdx != null
+        ? await pool.runPreferred(preferIdx, (apiKey, keyIndex) => submitWithKey(apiKey, keyIndex, attempt))
+        : await pool.run((apiKey, keyIndex) => submitWithKey(apiKey, keyIndex, attempt))
       : await submitWithKey(config.api_key || '', 0, attempt);
     if (!result.error) return result;
     lastFail = result;
@@ -4346,6 +4417,7 @@ async function callVideoApi(db, log, opts) {
       video_gen_id: opts.video_gen_id,
       silent_video: silentVideo,
       seed: opts.seed,
+      preferred_key_index: opts.preferred_key_index,
     });
   }
 

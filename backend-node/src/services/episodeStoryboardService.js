@@ -2,8 +2,9 @@
 const taskService = require('./taskService');
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
-const { syncStoryboardCharacters, syncStoryboardProps } = require('./imageService');
+const { syncStoryboardCharacters, syncStoryboardProps, syncStoryboardScene } = require('./imageService');
 const { syncStoryboardCharacterLinksFromCharactersColumn } = require('./storyboardService');
+const { syncEpisodeAssetBindsFromStoryboards } = require('./episodeAssetBindService');
 const safeJson = require('../utils/safeJson');
 const { safeParseAIJSON, extractJsonCandidate, repairTruncatedJsonArray, extractFirstArray } = safeJson;
 const loadConfig = require('../config').loadConfig;
@@ -22,9 +23,16 @@ const {
   FULL_NARRATION_TARGET_CHARS,
   FULL_NARRATION_MIN_CHARS,
   FULL_NARRATION_MAX_CHARS,
+  UNIVERSAL_FULL_NARRATION_MAX_SEC,
+  PERIOD_MAX_SENTENCES_PER_SEGMENT,
   resolveFullNarrationLimits,
+  resolveUniversalFullNarrationLimits,
 } = require('./fullNarrationConstants');
 const { runConcurrentPool } = require('../utils/concurrentPool');
+const {
+  listPropsForStoryboardPrompt,
+  listScenesForStoryboardPrompt,
+} = require('../utils/episodeAssetScope');
 const {
   batchPolishStoryboardImagePromptsForEpisode,
   BATCH_IMAGE_PROMPT_CONCURRENCY,
@@ -161,8 +169,8 @@ function rowToScene(r) {
   };
 }
 
-/** 全文解说：第 1 镜固定为片头/标题镜（无旁白），旁白段落从第 2 镜起绑定 */
-const FULL_NARRATION_TITLE_SHOT_DURATION = 6;
+/** 全文解说：旁白按切段从第 1 镜起连续绑定（不再单独插片头空镜） */
+const FULL_NARRATION_TITLE_SHOT_DURATION = 6; // 兼容旧调用；新逻辑不再使用片头固定时长
 /** 句末标点（优先在此处分段） */
 const NARRATION_PRIMARY_PUNCT_RE = /(?<=[。！？!?；;])\s*/;
 /** 句内次级标点（仅当单句超上限可读字时再拆） */
@@ -173,6 +181,18 @@ const NARRATION_SPEECH_CHAR_RE = /[\u4e00-\u9fa5A-Za-z0-9]/g;
 function countNarrationSpeechChars(text) {
   const m = String(text || '').match(NARRATION_SPEECH_CHAR_RE);
   return m ? m.length : 0;
+}
+
+/** 配音用旁白：去掉空行，避免分镜旁白框与 TTS 出现空白停顿 */
+function collapseNarrationBlankLines(text) {
+  const raw = String(text ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (!raw) return '';
+  return raw
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim() !== '')
+    .join('\n')
+    .trim();
 }
 
 /** 在原文中按「可读字数」切分，返回 head/tail（head 含至多 maxSpeech 个可读字） */
@@ -221,9 +241,8 @@ function normalizeStoryboardListShotNumbers(storyboards) {
 /**
  * 按旁白字数估算单镜视频时长（秒）。
  * 公式：朗读所需秒数 = ceil(字数 ÷ 语速)；超出整秒容量时向上取整补全到下一秒。
- * 默认语速 5 字/秒；时长限制在 [durationMinSec, maxSec]（默认 4～10 秒）。
- * 分段仍尽量合并到 8～10 秒字数；短孤儿段按时长真实字数估，不再硬抬到 8 秒。
- * 例（5 字/秒）：21字→5秒；45字→9秒；46字→10秒；50字→10秒。
+ * 默认语速 5.5 字/秒；时长限制在 [durationMinSec, maxSec]（默认 4～12 秒）。
+ * 例（5.5 字/秒）：22字→4秒；45字→9秒；66字→12秒。
  */
 function estimateDurationFromSpeechText(text, limitsOrOpts = {}) {
   const opts = limitsOrOpts && limitsOrOpts.NARRATION_CHARS_PER_SEC != null
@@ -322,43 +341,61 @@ function buildCameraMotionChain(movement, shotType, durationSec) {
   return chain || '定镜，缓推轨';
 }
 
-/** 全能分镜：模型未返回 universal_segment_text 时的灵境式高密度单行（视频时间轴 + 运镜链） */
+/** 全能分镜：模型未返回 universal_segment_text 时的多子分镜段落兜底（含主人公槽位） */
 function buildFallbackUniversalSeedanceLine(sb, d, styleHint) {
-  const act = (d.action || '').replace(/\s+/g, ' ').trim().slice(0, 220);
-  const res = (d.result || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-  const emo = (d.emotion || sb.emotion || '').replace(/\s+/g, ' ').trim().slice(0, 24);
-  const atm = (sb.atmosphere || '').replace(/\s+/g, ' ').trim().slice(0, 100);
-  const shotBits = [d.shotType, d.angle].filter(Boolean).join('，').trim();
-  const loc = [sb.location, sb.time].filter(Boolean).join('，').trim() || '叙事空间';
-  const dur = Math.max(1, Number(d.durationSec) || normalizeDuration(sb.duration) || 5);
-  const lightZh = lightingStyleHintZh(d.lightingStyle);
-  const dof = d.depthOfField === 'extreme_shallow' ? '浅景深前景虚化明显' : d.depthOfField === 'shallow' ? '浅景深背景柔化' : d.depthOfField === 'deep' ? '深焦前后景均清晰' : d.depthOfField === 'medium' ? '景深适中' : '景深随景别可感';
-  const shotNum = Math.max(1, Number(d.shotNumber) || 1);
-  const link = shotNum <= 1 ? '开篇情绪奠基' : '延续上一镜动势与视线';
-  const motionCore =
-    act ||
-    '在镜内时长里完成一段可感知的动作阶段变化，含走位或身体重心的转移，避免单姿势摆拍';
-  const emoParen = emo ? `（${emo}）` : '（专注投入）';
-  const fg = atm ? `${atm.slice(0, 42)}与主体相关的虚化层次` : '与动作相关的近景细节或桌面器物';
-  const mg = act ? '主体动作与表情核心区' : '主体占据画面叙事中心';
-  const bg = loc ? `${loc}的环境延展与氛围层次` : '环境纵深与空间气氛';
-  const lightBlock = `[${lightZh}；结合${loc}，建议色温具象化如4500K-5600K区间择一；明暗比约2:1至3:1；${dof}]`;
-  const camChain = buildCameraMotionChain(d.movement, d.shotType, dur);
-  const narrDyn = `约${dur}秒内——在${loc}，@人物1${act ? `先后：${act}` : '持续推进戏内动作'}，${res ? `阶段收束为：${res}` : '动作与视线随时间有阶段推进'}；镜头以「${camChain}」配合人物动线，读出空间纵深与时间流逝`;
-  const lensBlock = `运镜链：${camChain}；景别机位：${shotBits || '中景，平视'}，三分法或对角线择一（结尾动势：[${res || '视线或身体动线指向下一个节拍，动势渐收可衔接下镜'}]）`;
-  const sfx = `环境层-[与${loc}一致的环境声底与远处细节] 动作层-[与动作同步的物理接触声] 情绪层-[无旋律仅以空间混响与材质细微声烘托情绪张力]`;
-  const styleTail = (styleHint && String(styleHint).trim()) || '电影感叙事光色';
-  const dia = (d.dialogue || '').trim().replace(/"/g, "'");
-  let line = `主体：@人物1${emoParen}[朝向：依轴线面向戏中对象或画左/画右择一并保持统一] 正在 ${motionCore}（与上镜衔接：${link}） 叙事动态：${narrDyn} 空间：前景-[${fg}] 中景-[${mg}] 背景-[${bg}] 光影：${lightBlock} 镜头：${lensBlock}`;
-  if (dia) line += ` 台词：第1秒 @人物1："${dia.slice(0, 120)}"`;
-  line += ` 音效：${sfx} ${styleTail} [禁BGM][禁字幕]`;
-  return line.replace(/\r?\n/g, ' ');
+  const { buildFallbackUniversalMultiBeatText } = require('./universalOmniMultiBeatFormat');
+  const { inferPrimarySubject, parseDialogueSpeakerLines } = require('./universalSubjectLock');
+
+  // 分镜生成时尚无参考图槽位；按「场景=@图片1，角色从 @图片2」约定预留，并锁定段落主人公
+  const charSlots = [];
+  const seen = new Set();
+  const pushName = (nm) => {
+    const name = nm != null && String(nm).trim() ? String(nm).trim() : '';
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    charSlots.push({ tag: `@图片${charSlots.length + 2}`, summary: name, kind: '角色' });
+  };
+  if (Array.isArray(sb?.characters)) {
+    for (const item of sb.characters) {
+      if (typeof item === 'object' && item != null && item.name) pushName(item.name);
+    }
+  }
+  const primary = inferPrimarySubject(d.action, d.dialogue, charSlots, d.narration || sb?.narration);
+  const speakers = parseDialogueSpeakerLines(d.dialogue, charSlots.map((s) => s.summary));
+  let dialogueSpeakerTag = primary?.tag || '@图片2';
+  for (const sp of speakers) {
+    if (sp.speaker) {
+      const hit = charSlots.find((s) => s.summary === sp.speaker);
+      if (hit) {
+        dialogueSpeakerTag = hit.tag;
+        break;
+      }
+    }
+  }
+
+  return buildFallbackUniversalMultiBeatText(
+    sb,
+    {
+      action: d.action,
+      dialogue: d.dialogue,
+      narration: d.narration || sb?.narration,
+      result: d.result,
+      durationSec: d.durationSec,
+      primaryImageTag: primary?.tag || (charSlots[0]?.tag) || '@图片2',
+      primarySubjectName: primary?.name || '',
+      dialogueSpeakerTag,
+      dialogueSpeakerName: speakers.find((s) => s.speaker)?.speaker || primary?.name || '',
+    },
+    styleHint
+  );
 }
 
 function getStoryboardsForEpisode(db, episodeId) {
   const rows = dedupeStoryboardRowsByNumber(
     db.prepare(
-      'SELECT * FROM storyboards WHERE episode_id = ? AND deleted_at IS NULL ORDER BY storyboard_number ASC, id ASC'
+      `SELECT * FROM storyboards
+       WHERE episode_id = ? AND deleted_at IS NULL AND COALESCE(is_intro, 0) = 0
+       ORDER BY storyboard_number ASC, id ASC`
     ).all(episodeId)
   );
   const propMap = {};
@@ -417,8 +454,10 @@ function getStoryboardsForEpisode(db, episodeId) {
       prop_ids: propMap[r.id] || [],
       composed_image: r.composed_image,
       video_url: r.video_url,
+      video_review: r.video_review === 'ok' || r.video_review === 'revise' ? r.video_review : null,
       audio_local_path: r.audio_local_path ?? null,
       narration_audio_local_path: r.narration_audio_local_path ?? null,
+      narration_prompt_aligned_at: r.narration_prompt_aligned_at ?? null,
       status: r.status || 'pending',
       created_at: r.created_at,
       updated_at: r.updated_at,
@@ -585,7 +624,9 @@ function deriveStoryboardFieldsFromAi(sb, style, videoRatio, opts = {}) {
     : [];
   let universalSegmentText = '';
   if (sb.universal_segment_text != null && String(sb.universal_segment_text).trim()) {
-    universalSegmentText = String(sb.universal_segment_text).trim().replace(/\r?\n/g, ' ');
+    // 多子分镜段落须保留换行；勿压成单行以免格式与主人公绑定失效
+    const { normalizeUniversalSegmentTextNewlines } = require('./universalOmniMultiBeatFormat');
+    universalSegmentText = normalizeUniversalSegmentTextNewlines(sb.universal_segment_text);
   }
   if (universalOmni && !universalSegmentText) {
     universalSegmentText = buildFallbackUniversalSeedanceLine(
@@ -602,6 +643,7 @@ function deriveStoryboardFieldsFromAi(sb, style, videoRatio, opts = {}) {
         emotion,
         lightingStyle,
         depthOfField,
+        narration: sb.narration,
       },
       style
     );
@@ -637,16 +679,25 @@ function deriveStoryboardFieldsFromAi(sb, style, videoRatio, opts = {}) {
   };
 }
 
-/** 用最终解析的分镜对象覆盖已存在的行（修正流式增量先入库时缺 narration 等字段的问题） */
-function updateStoryboardRowFromDerived(db, existingId, episodeIdNum, d, sb, now) {
+/**
+ * 用最终解析的分镜对象覆盖已存在的行（修正流式增量先入库时缺 narration 等字段的问题）
+ * @param {object} [opts]
+ * @param {boolean} [opts.forceRebindAssets] - true 时按 AI 结果强制写角色/场景/道具（含清空）；默认保留「AI 空则不覆盖已有绑定」
+ */
+function updateStoryboardRowFromDerived(db, existingId, episodeIdNum, d, sb, now, opts = {}) {
+  const forceRebindAssets = !!opts.forceRebindAssets;
   let charactersJson = d.charactersJson;
   let propIds = Array.isArray(d.propIds) ? [...d.propIds] : [];
+  let sceneId = d.sceneId != null && Number.isFinite(Number(d.sceneId)) ? Number(d.sceneId) : null;
   try {
-    const existingRow = db.prepare('SELECT characters FROM storyboards WHERE id = ?').get(existingId);
+    const existingRow = db.prepare('SELECT characters, scene_id FROM storyboards WHERE id = ?').get(existingId);
     const existingChars = normalizeStoryboardCharactersField(existingRow?.characters);
     const incomingChars = normalizeStoryboardCharactersField(charactersJson);
-    if (incomingChars.length === 0 && existingChars.length > 0) {
+    if (!forceRebindAssets && incomingChars.length === 0 && existingChars.length > 0) {
       charactersJson = JSON.stringify(existingChars);
+    }
+    if (!forceRebindAssets && sceneId == null && existingRow?.scene_id != null) {
+      sceneId = Number(existingRow.scene_id);
     }
     const existingPropLinks = db
       .prepare('SELECT prop_id FROM storyboard_props WHERE storyboard_id = ?')
@@ -654,7 +705,7 @@ function updateStoryboardRowFromDerived(db, existingId, episodeIdNum, d, sb, now
     const existingPropIds = existingPropLinks
       .map((p) => Number(p.prop_id))
       .filter(Number.isFinite);
-    if (propIds.length === 0 && existingPropIds.length > 0) {
+    if (!forceRebindAssets && propIds.length === 0 && existingPropIds.length > 0) {
       propIds = existingPropIds;
     }
   } catch (_) {}
@@ -670,7 +721,7 @@ function updateStoryboardRowFromDerived(db, existingId, episodeIdNum, d, sb, now
       updated_at = ?
      WHERE id = ? AND episode_id = ? AND deleted_at IS NULL`
   ).run(
-    d.sceneId,
+    sceneId,
     d.title || null,
     d.description,
     sb.location ?? null,
@@ -701,10 +752,12 @@ function updateStoryboardRowFromDerived(db, existingId, episodeIdNum, d, sb, now
     episodeIdNum
   );
   try {
-    if (propIds.length > 0) {
+    if (forceRebindAssets || propIds.length > 0) {
       db.prepare('DELETE FROM storyboard_props WHERE storyboard_id = ?').run(existingId);
-      const insProp = db.prepare('INSERT OR IGNORE INTO storyboard_props (storyboard_id, prop_id) VALUES (?, ?)');
-      for (const pid of propIds) insProp.run(existingId, pid);
+      if (propIds.length > 0) {
+        const insProp = db.prepare('INSERT OR IGNORE INTO storyboard_props (storyboard_id, prop_id) VALUES (?, ?)');
+        for (const pid of propIds) insProp.run(existingId, pid);
+      }
     }
   } catch (_) {}
 }
@@ -966,7 +1019,8 @@ function saveStoryboards(db, log, episodeId, storyboards, cfg, styleOverride, sk
     const placeholders = keepNums.map(() => '?').join(',');
     const toRemove = db
       .prepare(
-        `SELECT id FROM storyboards WHERE episode_id = ? AND deleted_at IS NULL AND storyboard_number NOT IN (${placeholders})`
+        `SELECT id FROM storyboards WHERE episode_id = ? AND deleted_at IS NULL
+         AND COALESCE(is_intro, 0) = 0 AND storyboard_number NOT IN (${placeholders})`
       )
       .all(episodeIdNum, ...keepNums)
       .map((r) => r.id);
@@ -985,20 +1039,115 @@ function saveStoryboards(db, log, episodeId, storyboards, cfg, styleOverride, sk
 }
 
 /**
- * 将剧本正文按标点拆分为全文解说段落。
- * 统一规则：目标约 9 秒 / 语速×9 字；在当前符号处切开；即将超 语速×10 字则退回上一符号；
- * 末段 ≤上限保留，>上限再拆成两镜（仍只在标点处切）。
+ * 以「。」切分为句段（保留句号；末段可无句号）。
  */
-function splitScriptIntoNarrationSegments(script, limits = DEFAULT_NARRATION_LIMITS) {
-  const text = String(script || '').trim();
-  if (!text) return [];
-  const units = tokenizeNarrationAtoms(text, limits);
-  if (!units.length) return [];
-  return packNarrationUnitsByTarget(units, limits);
+function tokenizeNarrationByPeriod(text) {
+  const s = String(text || '').replace(/\r\n/g, '\n');
+  if (!s.trim()) return [];
+  const units = [];
+  let buf = '';
+  for (let i = 0; i < s.length; i++) {
+    buf += s[i];
+    if (s[i] === '。') {
+      const t = buf.trim();
+      if (t) units.push(t);
+      buf = '';
+    }
+  }
+  const tail = buf.trim();
+  if (tail) units.push(tail);
+  return units;
 }
 
 /**
- * 拆成标点单元（句末 + 句内逗号等），单段无标点且超上限时才硬切可读字。
+ * 将连续句段合并为一镜：可读字数 ≤ 硬上限（12s），无句数上限。
+ */
+function packPeriodSentences(sentences, limits = DEFAULT_NARRATION_LIMITS) {
+  const maxChars = limits.FULL_NARRATION_MAX_CHARS;
+  const speechLen = (s) => countNarrationSpeechChars(s);
+  const segments = [];
+  let buf = [];
+  let bufChars = 0;
+
+  const flush = () => {
+    if (!buf.length) return;
+    segments.push(buf.join(''));
+    buf = [];
+    bufChars = 0;
+  };
+
+  for (const raw of sentences || []) {
+    const sent = String(raw || '').trim();
+    if (!sent) continue;
+
+    const sentChars = speechLen(sent);
+    if (sentChars > maxChars) {
+      flush();
+      segments.push(...splitOversizedChapterBlockAtSentences(sent, maxChars));
+      continue;
+    }
+
+    if (buf.length > 0 && bufChars + sentChars > maxChars) {
+      flush();
+    }
+
+    buf.push(sent);
+    bufChars += sentChars;
+  }
+  flush();
+  return segments;
+}
+
+/**
+ * 相邻镜段二次合并：合计 ≤ 硬上限则并段（仅按字数，无句数上限）。
+ */
+function mergeAdjacentPeriodSegments(segments, limits = DEFAULT_NARRATION_LIMITS) {
+  const maxChars = limits.FULL_NARRATION_MAX_CHARS;
+  const out = [];
+  let buf = '';
+
+  for (const raw of segments || []) {
+    const seg = String(raw || '').trim();
+    if (!seg) continue;
+    if (!buf) {
+      buf = seg;
+      continue;
+    }
+    const combined = buf + seg;
+    if (countNarrationSpeechChars(combined) <= maxChars) {
+      buf = combined;
+    } else {
+      out.push(buf);
+      buf = seg;
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
+}
+
+/**
+ * 全文解说统一切分：全文按「。」切句后合并（空行/单换行不阻断合并）。
+ */
+function splitScriptIntoNarrationSegmentsByPeriod(script, limits = DEFAULT_NARRATION_LIMITS) {
+  const text = String(script || '').replace(/\r\n/g, '\n').trim();
+  if (!text) return [];
+  const sentences = tokenizeNarrationByPeriod(text);
+  if (!sentences.length) return [];
+  const packed = packPeriodSentences(sentences, limits);
+  return mergeAdjacentPeriodSegments(packed, limits)
+    .map(collapseNarrationBlankLines)
+    .filter(Boolean);
+}
+
+/**
+ * 将剧本正文按「。」句段切分并合并为全文解说段落（经典 / 全能统一规则）。
+ */
+function splitScriptIntoNarrationSegments(script, limits = DEFAULT_NARRATION_LIMITS) {
+  return splitScriptIntoNarrationSegmentsByPeriod(script, limits);
+}
+
+/**
+ * @deprecated 旧标点装箱逻辑，仅供 ensureNarrationSegmentsWithinLimit 等兼容调用
  */
 function tokenizeNarrationAtoms(text, limits = DEFAULT_NARRATION_LIMITS) {
   const cap = limits.FULL_NARRATION_MAX_CHARS;
@@ -1178,6 +1327,258 @@ function mergeNarrationAtomsIntoSegments(atoms, limits = DEFAULT_NARRATION_LIMIT
   return packNarrationUnitsByTarget(atoms, limits);
 }
 
+/** 章节标题行（用于全能+全文解说按内容切段） */
+const CHAPTER_HEAD_LINE_RE =
+  /^(第[一二三四五六七八九十百千万零〇两\d]+[章节回部篇]|Chapter\s+\d+|[【\[]?第\s*\d+\s*[章节回部篇][】\]]?|#{1,3}\s+\S+)/i;
+
+/** 仅句末标点（超长段落被迫再拆时用；不用逗号/顿号，避免切碎） */
+const CHAPTER_SENTENCE_END_RE = /([。！？!?；;]+)/;
+
+/** 上一行已收束、本行像新内容段（缩进起段 / 独立成段），用于单换行小说正文 */
+function isLikelyContentParagraphBreak(prevLine, line) {
+  const prev = String(prevLine || '');
+  const cur = String(line || '');
+  const prevT = prev.trim();
+  const curT = cur.trim();
+  if (!prevT || !curT) return false;
+  if (CHAPTER_HEAD_LINE_RE.test(curT)) return true;
+  // 全角空格 / 多空格缩进起段（常见小说段落）
+  if (/^[　]+/.test(cur) || /^[ \t]{2,}\S/.test(cur)) return true;
+  // 上一行以句末收束，且本行够长 → 视为新内容段（不把软换行当段）
+  const prevEndsSentence = /[。！？!?…；;]["」』》】）)\]]*$/.test(prevT);
+  if (prevEndsSentence && countNarrationSpeechChars(curT) >= 12) return true;
+  return false;
+}
+
+/**
+ * 按空行段落 + 章节标题 + 内容段换行拆成内容块（不按句号切）。
+ * 单换行小说也会按「内容段」切开，再由 pack 合并到约 12 秒。
+ */
+function splitScriptIntoChapterBlocks(script) {
+  const raw = String(script || '').replace(/\r\n/g, '\n').trim();
+  if (!raw) return [];
+
+  let paras = raw.split(/\n\s*\n+/).map((s) => s.trim()).filter(Boolean);
+  if (!paras.length) paras = [raw];
+
+  const blocks = [];
+  for (const para of paras) {
+    const lines = para.split('\n');
+    let buf = [];
+    const flush = () => {
+      const t = buf.join('\n').trim();
+      if (t) blocks.push(t);
+      buf = [];
+    };
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (buf.length) {
+        const prev = buf[buf.length - 1];
+        if (CHAPTER_HEAD_LINE_RE.test(trimmed) || isLikelyContentParagraphBreak(prev, line)) {
+          flush();
+        }
+      }
+      buf.push(line);
+    }
+    flush();
+  }
+  return blocks.length ? blocks : [raw];
+}
+
+function isChapterHeadBlock(block) {
+  const first = String(block || '').split('\n')[0].trim();
+  return CHAPTER_HEAD_LINE_RE.test(first);
+}
+
+/**
+ * 超长单块：只在句末标点处切成约 n 段（不用逗号），每段尽量 ≤maxChars。
+ */
+function splitOversizedChapterBlockAtSentences(block, maxChars) {
+  const text = String(block || '').trim();
+  if (!text) return [];
+  if (countNarrationSpeechChars(text) <= maxChars) return [text];
+
+  const tokens = text.split(CHAPTER_SENTENCE_END_RE).filter((s) => s !== '');
+  // 合并「句子 + 句末标点」
+  const sentences = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (CHAPTER_SENTENCE_END_RE.test(t) && sentences.length) {
+      sentences[sentences.length - 1] += t;
+    } else {
+      sentences.push(t);
+    }
+  }
+  if (sentences.length <= 1) {
+    // 无句末标点：硬切可读字（极少见）
+    return splitOversizedNarrationClause(text, maxChars);
+  }
+
+  const out = [];
+  let buf = '';
+  for (const sent of sentences) {
+    const next = buf ? buf + sent : sent;
+    if (buf && countNarrationSpeechChars(next) > maxChars) {
+      out.push(buf);
+      buf = sent;
+    } else {
+      buf = next;
+    }
+  }
+  if (buf) out.push(buf);
+  return finalizeNarrationSegmentsMax(out, maxChars);
+}
+
+/**
+ * 将超长内容块均分成约 n 段：优先句末，不用逗号级切碎。
+ */
+function splitBlockIntoNParts(block, n, maxChars) {
+  const text = String(block || '').trim();
+  if (!text || n <= 1) return text ? [text] : [];
+
+  const sentenceParts = splitOversizedChapterBlockAtSentences(text, maxChars);
+  if (sentenceParts.length <= n) {
+    return finalizeNarrationSegmentsMax(sentenceParts, maxChars);
+  }
+
+  const total = sentenceParts.reduce((a, p) => a + countNarrationSpeechChars(p), 0);
+  const targetEach = Math.ceil(total / n);
+  const out = [];
+  let buf = '';
+  let bufLen = 0;
+  for (let i = 0; i < sentenceParts.length; i++) {
+    const p = sentenceParts[i];
+    const plen = countNarrationSpeechChars(p);
+    const remainingParts = sentenceParts.length - i;
+    const remainingSlots = Math.max(1, n - out.length);
+    const mustFlush = buf && out.length < n - 1 && (
+      remainingParts < remainingSlots ||
+      bufLen + plen > maxChars ||
+      (bufLen >= targetEach && out.length < n - 1)
+    );
+    if (mustFlush) {
+      out.push(buf);
+      buf = p;
+      bufLen = plen;
+      continue;
+    }
+    if (!buf) {
+      buf = p;
+      bufLen = plen;
+    } else if (bufLen + plen <= maxChars) {
+      buf += p;
+      bufLen += plen;
+    } else {
+      out.push(buf);
+      buf = p;
+      bufLen = plen;
+    }
+  }
+  if (buf) out.push(buf);
+  while (out.length > n) {
+    let best = 0;
+    let bestSum = Infinity;
+    for (let i = 0; i < out.length - 1; i++) {
+      const sum = countNarrationSpeechChars(out[i]) + countNarrationSpeechChars(out[i + 1]);
+      if (sum < bestSum) {
+        bestSum = sum;
+        best = i;
+      }
+    }
+    out.splice(best, 2, out[best] + out[best + 1]);
+  }
+  return finalizeNarrationSegmentsMax(out, maxChars);
+}
+
+/**
+ * 单内容块：≤12s 保留；>12s 优先拆成 2 或 3 段（只在句末切）。
+ */
+function splitChapterBlockByMaxDuration(block, limits) {
+  const maxChars = limits.FULL_NARRATION_MAX_CHARS;
+  const text = String(block || '').trim();
+  if (!text) return [];
+  const chars = countNarrationSpeechChars(text);
+  if (chars <= maxChars) return [text];
+  let n = Math.ceil(chars / maxChars);
+  if (n === 1) n = 2;
+  if (n > 3 && chars <= maxChars * 3) n = 3;
+  return splitBlockIntoNParts(text, n, maxChars);
+}
+
+/**
+ * 将空行短段合并到接近硬上限（默认 12s），章节标题强制新开一段。
+ * 这样不会「一段一个空行就一镜」切得过碎；也不按句号硬切。
+ */
+function packChapterBlocksToMaxDuration(blocks, limits) {
+  const maxChars = limits.FULL_NARRATION_MAX_CHARS;
+  const segments = [];
+  let buf = '';
+
+  const flush = () => {
+    if (!buf) return;
+    segments.push(...splitChapterBlockByMaxDuration(buf, limits));
+    buf = '';
+  };
+
+  for (const raw of blocks || []) {
+    const block = String(raw || '').trim();
+    if (!block) continue;
+
+    // 章节标题：先落下一段，再单独开新段（标题可与后续正文合并到同一镜）
+    if (isChapterHeadBlock(block) && buf) {
+      flush();
+    }
+
+    const blockChars = countNarrationSpeechChars(block);
+    if (blockChars > maxChars) {
+      flush();
+      segments.push(...splitChapterBlockByMaxDuration(block, limits));
+      continue;
+    }
+
+    if (!buf) {
+      buf = block;
+      continue;
+    }
+
+    const merged = `${buf}\n${block}`;
+    if (countNarrationSpeechChars(merged) <= maxChars) {
+      buf = merged;
+    } else {
+      flush();
+      buf = block;
+    }
+  }
+  flush();
+  return segments.map(collapseNarrationBlankLines).filter(Boolean);
+}
+
+/**
+ * 全能 + 全文解说：按章节/内容段落切分并合并短段；仅单段超过硬上限（默认 12s）时再拆 2～3 段。
+ * 不按句号做常规切镜，避免切碎。
+ */
+function splitScriptIntoNarrationSegmentsByChapter(script, limits = resolveUniversalFullNarrationLimits()) {
+  return splitScriptIntoNarrationSegmentsByPeriod(script, limits);
+}
+
+/** 经典 / 全能已统一为句号切分 */
+function resolveFullNarrationSplitPlan(script, baseLimits, universalOmni) {
+  const limits = resolveFullNarrationLimits(baseLimits?.NARRATION_CHARS_PER_SEC);
+  return {
+    limits,
+    segments: splitScriptIntoNarrationSegmentsByPeriod(script, limits),
+  };
+}
+
+function isDramaUniversalOmniFromMeta(meta) {
+  return (
+    meta?.storyboard_universal_omni === true ||
+    meta?.storyboard_universal_omni === 1 ||
+    String(meta?.storyboard_universal_omni || '').toLowerCase() === 'true'
+  );
+}
+
 /**
  * 兼容旧接口：短段仅在「合并后仍 ≤ 目标字数」时并入，绝不拼超上限。
  */
@@ -1256,34 +1657,33 @@ function ensureNarrationSegmentsMinLength(segments, limits = DEFAULT_NARRATION_L
 
 function buildFullNarrationSegmentBinding(cfg, segments, limits = DEFAULT_NARRATION_LIMITS) {
   if (!segments?.length) return '';
-  const targetChars = limits.FULL_NARRATION_TARGET_CHARS ?? FULL_NARRATION_TARGET_CHARS;
   const maxChars = limits.FULL_NARRATION_MAX_CHARS;
+  const maxSec = limits.FULL_NARRATION_MAX_SEC ?? FULL_NARRATION_MAX_SEC;
   const isEn = promptI18n.isEnglish(cfg);
-  const totalShots = segments.length + 1;
+  const totalShots = segments.length;
   const lines = segments.map((seg, i) => {
     const len = countNarrationSpeechChars(seg);
     const dur = estimateDurationFromSpeechText(seg, limits);
-    const shotNum = i + 2;
-    return isEn
-      ? `  Shot ${shotNum} narration (verbatim; target ~${targetChars}, max ${maxChars} speech chars; this segment ${len} speech chars), duration=${dur}s:\n  """\n  ${seg}\n  """`
-      : `  第 ${shotNum} 镜 narration（逐字照抄；目标约 ${targetChars} 字、上限 ${maxChars} 字；本段 ${len} 字），duration=${dur}秒：\n  """\n  ${seg}\n  """`;
+    const shotNum = i + 1;
+    if (isEn) {
+      return `  Shot ${shotNum} narration (verbatim; split by 。 then merge consecutive sentences up to ${maxSec}s / ${maxChars} speech chars; this segment ${len} speech chars), duration=${dur}s:\n  """\n  ${seg}\n  """`;
+    }
+    return `  第 ${shotNum} 镜 narration（逐字照抄；以。切句后连续合并至硬上限 ${maxChars} 字 / ${maxSec} 秒；本段 ${len} 字），duration=${dur}秒：\n  """\n  ${seg}\n  """`;
   }).join('\n\n');
   if (isEn) {
     return `
 
 [FULL NARRATION BINDING — MANDATORY]
-You MUST output exactly ${totalShots} shots total:
-- **Shot 1**: title/establishing card only — "narration" MUST be empty string ""; include scene/characters/props like shot 2; duration ${FULL_NARRATION_TITLE_SHOT_DURATION}s.
-- **Shots 2–${totalShots}**: for shot j (j≥2), "narration" MUST equal segment (j−1) below verbatim. Pack ~${targetChars} chars (max ${maxChars}) at punctuation only.
+You MUST output exactly ${totalShots} shots total. Narration starts at shot 1 (no empty title card).
+- **Shots 1–${totalShots}**: for shot j, "narration" MUST equal segment j below verbatim. Split script by 。; merge consecutive sentences while combined speech chars ≤ ${maxChars} (~${maxSec}s); start a new shot when the next sentence would exceed the limit.
 
 ${lines}`;
   }
   return `
 
 【全文解说分段绑定 — 硬性要求】
-你必须输出恰好 ${totalShots} 个分镜：
-- **第 1 镜**：片头/标题氛围镜 — "narration" 必须为空字符串 ""；须填写场景、角色、物品（与第 2 镜一致即可）；duration=${FULL_NARRATION_TITLE_SHOT_DURATION} 秒。
-- **第 2～${totalShots} 镜**：第 j 镜（j≥2）的 "narration" 必须**逐字等于**下列第 (j−1) 段原文；按约 ${targetChars} 字（上限 ${maxChars} 字）在标点处切分。
+你必须输出恰好 ${totalShots} 个分镜。**旁白从第 1 镜开始**（不要空旁白的片头镜）。
+- **第 1～${totalShots} 镜**：第 j 镜的 "narration" 必须**逐字等于**下列第 j 段原文；以**。**切句，连续多句合并为一镜（合计不超过 ${maxChars} 字 / ${maxSec} 秒）；再加下一句会超限则新开一镜。
 
 ${lines}`;
 }
@@ -1318,17 +1718,16 @@ function normalizeStoryboardPropIdsField(props) {
 /** 从 AI 分镜列表中选取「有角色/道具/场景」的捐赠镜，避免用最后一镜（常为空）作模板 */
 function pickFullNarrationAssetDonor(ordered) {
   if (!Array.isArray(ordered) || !ordered.length) return {};
-  const contentShots = ordered.length > 1 ? ordered.slice(1) : ordered;
-  for (const sb of contentShots) {
+  for (const sb of ordered) {
     if (!isEmptyStoryboardCharactersField(sb?.characters)) return sb;
   }
-  for (const sb of contentShots) {
+  for (const sb of ordered) {
     if (normalizeStoryboardPropIdsField(sb?.props).length > 0) return sb;
   }
-  for (const sb of contentShots) {
+  for (const sb of ordered) {
     if (sb?.scene_id) return sb;
   }
-  return contentShots[0] || ordered[0] || {};
+  return ordered[0] || {};
 }
 
 /** 目标镜缺少资产字段时，从捐赠镜补全（只补空，不覆盖已有） */
@@ -1351,16 +1750,14 @@ function inheritStoryboardAssetFields(target, donor) {
   return target;
 }
 
-/** 全文解说：各镜统一继承捐赠镜的角色/道具/场景（AI 常只填第 2 镜） */
+/** 全文解说：各镜统一继承捐赠镜的角色/道具/场景（AI 常只填其中一镜） */
 function propagateFullNarrationAssetsAcrossShots(storyboards) {
-  if (!Array.isArray(storyboards) || storyboards.length < 2) return storyboards;
+  if (!Array.isArray(storyboards) || !storyboards.length) return storyboards;
   const ordered = normalizeStoryboardListShotNumbers(storyboards);
   const donor = pickFullNarrationAssetDonor(ordered);
   for (let i = 0; i < storyboards.length; i += 1) {
-    const sb = storyboards[i];
-    inheritStoryboardAssetFields(sb, i === 0 ? (storyboards[1] || donor) : donor);
+    inheritStoryboardAssetFields(storyboards[i], donor);
   }
-  enrichFullNarrationTitleShotFields(storyboards[0], storyboards[1]);
   return storyboards;
 }
 
@@ -1378,7 +1775,6 @@ function propagateFullNarrationAssetsInDb(db, log, episodeIdNum) {
   let donor = null;
   let donorProps = [];
   for (const row of rows) {
-    if (Number(row.storyboard_number) === 1) continue;
     const chars = normalizeStoryboardCharactersField(row.characters);
     let propIds = [];
     try {
@@ -1557,7 +1953,6 @@ function enrichFullNarrationTitleShotInDb(db, log, episodeIdNum) {
 async function recoverFullNarrationFromPartial(db, log, episodeIdNum, taskId, fullNarrationSegments, errorMessage) {
   cleanupGhostStoryboardRows(db, log, episodeIdNum);
   const resynced = await resyncFullNarrationForEpisodeAsync(db, log, episodeIdNum);
-  enrichFullNarrationTitleShotInDb(db, log, episodeIdNum);
   const totalDuration = resynced.total_duration || 0;
   taskService.updateTaskResult(db, taskId, {
     storyboards: resynced.storyboards,
@@ -1570,28 +1965,45 @@ async function recoverFullNarrationFromPartial(db, log, episodeIdNum, taskId, fu
   return resynced;
 }
 
-/** 全文解说模式：第 1 镜片头（无旁白），第 2 镜起绑定预切分原文 */
+/** 句号切分模式：超长段只在句末再拆 */
+function finalizePeriodNarrationSegmentsMax(segments, max) {
+  const out = [];
+  for (const seg of segments || []) {
+    const s = String(seg || '').trim();
+    if (!s) continue;
+    if (countNarrationSpeechChars(s) <= max) {
+      out.push(s);
+      continue;
+    }
+    out.push(...splitOversizedChapterBlockAtSentences(s, max));
+  }
+  return out;
+}
+
+/** @deprecated 兼容旧调用 */
+function finalizeChapterNarrationSegmentsMax(segments, max) {
+  return finalizePeriodNarrationSegmentsMax(segments, max);
+}
+
+/** 全文解说模式：旁白从第 1 镜起绑定预切分原文（镜数 = 段落数） */
 function enforceFullNarrationSegments(storyboards, segments, log, taskId, limits = DEFAULT_NARRATION_LIMITS) {
   if (!Array.isArray(storyboards) || !segments?.length) return storyboards;
-  // 入库/同步时的 segments 已按目标/硬上限规则切好；此处只保证不超硬上限，不再强行并短段
-  const safeSegments = finalizeNarrationSegmentsMax(
-    (segments || []).map((s) => String(s || '').trim()).filter(Boolean),
-    limits.FULL_NARRATION_MAX_CHARS
-  );
+  const rawSegs = (segments || []).map((s) => String(s || '').trim()).filter(Boolean);
+  const safeSegments = finalizePeriodNarrationSegmentsMax(rawSegs, limits.FULL_NARRATION_MAX_CHARS);
   const segCount = safeSegments.length;
-  const totalShots = segCount + 1;
+  const totalShots = segCount;
   const ordered = normalizeStoryboardListShotNumbers(storyboards);
   const aiCount = ordered.length;
 
   if (aiCount > totalShots) {
-    log.warn('[分镜] 全文解说镜数多于段落数+片头，已裁剪多余分镜', {
+    log.warn('[分镜] 全文解说镜数多于段落数，已裁剪多余分镜', {
       task_id: taskId,
       ai_shots: aiCount,
       segment_count: segCount,
       expected_shots: totalShots,
     });
   } else if (aiCount < totalShots) {
-    log.warn('[分镜] 全文解说镜数不足，按段落数+片头补齐', {
+    log.warn('[分镜] 全文解说镜数不足，按段落数补齐', {
       task_id: taskId,
       ai_shots: aiCount,
       segment_count: segCount,
@@ -1601,33 +2013,22 @@ function enforceFullNarrationSegments(storyboards, segments, log, taskId, limits
 
   const assetDonor = pickFullNarrationAssetDonor(ordered);
   const structuralTemplate = ordered[0] || assetDonor || {};
-  const titleBase = ordered[0] || structuralTemplate;
-  const contentBases = ordered.length > 1 ? ordered.slice(1) : ordered;
 
   const rebuilt = [];
-  rebuilt.push({
-    ...structuralTemplate,
-    ...titleBase,
-    shot_number: 1,
-    storyboard_number: 1,
-    title: titleBase.title || titleBase.segment_title || '片头',
-    dialogue: '',
-    narration: '',
-    duration: FULL_NARRATION_TITLE_SHOT_DURATION,
-  });
-
   for (let i = 0; i < segCount; i++) {
-    const base = contentBases[i] || contentBases[contentBases.length - 1] || assetDonor || structuralTemplate;
-    rebuilt.push({
+    const base = ordered[i] || ordered[ordered.length - 1] || assetDonor || structuralTemplate;
+    const shot = {
       ...structuralTemplate,
       ...base,
-      shot_number: i + 2,
-      storyboard_number: i + 2,
+      shot_number: i + 1,
+      storyboard_number: i + 1,
       title: base.title || (structuralTemplate.title ? `${structuralTemplate.title}·解说${i + 1}` : `解说${i + 1}`),
       dialogue: base.dialogue != null ? base.dialogue : '',
-      narration: safeSegments[i],
+      narration: collapseNarrationBlankLines(safeSegments[i]),
       duration: estimateDurationFromSpeechText(safeSegments[i], limits),
-    });
+    };
+    inheritStoryboardAssetFields(shot, assetDonor);
+    rebuilt.push(shot);
   }
 
   propagateFullNarrationAssetsAcrossShots(rebuilt);
@@ -1654,8 +2055,12 @@ async function resyncFullNarrationForEpisodeAsync(db, log, episodeId) {
   const script = String(episode.script_content || '').trim();
   if (!script) throw new Error('当前集无剧本正文，无法同步旁白');
 
-  const narrationLimits = getNarrationLimitsForEpisode(db, episodeIdNum);
-  const segments = splitScriptIntoNarrationSegments(script, narrationLimits);
+  const narrationLimitsBase = getNarrationLimitsForEpisode(db, episodeIdNum);
+  const drama = db.prepare('SELECT metadata FROM dramas WHERE id = ?').get(episode.drama_id);
+  const universalOmni = isDramaUniversalOmniFromMeta(parseDramaMetadata(drama?.metadata));
+  const plan = resolveFullNarrationSplitPlan(script, narrationLimitsBase, universalOmni);
+  const narrationLimits = plan.limits;
+  const segments = plan.segments;
   if (!segments.length) throw new Error('剧本正文无法切分为解说段落');
 
   const existingRows = getStoryboardsForEpisode(db, episodeIdNum);
@@ -1705,10 +2110,7 @@ async function resyncFullNarrationForEpisodeAsync(db, log, episodeId) {
     const sb = storyboards[i];
     const num = i + 1;
     const narr = sb.narration || '';
-    // 第 1 镜片头无旁白：固定 6 秒；其余镜按旁白可读字数估算
-    const dur = num === 1 && !String(narr).trim()
-      ? FULL_NARRATION_TITLE_SHOT_DURATION
-      : estimateDurationFromSpeechText(narr, narrationLimits);
+    const dur = estimateDurationFromSpeechText(narr, narrationLimits);
 
     if (sb.id) {
       db.prepare(
@@ -1751,7 +2153,6 @@ async function resyncFullNarrationForEpisodeAsync(db, log, episodeId) {
   }
 
   const saved = getStoryboardsForEpisode(db, episodeIdNum);
-  enrichFullNarrationTitleShotInDb(db, log, episodeIdNum);
   propagateFullNarrationAssetsInDb(db, log, episodeIdNum);
   const totalDuration = saved.reduce((s, sb) => s + (Number(sb.duration) || 0), 0);
   db.prepare('UPDATE episodes SET duration = ?, updated_at = ? WHERE id = ?').run(
@@ -1795,7 +2196,7 @@ function buildContinuationPrompt(originalUserPrompt, alreadySaved, lastShotNum, 
       .map((sb) => (sb.narration != null ? String(sb.narration).trim() : ''))
       .filter(Boolean)
       .join('\n---\n');
-    narrLine = '\n- 续写须含片头第 1 镜（narration 留空）；旁白从第 2 镜起，须紧接原文未覆盖部分，仍为原文逐字连续摘录，禁止改写、重复已覆盖内容';
+    narrLine = '\n- 旁白从第 1 镜开始，须紧接原文未覆盖部分，仍为原文逐字连续摘录，禁止改写、重复已覆盖内容、禁止空旁白片头镜';
     if (tailNarr) {
       narrLine += `\n\n【已覆盖的末尾旁白原文（下一段须紧接其后继续，不得重复）】\n${tailNarr}`;
     }
@@ -1873,14 +2274,15 @@ async function processFullNarrationRulesStoryboardGeneration(
     purgeAllEpisodeStoryboards(db, log, episodeIdNum, resolveStorageRoot(loadConfig()));
 
     const dramaId = episodeRow?.drama_id;
-    const defaultScene = dramaId
-      ? db.prepare(
-        'SELECT id, location, time FROM scenes WHERE drama_id = ? AND deleted_at IS NULL ORDER BY id ASC LIMIT 1'
-      ).get(dramaId)
-      : null;
+    const episodeScenes = dramaId
+      ? listScenesForStoryboardPrompt(db, dramaId, episodeIdNum)
+      : [];
+    const defaultScene = episodeScenes.find((s) => Number(s.episode_id) === Number(episodeIdNum))
+      || episodeScenes[0]
+      || null;
 
     const template = {
-      title: '片头',
+      title: '解说1',
       location: defaultScene?.location || '',
       time: defaultScene?.time || '',
       scene_id: defaultScene?.id || null,
@@ -1897,29 +2299,38 @@ async function processFullNarrationRulesStoryboardGeneration(
     const saved = saveStoryboards(db, log, episodeId, storyboards, cfg, streamStyle, new Set(), deriveOpts);
 
     cleanupGhostStoryboardRows(db, log, episodeIdNum);
-    enrichFullNarrationTitleShotInDb(db, log, episodeIdNum);
     propagateFullNarrationAssetsInDb(db, log, episodeIdNum);
 
-    taskService.updateTaskStatus(db, taskId, 'processing', 75, '正在校验分镜角色与道具关联...');
+    taskService.updateTaskStatus(db, taskId, 'processing', 75, '正在校验分镜角色、道具与场景关联...');
     let totalCharAdded = 0;
     let totalPropAdded = 0;
+    let totalPropRemoved = 0;
+    let totalSceneChanged = 0;
     for (const sb of saved) {
       if (!sb?.id) continue;
       const { added } = syncStoryboardCharacters(db, log, sb.id);
       totalCharAdded += added.length;
       const propSync = syncStoryboardProps(db, log, sb.id);
       totalPropAdded += propSync.added.length;
+      totalPropRemoved += (propSync.removed || []).length;
+      const sceneSync = syncStoryboardScene(db, log, sb.id);
+      if (sceneSync.changed) totalSceneChanged += 1;
       try {
         syncStoryboardCharacterLinksFromCharactersColumn(db, sb.id);
       } catch (_) {}
     }
-    if (totalCharAdded > 0 || totalPropAdded > 0) {
-      log.info('[分镜] 规则分镜角色/道具补全完成', {
+    if (totalCharAdded > 0 || totalPropAdded > 0 || totalPropRemoved > 0 || totalSceneChanged > 0) {
+      log.info('[分镜] 规则分镜角色/道具/场景分配完成', {
         episode_id: episodeId,
         total_char_added: totalCharAdded,
         total_prop_added: totalPropAdded,
+        total_prop_removed: totalPropRemoved,
+        total_scene_changed: totalSceneChanged,
       });
     }
+    try {
+      syncEpisodeAssetBindsFromStoryboards(db, log, episodeIdNum);
+    } catch (_) {}
 
     const savedWithPrompts = getStoryboardsForEpisode(db, episodeIdNum);
     const totalDuration = savedWithPrompts.reduce((sum, sb) => sum + (Number(sb.duration) || 0), 0);
@@ -1950,7 +2361,7 @@ async function processFullNarrationRulesStoryboardGeneration(
   }
 }
 
-/** 按旁白配音实际时长刷新 duration 后，AI 批量生成 polished_prompt + video_prompt */
+/** 按旁白配音实际时长刷新 duration；经典模式再 AI 生成 polished+video，全能模式仅同步时长供后续润色 */
 async function generateStoryboardPromptsFromAudioDurationAsync(db, log, episodeId, opts = {}) {
   const episodeIdNum = Number(episodeId);
   if (!Number.isFinite(episodeIdNum) || episodeIdNum <= 0) {
@@ -1962,12 +2373,37 @@ async function generateStoryboardPromptsFromAudioDurationAsync(db, log, episodeI
 
   const { isDramaFullNarrationVideoMode } = require('./videoClient');
   if (!isDramaFullNarrationVideoMode(db, ep.drama_id)) {
-    throw new Error('仅全文解说经典模式支持按配音时长生成提示词');
+    throw new Error('仅全文解说模式支持按配音时长同步/生成提示词');
   }
 
   const storageRoot = resolveStorageRoot(loadConfig());
   const { syncStoryboardDurationsFromNarrationAudio } = require('./narrationAudioService');
   const durationSync = syncStoryboardDurationsFromNarrationAudio(db, log, episodeIdNum, storageRoot);
+
+  const drama = db.prepare('SELECT metadata FROM dramas WHERE id = ?').get(ep.drama_id);
+  const universalOmni = isDramaUniversalOmniFromMeta(parseDramaMetadata(drama?.metadata));
+
+  // 全能：只同步配音时长，全能片段润色由前端在配音后执行
+  if (universalOmni) {
+    const saved = getStoryboardsForEpisode(db, episodeIdNum);
+    const totalDuration = saved.reduce((s, sb) => s + (Number(sb.duration) || 0), 0);
+    db.prepare('UPDATE episodes SET duration = ?, updated_at = ? WHERE id = ?').run(
+      Math.ceil((totalDuration + 59) / 60),
+      new Date().toISOString(),
+      episodeIdNum
+    );
+    return {
+      rebuilt: 0,
+      failed: 0,
+      skipped: 0,
+      mode: 'universal_duration_sync',
+      duration_sync: durationSync,
+      total_duration: totalDuration,
+      storyboard_count: saved.length,
+      storyboards: saved,
+      message: `已按配音时长更新 ${durationSync.updated || 0} 镜 duration（全能模式请继续润色全能提示词）`,
+    };
+  }
 
   const rows = db
     .prepare(
@@ -1994,9 +2430,13 @@ async function generateStoryboardPromptsFromAudioDurationAsync(db, log, episodeI
   for (const row of rows) {
     try {
       syncStoryboardProps(db, log, row.id);
+      syncStoryboardScene(db, log, row.id);
       syncStoryboardCharacterLinksFromCharactersColumn(db, row.id);
     } catch (_) {}
   }
+  try {
+    syncEpisodeAssetBindsFromStoryboards(db, log, episodeIdNum);
+  } catch (_) {}
 
   const saved = getStoryboardsForEpisode(db, episodeIdNum);
   const totalDuration = saved.reduce((s, sb) => s + (Number(sb.duration) || 0), 0);
@@ -2008,6 +2448,7 @@ async function generateStoryboardPromptsFromAudioDurationAsync(db, log, episodeI
 
   return {
     ...promptResult,
+    mode: 'classic',
     duration_sync: durationSync,
     total_duration: totalDuration,
     storyboard_count: saved.length,
@@ -2245,31 +2686,40 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
 
     if (fullNarrationMode) {
       cleanupGhostStoryboardRows(db, log, episodeIdNum);
-      enrichFullNarrationTitleShotInDb(db, log, episodeIdNum);
       propagateFullNarrationAssetsInDb(db, log, episodeIdNum);
     }
 
-    // ── 分镜角色/道具补全（字符串匹配，无 AI，只增不减；对齐 7b6c1a7 角色补全，并同样补道具）──
-    taskService.updateTaskStatus(db, taskId, 'processing', 75, '正在校验分镜角色与道具关联...');
+    // ── 分镜角色/道具/场景合理分配（文本匹配；道具可纠正错配）──
+    taskService.updateTaskStatus(db, taskId, 'processing', 75, '正在校验分镜角色、道具与场景关联...');
     let totalCharAdded = 0;
     let totalPropAdded = 0;
+    let totalPropRemoved = 0;
+    let totalSceneChanged = 0;
     for (const sb of saved) {
       if (!sb?.id) continue;
       const { added } = syncStoryboardCharacters(db, log, sb.id);
       totalCharAdded += added.length;
       const propSync = syncStoryboardProps(db, log, sb.id);
       totalPropAdded += propSync.added.length;
+      totalPropRemoved += (propSync.removed || []).length;
+      const sceneSync = syncStoryboardScene(db, log, sb.id);
+      if (sceneSync.changed) totalSceneChanged += 1;
       try {
         syncStoryboardCharacterLinksFromCharactersColumn(db, sb.id);
       } catch (_) {}
     }
-    if (totalCharAdded > 0 || totalPropAdded > 0) {
-      log.info('[分镜] 角色/道具补全完成', {
+    if (totalCharAdded > 0 || totalPropAdded > 0 || totalPropRemoved > 0 || totalSceneChanged > 0) {
+      log.info('[分镜] 角色/道具/场景分配完成', {
         episode_id: episodeId,
         total_char_added: totalCharAdded,
         total_prop_added: totalPropAdded,
+        total_prop_removed: totalPropRemoved,
+        total_scene_changed: totalSceneChanged,
       });
     }
+    try {
+      syncEpisodeAssetBindsFromStoryboards(db, log, episodeIdNum);
+    } catch (_) {}
 
     // 全文解说经典：提示词改由「按配音时长生成」按钮单独触发，生成分镜时不跑 AI
     if (!fullNarrationMode) {
@@ -2400,20 +2850,23 @@ function generateStoryboard(db, log, episodeId, model, style, storyboardCount, v
     characterList = '[' + characters.map((c) => `{"id": ${c.id}, "name": "${(c.name || '').replace(/"/g, '\\"')}"}`).join(', ') + ']';
   }
 
-  const scenes = db.prepare(
-    'SELECT id, location, time FROM scenes WHERE drama_id = ? AND deleted_at IS NULL ORDER BY location ASC, time ASC'
-  ).all(episode.drama_id);
+  const scenes = listScenesForStoryboardPrompt(db, episode.drama_id, episode.id);
   let sceneList = '无场景';
   if (scenes.length > 0) {
-    sceneList = '[' + scenes.map((s) => `{"id": ${s.id}, "location": "${(s.location || '').replace(/"/g, '\\"')}", "time": "${(s.time || '').replace(/"/g, '\\"')}"}`).join(', ') + ']';
+    sceneList = '[' + scenes.map((s) => {
+      const epTag = s.episode_id != null ? `, "episode_id": ${Number(s.episode_id)}` : '';
+      return `{"id": ${s.id}, "location": "${(s.location || '').replace(/"/g, '\\"')}", "time": "${(s.time || '').replace(/"/g, '\\"')}"${epTag}}`;
+    }).join(', ') + ']';
   }
 
-  const props = db.prepare(
-    'SELECT id, name, type FROM props WHERE drama_id = ? AND deleted_at IS NULL ORDER BY id ASC'
-  ).all(episode.drama_id);
+  const props = listPropsForStoryboardPrompt(db, episode.drama_id, episode.id);
   let propList = '无道具';
   if (props.length > 0) {
-    propList = '[' + props.map((p) => `{"id": ${p.id}, "name": "${(p.name || '').replace(/"/g, '\\"')}"${p.type ? `, "type": "${p.type.replace(/"/g, '\\"')}"` : ''}}`).join(', ') + ']';
+    propList = '[' + props.map((p) => {
+      const typePart = p.type ? `, "type": "${String(p.type).replace(/"/g, '\\"')}"` : '';
+      const epTag = p.episode_id != null ? `, "episode_id": ${Number(p.episode_id)}` : '';
+      return `{"id": ${p.id}, "name": "${(p.name || '').replace(/"/g, '\\"')}"${typePart}${epTag}}`;
+    }).join(', ') + ']';
   }
 
   const scriptLabel = promptI18n.formatUserPrompt(cfg, 'script_content_label');
@@ -2478,6 +2931,11 @@ function generateStoryboard(db, log, episodeId, model, style, storyboardCount, v
     fullNarrationVideoMode === 1 ||
     String(fullNarrationVideoMode || '').toLowerCase() === 'true';
 
+  const wantUniversalOmni =
+    universalOmni === true ||
+    universalOmni === 1 ||
+    String(universalOmni || '').toLowerCase() === 'true';
+
   let durationMode = 'auto';
   if (userSpecifiedCount && userSpecifiedDuration && effectiveShotDuration) {
     durationMode = 'fixed';
@@ -2499,8 +2957,11 @@ function generateStoryboard(db, log, episodeId, model, style, storyboardCount, v
   });
 
   let fullNarrationSegments = null;
+  let effectiveNarrationLimits = narrationLimits;
   if (wantFullNarration) {
-    fullNarrationSegments = splitScriptIntoNarrationSegments(scriptContent, narrationLimits);
+    const plan = resolveFullNarrationSplitPlan(scriptContent, narrationLimits, wantUniversalOmni);
+    fullNarrationSegments = plan.segments;
+    effectiveNarrationLimits = plan.limits;
     const normScript = normalizeNarrationCoverageText(scriptContent);
     const normSegs = normalizeNarrationCoverageText((fullNarrationSegments || []).join(''));
     if (normScript && normSegs !== normScript) {
@@ -2508,6 +2969,7 @@ function generateStoryboard(db, log, episodeId, model, style, storyboardCount, v
         script_chars: normScript.length,
         segment_chars: normSegs.length,
         segment_count: fullNarrationSegments?.length || 0,
+        split_mode: plan.limits.splitMode,
       });
     }
   }
@@ -2534,11 +2996,12 @@ function generateStoryboard(db, log, episodeId, model, style, storyboardCount, v
   userPrompt += `\n\n${suffix}`;
 
   if (wantFullNarration && fullNarrationSegments?.length) {
-    userPrompt += buildFullNarrationSegmentBinding(cfg, fullNarrationSegments, narrationLimits);
+    userPrompt += buildFullNarrationSegmentBinding(cfg, fullNarrationSegments, effectiveNarrationLimits);
     userPrompt += promptI18n.getStoryboardFullNarrationModeInstructions(cfg, {
       clipDuration: videoClipDuration && Number(videoClipDuration) > 0 ? Number(videoClipDuration) : null,
       scriptLength: scriptContent.length,
-      narrationLimits,
+      narrationLimits: effectiveNarrationLimits,
+      chapterMode: wantUniversalOmni,
     });
   } else if (wantNarration) {
     userPrompt += promptI18n.getStoryboardNarrationExtraInstructions(cfg);
@@ -2577,7 +3040,10 @@ Do NOT produce a shot count far from ${targetCount} under any circumstance.`;
   }
 
   if (wantFullNarration) {
-    systemPrompt += promptI18n.getStoryboardFullNarrationSystemOverride(cfg, { narrationLimits });
+    systemPrompt += promptI18n.getStoryboardFullNarrationSystemOverride(cfg, {
+      narrationLimits: effectiveNarrationLimits,
+      chapterMode: wantUniversalOmni,
+    });
   } else if (wantNarration) {
     const isEn = systemPrompt.includes('[Role]');
     if (isEn) {
@@ -2589,10 +3055,6 @@ The user enabled narrator voice-over for the whole episode. Every shot object MU
     }
   }
 
-  const wantUniversalOmni =
-    universalOmni === true ||
-    universalOmni === 1 ||
-    String(universalOmni || '').toLowerCase() === 'true';
   if (wantUniversalOmni) {
     systemPrompt += promptI18n.getStoryboardUniversalOmniModeSuffix(cfg);
   }
@@ -2611,6 +3073,7 @@ The user enabled narrator voice-over for the whole episode. Every shot object MU
     full_narration_video_mode: wantFullNarration,
     include_narration: wantNarration,
     full_narration_segment_count: fullNarrationSegments?.length || 0,
+    full_narration_split_mode: effectiveNarrationLimits?.splitMode || null,
   });
 
   setImmediate(() => {
@@ -2636,7 +3099,7 @@ The user enabled narrator voice-over for the whole episode. Every shot object MU
       wantUniversalOmni,
       clipSec,
       fullNarrationSegments,
-      narrationLimits
+      effectiveNarrationLimits,
     );
   });
 
@@ -2813,14 +3276,20 @@ async function rebuildFullNarrationDualPromptsForStoryboardAsync(db, log, storyb
   }
 
   const now = new Date().toISOString();
+  const narrText = (row.narration && String(row.narration).trim()) ? String(row.narration).trim() : '';
+  const alignedAt = narrText ? now : null;
   if (polished && String(polished).trim().length >= 10) {
     db.prepare(
-      'UPDATE storyboards SET polished_prompt = ?, video_prompt = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL'
-    ).run(String(polished).trim(), String(videoPrompt).trim(), now, sbId);
+      `UPDATE storyboards
+       SET polished_prompt = ?, video_prompt = ?, narration_prompt_aligned_at = ?, updated_at = ?
+       WHERE id = ? AND deleted_at IS NULL`
+    ).run(String(polished).trim(), String(videoPrompt).trim(), alignedAt, now, sbId);
   } else {
     db.prepare(
-      'UPDATE storyboards SET video_prompt = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL'
-    ).run(String(videoPrompt).trim(), now, sbId);
+      `UPDATE storyboards
+       SET video_prompt = ?, narration_prompt_aligned_at = ?, updated_at = ?
+       WHERE id = ? AND deleted_at IS NULL`
+    ).run(String(videoPrompt).trim(), alignedAt, now, sbId);
   }
 
   if (log?.info) {
@@ -3258,25 +3727,340 @@ async function splitStoryboardByAudioAsync(db, log, storyboardId) {
   };
 }
 
+/**
+ * 单独重新生成某一镜的脚本字段（不删本镜、不改镜号）。
+ * @param {object} opts
+ * @param {boolean} [opts.rebindAssets=false] - true 时按 AI 结果重绑角色/场景/道具；false 保留当前绑定
+ * @param {string} [opts.userInstruction] - 用户附加要求
+ * @param {string} [opts.model]
+ * @returns {Promise<object>} getStoryboardById 形态
+ */
+async function regenerateSingleStoryboardAsync(db, log, storyboardId, opts = {}) {
+  const sid = Number(storyboardId);
+  if (!Number.isFinite(sid) || sid <= 0) throw new Error('无效的分镜 id');
+
+  const existing = db.prepare('SELECT * FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(sid);
+  if (!existing) throw new Error('分镜不存在');
+
+  const episode = db.prepare(
+    'SELECT id, script_content, description, drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL'
+  ).get(Number(existing.episode_id));
+  if (!episode) throw new Error('剧集不存在');
+
+  const drama = db.prepare('SELECT style, metadata FROM dramas WHERE id = ?').get(episode.drama_id);
+  const cfg = loadConfig();
+  const { resolvedStreamStyleFromDrama } = require('../utils/dramaStyleMerge');
+  const finalStyle = resolvedStreamStyleFromDrama(null, drama);
+  let dramaMeta = {};
+  try {
+    dramaMeta = drama?.metadata
+      ? (typeof drama.metadata === 'string' ? JSON.parse(drama.metadata) : drama.metadata)
+      : {};
+  } catch (_) {
+    dramaMeta = {};
+  }
+  const videoRatio = dramaMeta.aspect_ratio || cfg?.style?.default_video_ratio || '16:9';
+  const wantFullNarration =
+    dramaMeta.storyboard_full_narration_video_mode === true ||
+    dramaMeta.storyboard_full_narration_video_mode === 1 ||
+    String(dramaMeta.storyboard_full_narration_video_mode || '').toLowerCase() === 'true';
+  const isUniversal =
+    existing.creation_mode === 'universal' ||
+    dramaMeta.storyboard_universal_omni === true ||
+    dramaMeta.storyboard_universal_omni === 1 ||
+    String(dramaMeta.storyboard_universal_omni || '').toLowerCase() === 'true';
+  const rebindAssets = opts.rebindAssets === true || opts.rebind_assets === true;
+  const userInstruction = opts.userInstruction != null
+    ? String(opts.userInstruction).trim()
+    : (opts.user_instruction != null ? String(opts.user_instruction).trim() : '');
+
+  const characters = db.prepare(
+    'SELECT id, name FROM characters WHERE drama_id = ? AND deleted_at IS NULL ORDER BY name ASC'
+  ).all(episode.drama_id);
+  const scenes = listScenesForStoryboardPrompt(db, episode.drama_id, episode.id);
+  const props = listPropsForStoryboardPrompt(db, episode.drama_id, episode.id);
+  const characterList = characters.length
+    ? '[' + characters.map((c) => `{"id": ${c.id}, "name": "${(c.name || '').replace(/"/g, '\\"')}"}`).join(', ') + ']'
+    : '无角色';
+  const sceneList = scenes.length
+    ? '[' + scenes.map((s) => {
+      const epTag = s.episode_id != null ? `, "episode_id": ${Number(s.episode_id)}` : '';
+      return `{"id": ${s.id}, "location": "${(s.location || '').replace(/"/g, '\\"')}", "time": "${(s.time || '').replace(/"/g, '\\"')}"${epTag}}`;
+    }).join(', ') + ']'
+    : '无场景';
+  const propList = props.length
+    ? '[' + props.map((p) => {
+      const typePart = p.type ? `, "type": "${String(p.type).replace(/"/g, '\\"')}"` : '';
+      const epTag = p.episode_id != null ? `, "episode_id": ${Number(p.episode_id)}` : '';
+      return `{"id": ${p.id}, "name": "${(p.name || '').replace(/"/g, '\\"')}"${typePart}${epTag}}`;
+    }).join(', ') + ']'
+    : '无道具';
+
+  const shotNum = Number(existing.storyboard_number) || 0;
+  let prevSb = null;
+  let nextSb = null;
+  if (shotNum > 0) {
+    prevSb = db.prepare(
+      `SELECT storyboard_number, title, action, dialogue, narration, result
+       FROM storyboards WHERE episode_id = ? AND storyboard_number < ? AND deleted_at IS NULL
+       ORDER BY storyboard_number DESC LIMIT 1`
+    ).get(episode.id, shotNum);
+    nextSb = db.prepare(
+      `SELECT storyboard_number, title, action, dialogue, narration, result
+       FROM storyboards WHERE episode_id = ? AND storyboard_number > ? AND deleted_at IS NULL
+       ORDER BY storyboard_number ASC LIMIT 1`
+    ).get(episode.id, shotNum);
+  }
+
+  const scriptContent = (episode.script_content && String(episode.script_content).trim())
+    ? String(episode.script_content)
+    : (episode.description && String(episode.description).trim())
+      ? String(episode.description)
+      : '';
+  if (!scriptContent) throw new Error('剧本内容为空，请先生成剧集内容');
+
+  const existingPropIds = db
+    .prepare('SELECT prop_id FROM storyboard_props WHERE storyboard_id = ?')
+    .all(sid)
+    .map((p) => Number(p.prop_id))
+    .filter(Number.isFinite);
+
+  const formatNeighbor = (row, label) => {
+    if (!row) return `${label}: (none)`;
+    return [
+      `${label} #${row.storyboard_number}`,
+      row.title ? `TITLE: ${row.title}` : null,
+      row.action ? `ACTION: ${row.action}` : null,
+      row.dialogue ? `DIALOGUE: ${row.dialogue}` : null,
+      row.narration ? `NARRATION: ${row.narration}` : null,
+      row.result ? `RESULT: ${row.result}` : null,
+    ].filter(Boolean).join('\n');
+  };
+
+  const isEn = promptI18n.isEnglish(cfg);
+  const systemPrompt = isEn
+    ? `You are a professional storyboard director. Regenerate ONE shot as a single JSON object. Output ONLY valid JSON (no markdown). Keep continuity with PREV/NEXT shots. Use only character/scene/prop IDs from the provided lists.`
+    : `你是专业分镜导演。请只重新生成**一个**镜头，输出单个 JSON 对象（不要数组、不要 markdown）。须与前后镜连贯；角色/场景/道具只能使用给定列表中的 ID。`;
+
+  const fieldHint = isEn
+    ? 'Required fields: shot_number, title, segment_index, segment_title, location, time, shot_type, camera_angle, camera_movement, lighting_style, depth_of_field, action, result, dialogue, narration, emotion, duration, scene_id, characters (id array), props (id array).'
+    : '必须字段：shot_number、title、segment_index、segment_title、location、time、shot_type、camera_angle、camera_movement、lighting_style、depth_of_field、action、result、dialogue、narration、emotion、duration、scene_id、characters（id 数组）、props（id 数组）。';
+
+  const keepNarrationHint = wantFullNarration
+    ? (isEn
+      ? `FULL NARRATION MODE: keep narration exactly as CURRENT_NARRATION (do not rewrite narration text). duration should stay ~${existing.duration || 5}s.`
+      : `全文解说模式：narration 必须与 CURRENT_NARRATION 完全一致（禁止改写旁白正文）；duration 保持约 ${existing.duration || 5} 秒。`)
+    : '';
+
+  const universalHint = isUniversal
+    ? (isEn
+      ? 'Also include universal_segment_text as a multi-line Seedance/Omni beat block for this shot only.'
+      : '另需包含 universal_segment_text：本镜的多行全能/Omni 子分镜描述块。')
+    : '';
+
+  const rebindHint = rebindAssets
+    ? (isEn
+      ? 'Rebind assets: fill scene_id / characters / props based on this shot content from the lists.'
+      : '请按本镜内容从列表重新填写 scene_id、characters、props（可重绑资产）。')
+    : (isEn
+      ? 'Do NOT invent new assets; prefer CURRENT bindings if unsure.'
+      : '资产绑定以当前为准；不确定时沿用 CURRENT 绑定，勿自创 ID。');
+
+  const userPrompt = [
+    `SCRIPT:\n${scriptContent.slice(0, 12000)}`,
+    `CHARACTER_LIST:\n${characterList}`,
+    `SCENE_LIST:\n${sceneList}`,
+    `PROP_LIST:\n${propList}`,
+    `CURRENT_SHOT_NUMBER: ${shotNum || sid}`,
+    `CURRENT_TITLE: ${existing.title || ''}`,
+    `CURRENT_ACTION: ${existing.action || ''}`,
+    `CURRENT_DIALOGUE: ${existing.dialogue || ''}`,
+    `CURRENT_NARRATION: ${existing.narration || ''}`,
+    `CURRENT_RESULT: ${existing.result || ''}`,
+    `CURRENT_DURATION: ${existing.duration ?? 5}`,
+    `CURRENT_SCENE_ID: ${existing.scene_id ?? 'null'}`,
+    `CURRENT_CHARACTERS: ${existing.characters || '[]'}`,
+    `CURRENT_PROPS: ${JSON.stringify(existingPropIds)}`,
+    `CURRENT_SEGMENT_INDEX: ${existing.segment_index ?? 0}`,
+    `CURRENT_SEGMENT_TITLE: ${existing.segment_title || ''}`,
+    formatNeighbor(prevSb, 'PREV_SHOT'),
+    formatNeighbor(nextSb, 'NEXT_SHOT'),
+    fieldHint,
+    keepNarrationHint,
+    universalHint,
+    rebindHint,
+    userInstruction ? `USER_INSTRUCTION:\n${userInstruction}` : null,
+    isEn
+      ? 'Return exactly one JSON object for this shot. shot_number must equal CURRENT_SHOT_NUMBER.'
+      : '只返回这一个镜头的 JSON 对象；shot_number 必须等于 CURRENT_SHOT_NUMBER。',
+  ].filter(Boolean).join('\n\n');
+
+  log.info('[单镜重生成] 开始', {
+    storyboard_id: sid,
+    shot_number: shotNum,
+    rebind_assets: rebindAssets,
+    universal: isUniversal,
+    full_narration: wantFullNarration,
+  });
+
+  const raw = await generateTextForStoryboard(db, log, userPrompt, systemPrompt, {
+    model: opts.model || undefined,
+    temperature: 0.55,
+  });
+
+  let cleaned = String(raw || '').trim()
+    .replace(/^```json\s*/gim, '')
+    .replace(/^```\s*/gm, '')
+    .replace(/```\s*$/gm, '')
+    .trim();
+  cleaned = safeJson.escapeNewlinesInStrings(cleaned);
+  // 单镜：直接解析对象或顶层数组。不要用 extractWrappedArrayStr，
+  // 否则会误切到 characters:[...] / props:[...] 的第一个 '['。
+  const candidate = extractJsonCandidate(cleaned) || cleaned;
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(candidate);
+  } catch (_) {
+    if (safeJson._jsonrepair) {
+      try { parsed = JSON.parse(safeJson._jsonrepair(candidate)); } catch (_) {}
+    }
+  }
+  // 双重编码：模型有时返回 JSON 字符串
+  if (typeof parsed === 'string') {
+    const inner = parsed.trim();
+    try {
+      parsed = JSON.parse(inner);
+    } catch (_) {
+      if (safeJson._jsonrepair) {
+        try { parsed = JSON.parse(safeJson._jsonrepair(inner)); } catch (_) {}
+      }
+    }
+  }
+  if (!parsed) throw new Error('AI 返回无法解析为 JSON');
+
+  const pickShotObject = (node) => {
+    if (!node || typeof node !== 'object') return null;
+    if (Array.isArray(node)) {
+      const hit = node.find((x) => Number(x?.shot_number || x?.storyboard_number) === shotNum);
+      if (hit && typeof hit === 'object' && !Array.isArray(hit)) return hit;
+      const first = node.find((x) => x && typeof x === 'object' && !Array.isArray(x));
+      return first || null;
+    }
+    if (Array.isArray(node.storyboards)) return pickShotObject(node.storyboards);
+    if (Array.isArray(node.shots)) return pickShotObject(node.shots);
+    // 误把单元素数组解析成 {0: obj}
+    const keys = Object.keys(node);
+    if (keys.length === 1 && keys[0] === '0' && node[0] && typeof node[0] === 'object') {
+      return pickShotObject(node[0]);
+    }
+    return node;
+  };
+
+  const sbObj = pickShotObject(parsed);
+  if (!sbObj || typeof sbObj !== 'object' || Array.isArray(sbObj)) {
+    throw new Error('AI 未返回有效分镜对象');
+  }
+  if (!(sbObj.title || sbObj.action || sbObj.dialogue || sbObj.narration)) {
+    throw new Error('AI 返回的分镜缺少 title/action 等关键字段');
+  }
+
+  log.info('[单镜重生成] 解析结果', {
+    storyboard_id: sid,
+    title: sbObj.title,
+    action: String(sbObj.action || '').slice(0, 40),
+  });
+
+  sbObj.shot_number = shotNum || sbObj.shot_number || 1;
+  sbObj.storyboard_number = shotNum || sbObj.storyboard_number || 1;
+  if (sbObj.segment_index == null) sbObj.segment_index = existing.segment_index ?? 0;
+  if (!sbObj.segment_title) sbObj.segment_title = existing.segment_title || null;
+
+  if (wantFullNarration) {
+    sbObj.narration = existing.narration || '';
+    sbObj.duration = existing.duration ?? sbObj.duration;
+  }
+
+  if (!rebindAssets) {
+    sbObj.scene_id = existing.scene_id;
+    sbObj.characters = normalizeStoryboardCharactersField(existing.characters);
+    sbObj.props = existingPropIds;
+    if (existing.location) sbObj.location = existing.location;
+    if (existing.time) sbObj.time = existing.time;
+  }
+
+  const deriveOpts = {
+    universalOmni: isUniversal,
+    fullNarrationMode: wantFullNarration,
+    narrationLimits: resolveFullNarrationLimits(dramaMeta.narration_chars_per_sec),
+    targetClipDuration: dramaMeta.video_clip_duration ? Number(dramaMeta.video_clip_duration) : null,
+  };
+  const d = deriveStoryboardFieldsFromAi(sbObj, finalStyle, videoRatio, deriveOpts);
+  d.creationMode = existing.creation_mode === 'universal' ? 'universal' : 'classic';
+  if (d.creationMode !== 'universal') d.universalSegmentText = null;
+  else if (!d.universalSegmentText && existing.universal_segment_text) {
+    d.universalSegmentText = existing.universal_segment_text;
+  }
+
+  const now = new Date().toISOString();
+  updateStoryboardRowFromDerived(db, sid, Number(episode.id), d, sbObj, now, {
+    forceRebindAssets: rebindAssets,
+  });
+  try {
+    syncStoryboardCharacterLinksFromCharactersColumn(db, sid);
+  } catch (e) {
+    log.warn('[单镜重生成] 同步角色关联失败', { storyboard_id: sid, error: e.message });
+  }
+  if (rebindAssets) {
+    try {
+      syncStoryboardCharacters(db, log, sid);
+    } catch (_) {}
+  }
+
+  try {
+    db.prepare(
+      `UPDATE storyboards SET narration_prompt_aligned_at = NULL, updated_at = ? WHERE id = ?`
+    ).run(now, sid);
+  } catch (_) {}
+
+  const { getStoryboardById } = require('./storyboardService');
+  const refreshed = getStoryboardById(db, sid);
+  log.info('[单镜重生成] 完成', {
+    storyboard_id: sid,
+    rebind_assets: rebindAssets,
+    title: refreshed?.title,
+  });
+  return refreshed;
+}
+
 module.exports = {
   normalizeStoryboardShotNumber,
   dedupeStoryboardRowsByNumber,
   splitScriptIntoNarrationSegments,
+  splitScriptIntoNarrationSegmentsByPeriod,
+  tokenizeNarrationByPeriod,
+  packPeriodSentences,
+  splitScriptIntoNarrationSegmentsByChapter,
+  splitScriptIntoChapterBlocks,
+  resolveFullNarrationSplitPlan,
   mergeShortNarrationSegments,
   enforceFullNarrationSegments,
   resyncFullNarrationForEpisode,
   resyncFullNarrationForEpisodeAsync,
   countNarrationSpeechChars,
   estimateDurationFromSpeechText,
+  collapseNarrationBlankLines,
   NARRATION_CHARS_PER_SEC,
   FULL_NARRATION_TARGET_SEC,
   FULL_NARRATION_TARGET_CHARS,
   FULL_NARRATION_MIN_SEC,
   FULL_NARRATION_MAX_SEC,
   FULL_NARRATION_DURATION_MIN_SEC,
+  UNIVERSAL_FULL_NARRATION_MAX_SEC,
   FULL_NARRATION_MIN_CHARS,
   FULL_NARRATION_MAX_CHARS,
   resolveFullNarrationLimits,
+  resolveUniversalFullNarrationLimits,
   getNarrationLimitsForEpisode,
   normalizeNarrationCoverageText,
   getStoryboardsForEpisode,
@@ -3292,4 +4076,5 @@ module.exports = {
   rebuildFullNarrationDualPromptsForStoryboardAsync,
   splitStoryboardByAudio,
   splitStoryboardByAudioAsync,
+  regenerateSingleStoryboardAsync,
 };

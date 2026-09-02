@@ -129,6 +129,69 @@ function ensureAllColumns(database) {
     { name: 'updated_at',     type: 'TEXT' },
     { name: 'deleted_at',     type: 'TEXT' },
     { name: 'full_narration_audio_local_path', type: 'TEXT' },
+    { name: 'bgm_local_path', type: 'TEXT' },
+    { name: 'bgm_music_id', type: 'INTEGER' },
+    { name: 'sfx_local_path', type: 'TEXT' },
+    { name: 'sfx_music_id', type: 'INTEGER' },
+    { name: 'bgm_video_url', type: 'TEXT' },
+    { name: 'foley_events_json', type: 'TEXT' },
+    { name: 'foley_status', type: 'TEXT' },
+    { name: 'foley_error', type: 'TEXT' },
+    { name: 'foley_video_url', type: 'TEXT' },
+    { name: 'foley_task_id', type: 'INTEGER' },
+  ]);
+
+  // --- music_generations（整集 BGM / 音效）---
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS music_generations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      drama_id INTEGER,
+      episode_id INTEGER,
+      storyboard_id INTEGER,
+      provider TEXT DEFAULT '',
+      model TEXT DEFAULT '',
+      prompt TEXT,
+      description TEXT,
+      title TEXT,
+      audio_url TEXT,
+      local_path TEXT,
+      cover_url TEXT,
+      duration REAL,
+      kind TEXT DEFAULT 'bgm',
+      task_id TEXT,
+      batch_id TEXT,
+      status TEXT DEFAULT 'pending',
+      error_msg TEXT,
+      created_at TEXT,
+      updated_at TEXT,
+      completed_at TEXT,
+      deleted_at TEXT
+    )`);
+  } catch (e) {
+    console.warn('ensure music_generations table:', e.message);
+  }
+  ensureColumns(database, 'music_generations', [
+    { name: 'drama_id', type: 'INTEGER' },
+    { name: 'episode_id', type: 'INTEGER' },
+    { name: 'storyboard_id', type: 'INTEGER' },
+    { name: 'provider', type: "TEXT DEFAULT ''" },
+    { name: 'model', type: "TEXT DEFAULT ''" },
+    { name: 'prompt', type: 'TEXT' },
+    { name: 'description', type: 'TEXT' },
+    { name: 'title', type: 'TEXT' },
+    { name: 'audio_url', type: 'TEXT' },
+    { name: 'local_path', type: 'TEXT' },
+    { name: 'cover_url', type: 'TEXT' },
+    { name: 'duration', type: 'REAL' },
+    { name: 'kind', type: "TEXT DEFAULT 'bgm'" },
+    { name: 'task_id', type: 'TEXT' },
+    { name: 'batch_id', type: 'TEXT' },
+    { name: 'status', type: "TEXT DEFAULT 'pending'" },
+    { name: 'error_msg', type: 'TEXT' },
+    { name: 'created_at', type: 'TEXT' },
+    { name: 'updated_at', type: 'TEXT' },
+    { name: 'completed_at', type: 'TEXT' },
+    { name: 'deleted_at', type: 'TEXT' },
   ]);
 
   // --- storyboards ---
@@ -156,6 +219,8 @@ function ensureAllColumns(database) {
     { name: 'local_path',        type: 'TEXT' },
     { name: 'main_panel_idx',    type: 'INTEGER' },
     { name: 'video_url',         type: 'TEXT' },
+    // 视频审阅：ok=可用 / revise=要修改；空=未标记
+    { name: 'video_review',      type: 'TEXT' },
     { name: 'composed_image',    type: 'TEXT' },
     { name: 'result',            type: 'TEXT' },
     { name: 'emotion',           type: 'TEXT' },               // 当前情绪（兴奋/悲伤/紧张等）
@@ -172,12 +237,15 @@ function ensureAllColumns(database) {
     { name: 'continuity_snapshot',   type: 'TEXT' },               // JSON: 连戏状态快照 {characters:{name:{position,clothing,expression,props}},lighting}
     { name: 'audio_local_path',      type: 'TEXT' },               // 对白 TTS 本地路径
     { name: 'narration_audio_local_path', type: 'TEXT' },         // 解说旁白 TTS 本地路径
+    // 全文解说：按配音完成提示词优化后写入；配音变更时清空。生视频前须非空。
+    { name: 'narration_prompt_aligned_at', type: 'TEXT' },
     { name: 'creation_mode',     type: 'TEXT DEFAULT \'classic\'' }, // classic | universal
     { name: 'universal_segment_text', type: 'TEXT' },              // 全能模式片段描述（@ 引用等）
     { name: 'first_frame_image_id', type: 'INTEGER' },
     { name: 'last_frame_image_id',  type: 'INTEGER' },
     { name: 'last_frame_image_url', type: 'TEXT' },
     { name: 'last_frame_local_path', type: 'TEXT' },
+    { name: 'is_intro',          type: 'INTEGER DEFAULT 0' },     // 1=本集片头分镜（storyboard_number=0）
     { name: 'status',            type: 'TEXT DEFAULT \'draft\'' },
     { name: 'created_at',        type: 'TEXT' },
     { name: 'updated_at',        type: 'TEXT' },
@@ -221,6 +289,7 @@ function ensureAllColumns(database) {
     { name: 'time',             type: 'TEXT' },
     { name: 'prompt',           type: 'TEXT' },
     { name: 'polished_prompt',  type: 'TEXT' },  // 文字AI润色后的完整四视图图片提示词，生图时直接使用
+    { name: 'polished_prompt_single', type: 'TEXT' }, // 单图场景提示词（非四宫格）
     { name: 'image_url',        type: 'TEXT' },
     { name: 'local_path',       type: 'TEXT' },
     { name: 'extra_images',     type: 'TEXT' },
@@ -355,6 +424,7 @@ function ensureAllColumns(database) {
     { name: 'first_frame_url',      type: 'TEXT' },
     { name: 'last_frame_url',       type: 'TEXT' },
     { name: 'reference_image_urls', type: 'TEXT' },
+    { name: 'preferred_key_index',  type: 'INTEGER' },
     { name: 'video_url',            type: 'TEXT' },
     { name: 'local_path',           type: 'TEXT' },
     { name: 'status',               type: 'TEXT' },
@@ -519,6 +589,107 @@ function ensureAllColumns(database) {
       updated_at TEXT NOT NULL DEFAULT ''
     )`);
   } catch (_) {}
+
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS episode_props (
+      episode_id INTEGER NOT NULL,
+      prop_id INTEGER NOT NULL,
+      PRIMARY KEY (episode_id, prop_id)
+    )`);
+  } catch (_) {}
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS episode_scenes (
+      episode_id INTEGER NOT NULL,
+      scene_id INTEGER NOT NULL,
+      PRIMARY KEY (episode_id, scene_id)
+    )`);
+  } catch (_) {}
+
+  ensureAgnesModelCatalog(database);
+}
+
+/**
+ * 扩展已有 Agnes 配置的可选模型列表，并把过旧的默认模型升到当前推荐默认（2.5 Flash）。
+ * 用户若已主动选了非旧默认型号则保留。
+ */
+function ensureAgnesModelCatalog(database) {
+  const catalog = {
+    text: {
+      models: ['agnes-2.5-flash', 'agnes-2.0-flash'],
+      preferredDefault: 'agnes-2.5-flash',
+      legacyDefaults: ['agnes-2.0-flash'],
+    },
+    image: {
+      models: ['agnes-image-2.5-flash', 'agnes-image-2.1-flash', 'agnes-image-2.0-flash'],
+      preferredDefault: 'agnes-image-2.5-flash',
+      legacyDefaults: ['agnes-image-2.1-flash', 'agnes-image-2.0-flash'],
+    },
+    storyboard_image: {
+      models: ['agnes-image-2.5-flash', 'agnes-image-2.1-flash', 'agnes-image-2.0-flash'],
+      preferredDefault: 'agnes-image-2.5-flash',
+      legacyDefaults: ['agnes-image-2.1-flash', 'agnes-image-2.0-flash'],
+    },
+    video: {
+      models: ['agnes-video-2.5-flash', 'agnes-video-2.5', 'agnes-video-v2.0'],
+      preferredDefault: 'agnes-video-2.5-flash',
+      legacyDefaults: ['agnes-video-v2.0'],
+    },
+  };
+
+  let rows;
+  try {
+    rows = database
+      .prepare(
+        `SELECT id, service_type, model, default_model
+         FROM ai_service_configs
+         WHERE deleted_at IS NULL AND lower(provider) = 'agnes'`
+      )
+      .all();
+  } catch (_) {
+    return;
+  }
+
+  const updateStmt = database.prepare(
+    `UPDATE ai_service_configs SET model = ?, default_model = ?, updated_at = ? WHERE id = ?`
+  );
+  const now = new Date().toISOString();
+
+  for (const row of rows) {
+    const cat = catalog[row.service_type];
+    if (!cat) continue;
+
+    let current = [];
+    try {
+      const parsed = JSON.parse(row.model || '[]');
+      current = Array.isArray(parsed) ? parsed.map((m) => String(m).trim()).filter(Boolean) : [];
+    } catch (_) {
+      if (row.model) current = [String(row.model).trim()].filter(Boolean);
+    }
+
+    const merged = [...cat.models];
+    for (const m of current) {
+      if (!merged.includes(m)) merged.push(m);
+    }
+
+    let def = row.default_model ? String(row.default_model).trim() : '';
+    const hadPreferred = current.includes(cat.preferredDefault);
+    const shouldUpgradeDefault =
+      !def ||
+      !merged.includes(def) ||
+      (!hadPreferred && (cat.legacyDefaults || []).includes(def));
+
+    if (shouldUpgradeDefault) def = cat.preferredDefault;
+
+    const modelJson = JSON.stringify(merged);
+    const prevModel = row.model == null ? '' : String(row.model);
+    const prevDef = row.default_model == null ? '' : String(row.default_model);
+    if (prevModel === modelJson && prevDef === def) continue;
+
+    updateStmt.run(modelJson, def, now, row.id);
+    console.log(
+      `ensureAgnesModelCatalog: updated config #${row.id} (${row.service_type}) default=${def}`
+    );
+  }
 }
 
 /** 对已打开的 database 执行迁移与兜底补列（供 app 启动时调用） */

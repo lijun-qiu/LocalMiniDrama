@@ -93,14 +93,14 @@ function createStoryboard(db, log, req) {
 
 function updateStoryboard(db, log, id, req) {
   const row = db.prepare(
-    `SELECT s.id, s.episode_id, s.narration, s.duration, d.metadata AS drama_metadata
+    `SELECT s.id, s.episode_id, s.narration, s.duration, s.universal_segment_text, s.creation_mode, d.metadata AS drama_metadata
      FROM storyboards s
      JOIN episodes e ON e.id = s.episode_id
      JOIN dramas d ON d.id = e.drama_id
      WHERE s.id = ? AND s.deleted_at IS NULL`
   ).get(Number(id));
   if (!row) return null;
-  const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'local_path', 'main_panel_idx', 'video_url', 'audio_local_path', 'narration_audio_local_path', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_local_path'];
+  const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'local_path', 'main_panel_idx', 'video_url', 'video_review', 'audio_local_path', 'narration_audio_local_path', 'narration_prompt_aligned_at', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_local_path'];
   const updates = [];
   const params = [];
   // 前端可能传 character_ids，与 characters 统一：存为 JSON 字符串
@@ -126,19 +126,78 @@ function updateStoryboard(db, log, id, req) {
     dramaMeta.storyboard_full_narration_video_mode === true ||
     dramaMeta.storyboard_full_narration_video_mode === 1 ||
     String(dramaMeta.storyboard_full_narration_video_mode || '').toLowerCase() === 'true';
+  let narrationDerivedDuration = false;
   if (fullNarration) {
-    const nextNarration = req.narration !== undefined ? req.narration : row.narration;
-    const narrTrim = String(nextNarration || '').trim();
-    const shotNum = Number(
-      db.prepare('SELECT storyboard_number FROM storyboards WHERE id = ?').get(Number(id))?.storyboard_number
-    ) || 0;
-    if (shotNum === 1 && !narrTrim) {
-      req = { ...req, duration: 6 };
-    } else if (narrTrim) {
-      const { resolveFullNarrationLimits } = require('./fullNarrationConstants');
-      const { estimateDurationFromSpeechText } = require('./episodeStoryboardService');
-      const limits = resolveFullNarrationLimits(dramaMeta.narration_chars_per_sec);
-      req = { ...req, duration: estimateDurationFromSpeechText(narrTrim, limits) };
+    const { collapseNarrationBlankLines, estimateDurationFromSpeechText } = require('./episodeStoryboardService');
+    if (req.narration !== undefined && req.narration != null) {
+      req = { ...req, narration: collapseNarrationBlankLines(req.narration) || null };
+    }
+    // 仅当本次请求改了旁白时，才重算 duration（避免改片段描述覆盖配音时长）
+    if (req.narration !== undefined) {
+      const narrTrim = String(req.narration || '').trim();
+      const shotNum = Number(
+        db.prepare('SELECT storyboard_number FROM storyboards WHERE id = ?').get(Number(id))?.storyboard_number
+      ) || 0;
+      if (shotNum === 1 && !narrTrim) {
+        req = { ...req, duration: 6 };
+        narrationDerivedDuration = true;
+      } else if (narrTrim) {
+        const { resolveFullNarrationLimits } = require('./fullNarrationConstants');
+        const limits = resolveFullNarrationLimits(dramaMeta.narration_chars_per_sec);
+        req = { ...req, duration: estimateDurationFromSpeechText(narrTrim, limits) };
+        narrationDerivedDuration = true;
+      }
+    }
+  }
+
+  // 任意模式保存旁白时去掉空行（配音展示/TTS 一致）
+  if (req.narration !== undefined && req.narration != null && !fullNarration) {
+    const { collapseNarrationBlankLines } = require('./episodeStoryboardService');
+    req = { ...req, narration: collapseNarrationBlankLines(req.narration) || null };
+  }
+
+  if (req.video_review !== undefined) {
+    const vr = String(req.video_review || '').trim();
+    req = { ...req, video_review: vr === 'ok' || vr === 'revise' ? vr : null };
+  }
+
+  // 全能片段：duration ↔ 子分镜秒数之和 双向同步
+  const { syncUniversalSegmentDurationPair } = require('./universalSegmentDurationSync');
+  const uniIncoming = req.universal_segment_text !== undefined;
+  const durIncoming = req.duration !== undefined && !narrationDerivedDuration;
+  let effectiveUni = uniIncoming
+    ? (req.universal_segment_text != null ? String(req.universal_segment_text) : '')
+    : (row.universal_segment_text || '');
+  // 保存时把粘连成一行的「分镜k」拆回多行，避免解析/预览失败
+  if (uniIncoming && String(effectiveUni || '').trim()) {
+    try {
+      const {
+        parseUniversalMultiBeatText,
+        composeUniversalMultiBeatText,
+      } = require('./universalMultiBeatParse');
+      const parsed = parseUniversalMultiBeatText(effectiveUni);
+      if (parsed.ok) {
+        const recomposed = composeUniversalMultiBeatText(parsed.headerLines, parsed.beats);
+        if (recomposed && recomposed !== effectiveUni) {
+          effectiveUni = recomposed;
+          req = { ...req, universal_segment_text: recomposed };
+        }
+      }
+    } catch (_) {}
+  }
+  const effectiveDur = req.duration !== undefined ? req.duration : row.duration;
+  if (String(effectiveUni || '').trim()) {
+    const sync = syncUniversalSegmentDurationPair({
+      universalSegmentText: effectiveUni,
+      durationSec: effectiveDur,
+      segmentTextChanged: uniIncoming,
+      durationChanged: durIncoming,
+      narrationDerivedDuration,
+    });
+    if (sync.synced) {
+      if (sync.durationSec != null) req = { ...req, duration: sync.durationSec };
+      if (sync.universalSegmentText != null) req = { ...req, universal_segment_text: sync.universalSegmentText };
+      log.info('Storyboard universal duration sync', { id, mode: sync.mode, duration: sync.durationSec });
     }
   }
 
@@ -240,8 +299,10 @@ function getStoryboardById(db, id) {
     local_path: r.local_path ?? null,
     main_panel_idx: r.main_panel_idx != null ? Number(r.main_panel_idx) : null,
     video_url: r.video_url,
+    video_review: r.video_review === 'ok' || r.video_review === 'revise' ? r.video_review : null,
     audio_local_path: r.audio_local_path ?? null,
     narration_audio_local_path: r.narration_audio_local_path ?? null,
+    narration_prompt_aligned_at: r.narration_prompt_aligned_at ?? null,
     status: r.status || 'pending',
     created_at: r.created_at,
     updated_at: r.updated_at,
@@ -293,7 +354,7 @@ function insertBeforeStoryboard(db, log, targetId) {
   if (!target) return null;
 
   db.prepare(
-    'UPDATE storyboards SET storyboard_number = storyboard_number + 1, updated_at = ? WHERE episode_id = ? AND storyboard_number >= ? AND deleted_at IS NULL'
+    'UPDATE storyboards SET storyboard_number = storyboard_number + 1, updated_at = ? WHERE episode_id = ? AND storyboard_number >= ? AND deleted_at IS NULL AND COALESCE(is_intro, 0) = 0'
   ).run(new Date().toISOString(), target.episode_id, target.storyboard_number);
 
   const now = new Date().toISOString();

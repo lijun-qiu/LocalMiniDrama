@@ -178,7 +178,7 @@ describe('buildAgnes25VideoBody', () => {
 });
 
 describe('buildAgnesVideoImagePayload', () => {
-  it('uses extra_body.image array for omni multi-reference without keyframes mode', () => {
+  it('uses single top-level image for omni multi-reference (V2.0 ti2vid max 1)', () => {
     const refs = ['https://cdn/a.jpg', 'https://cdn/b.png', 'https://cdn/c.png'];
     const out = buildAgnesVideoImagePayload({
       useOmniReference: true,
@@ -186,10 +186,9 @@ describe('buildAgnesVideoImagePayload', () => {
       firstResolved: 'https://cdn/a.jpg',
       lastResolved: 'https://cdn/z.jpg',
     });
-    assert.equal(out.strategy, 'omni_reference_extra_body');
-    assert.deepEqual(out.extra_body, { image: refs });
-    assert.equal(out.image, undefined);
-    assert.equal(out.extra_body.mode, undefined);
+    assert.equal(out.strategy, 'omni_reference_single_first_only');
+    assert.equal(out.image, 'https://cdn/a.jpg');
+    assert.equal(out.extra_body, undefined);
   });
 
   it('uses single top-level image string for one omni reference', () => {
@@ -226,7 +225,8 @@ describe('buildAgnesVideoImagePayload', () => {
       firstResolved: 'https://cdn/s.jpg',
       lastResolved: 'https://cdn/l.jpg',
     });
-    assert.equal(out.strategy, 'omni_reference_extra_body');
-    assert.equal(out.extra_body.mode, undefined);
+    assert.equal(out.strategy, 'omni_reference_single_first_only');
+    assert.equal(out.image, 'https://cdn/s.jpg');
+    assert.equal(out.extra_body, undefined);
   });
 });

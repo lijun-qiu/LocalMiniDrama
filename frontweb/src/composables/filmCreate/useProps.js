@@ -19,7 +19,7 @@ import { buildExtractTaskMeta, isEpisodeExtractRunning } from '@/composables/use
  * @param {Function} deps.hasAssetImage
  */
 export function useProps(deps) {
-  const { store, dramaId, currentEpisodeId, getSelectedStyle, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage } = deps
+  const { store, dramaId, currentEpisodeId, getSelectedStyle, getSelectedImageModel, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage } = deps
   const genStore = useGenerationTaskStore()
 
   function buildPropImageMeta(prop) {
@@ -279,15 +279,18 @@ export function useProps(deps) {
   }
 
   async function onDeleteProp(prop) {
+    const isBound = !!prop?.bound_from_other_episode
     try {
       await ElMessageBox.confirm(
-        `确定要删除道具「${(prop.name || '未命名').slice(0, 20)}」吗？此操作不可恢复。`,
-        '删除确认',
-        { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+        isBound
+          ? `「${(prop.name || '未命名').slice(0, 20)}」来自其他集，确定从本集解除绑定吗？原集道具不会被删除。`
+          : `确定要删除道具「${(prop.name || '未命名').slice(0, 20)}」吗？此操作不可恢复。`,
+        isBound ? '解除绑定' : '删除确认',
+        { type: 'warning', confirmButtonText: isBound ? '解除绑定' : '删除', cancelButtonText: '取消' }
       )
-      await propAPI.delete(prop.id)
+      await propAPI.delete(prop.id, currentEpisodeId.value || undefined)
       await loadDrama()
-      ElMessage.success('道具已删除')
+      ElMessage.success(isBound ? '已从本集解除绑定' : '道具已删除')
     } catch (e) {
       if (e === 'cancel') return
       ElMessage.error(e.message || '删除失败')
@@ -301,7 +304,7 @@ export function useProps(deps) {
     generatingPropIds.add(prop.id)
     genStore.markRunning(meta)
     try {
-      const res = await propAPI.generateImage(prop.id, undefined, getSelectedStyle(), !!useQuadGrid)
+      const res = await propAPI.generateImage(prop.id, typeof getSelectedImageModel === 'function' ? getSelectedImageModel() : undefined, getSelectedStyle(), !!useQuadGrid)
       const taskId = res?.task_id
       if (taskId) {
         const pollRes = await pollTask(taskId, () => loadDrama(), meta)
@@ -503,6 +506,13 @@ export function useProps(deps) {
     const loadingKey = propAddToEpisodeLoadingKey(scope, item.id)
     addingPropFromLibraryId.value = loadingKey
     try {
+      // 本剧已有道具：直接绑定到本集（不复制）
+      if (scope === 'drama' && item?.id) {
+        await propAPI.bindToEpisode(currentEpisodeId.value, item.id)
+        ElMessage.success(`「${item.name || '道具'}」已绑定到本集`)
+        await loadDrama()
+        return
+      }
       const existingProp = (store.props || []).find((p) => p.name === item.name)
       if (existingProp) {
         await propAPI.update(existingProp.id, {

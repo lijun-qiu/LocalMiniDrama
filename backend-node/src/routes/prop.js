@@ -37,9 +37,46 @@ function deleteProp(db, log) {
   return (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) return response.badRequest(res, '无效的ID');
-    const ok = propService.deleteById(db, log, id);
-    if (!ok) return response.notFound(res, '道具不存在');
-    response.success(res, { message: '删除成功' });
+    const episodeId = req.query?.episode_id != null ? Number(req.query.episode_id) : null;
+    try {
+      const prop = propService.getById(db, id);
+      if (!prop) return response.notFound(res, '道具不存在');
+      // 跨集绑定到本集：仅解绑，不删原集资产
+      if (
+        Number.isFinite(episodeId) &&
+        prop.episode_id != null &&
+        Number(prop.episode_id) !== episodeId
+      ) {
+        const { unbindPropFromEpisode } = require('../services/episodeAssetBindService');
+        unbindPropFromEpisode(db, episodeId, id);
+        return response.success(res, { message: '已从本集解除绑定', unbound: true });
+      }
+      const ok = propService.deleteById(db, log, id);
+      if (!ok) return response.notFound(res, '道具不存在');
+      response.success(res, { message: '删除成功' });
+    } catch (err) {
+      log.error('deleteProp failed', { error: err.message });
+      response.internalError(res, err.message || '删除失败');
+    }
+  };
+}
+
+function bindPropToEpisode(db, log) {
+  return (req, res) => {
+    const episodeId = Number(req.params.episode_id);
+    const propId = Number(req.params.prop_id);
+    if (!Number.isFinite(episodeId) || !Number.isFinite(propId)) {
+      return response.badRequest(res, '缺少 episode_id 或 prop_id');
+    }
+    try {
+      const { bindPropToEpisode: bind } = require('../services/episodeAssetBindService');
+      const ok = bind(db, episodeId, propId);
+      if (!ok) return response.notFound(res, '道具不存在');
+      response.success(res, { message: '已绑定到本集', episode_id: episodeId, prop_id: propId });
+    } catch (err) {
+      log.error('bindPropToEpisode failed', { error: err.message });
+      response.internalError(res, err.message || '绑定失败');
+    }
   };
 }
 
@@ -177,5 +214,6 @@ module.exports = function propRoutes(db, log, cfg) {
     addToLibrary: addToLibrary(db, log),
     addToMaterialLibrary: addToMaterialLibrary(db, log),
     extractPropFromImage: extractPropFromImage(db, log, cfg),
+    bindPropToEpisode: bindPropToEpisode(db, log),
   };
 };

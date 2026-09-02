@@ -189,7 +189,7 @@ function clearEpisodeMedia(db, log) {
     const episodeId = req.params.episode_id;
     if (!episodeId) return response.badRequest(res, 'episode_id不能为空');
     const kind = (req.body && req.body.kind) || req.query?.kind;
-    if (!kind) return response.badRequest(res, 'kind 不能为空（narration_audio / images / videos）');
+    if (!kind) return response.badRequest(res, 'kind 不能为空（narration_audio / images / videos / prompts）');
     try {
       const result = episodeClearService.clearEpisodeMedia(db, log, episodeId, kind);
       if (!result) return response.notFound(res, '剧集不存在');
@@ -317,6 +317,68 @@ function generateStoryboard(db, log) {
   };
 }
 
+function getIntroStoryboard(db) {
+  return (req, res) => {
+    try {
+      const episodeId = Number(req.params.episode_id);
+      if (!episodeId) return response.badRequest(res, '缺少 episode_id');
+      const episodeIntroService = require('../services/episodeIntroService');
+      const intro = episodeIntroService.getIntroStoryboard(db, episodeId, dramaService.rowToStoryboard);
+      response.success(res, { intro_storyboard: intro });
+    } catch (err) {
+      if (err.code === 'NOT_FOUND') return response.notFound(res, err.message);
+      response.internalError(res, err.message || '获取片头失败');
+    }
+  };
+}
+
+function upsertIntroStoryboard(db, log) {
+  return (req, res) => {
+    try {
+      const episodeId = Number(req.params.episode_id);
+      if (!episodeId) return response.badRequest(res, '缺少 episode_id');
+      const episodeIntroService = require('../services/episodeIntroService');
+      const intro = episodeIntroService.upsertIntro(
+        db,
+        log,
+        episodeId,
+        req.body || {},
+        dramaService.rowToStoryboard
+      );
+      response.success(res, { intro_storyboard: intro, message: '片头已保存' });
+    } catch (err) {
+      if (err.code === 'NOT_FOUND') return response.notFound(res, err.message);
+      log.error('Upsert intro storyboard failed', { error: err.message });
+      response.internalError(res, err.message || '保存片头失败');
+    }
+  };
+}
+
+function generateIntroPrompts(db, log) {
+  return async (req, res) => {
+    try {
+      const episodeId = Number(req.params.episode_id);
+      if (!episodeId) return response.badRequest(res, '缺少 episode_id');
+      const episodeIntroService = require('../services/episodeIntroService');
+      const intro = await episodeIntroService.generateIntroPromptsForEpisode(
+        db,
+        log,
+        episodeId,
+        dramaService.rowToStoryboard,
+        req.body || {}
+      );
+      response.success(res, { intro_storyboard: intro, message: '片头提示词已生成' });
+    } catch (err) {
+      if (err.code === 'NOT_FOUND') return response.notFound(res, err.message);
+      if (err.code === 'NO_INTRO' || err.code === 'EMPTY_NARRATION') {
+        return response.badRequest(res, err.message);
+      }
+      log.error('Generate intro prompts failed', { error: err.message });
+      response.internalError(res, err.message || '生成片头提示词失败');
+    }
+  };
+}
+
 module.exports = function dramaRoutes(db, cfg, log) {
   return {
     createDrama: createDrama(db, log),
@@ -337,6 +399,9 @@ module.exports = function dramaRoutes(db, cfg, log) {
     clearEpisodeGenerated: clearEpisodeGenerated(db, log),
     clearEpisodeMedia: clearEpisodeMedia(db, log),
     generateStoryboard: generateStoryboard(db, log),
+    getIntroStoryboard: getIntroStoryboard(db),
+    upsertIntroStoryboard: upsertIntroStoryboard(db, log),
+    generateIntroPrompts: generateIntroPrompts(db, log),
     exportDrama: exportDrama(db, cfg, log),
     importDrama: importDrama(db, cfg, log),
     listExamples: listExamples(log),

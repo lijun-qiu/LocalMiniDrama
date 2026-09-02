@@ -31,6 +31,18 @@ function postStoryboardNdjsonStream(url, body, onDelta, doneField = 'universal_s
     const dec = new TextDecoder()
     let buf = ''
     let finalText = ''
+    let doneExtras = {}
+    const applyDone = (obj) => {
+      if (!obj || obj.type !== 'done') return
+      const v = obj[doneField]
+      finalText = (v != null && String(v).trim()) || finalText
+      if (obj.narration_prompt_aligned_at != null) {
+        doneExtras = {
+          ...doneExtras,
+          narration_prompt_aligned_at: String(obj.narration_prompt_aligned_at),
+        }
+      }
+    }
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
@@ -48,10 +60,7 @@ function postStoryboardNdjsonStream(url, body, onDelta, doneField = 'universal_s
         }
         if (obj.type === 'delta' && obj.text && typeof onDelta === 'function') onDelta(String(obj.text))
         if (obj.type === 'error') throw new Error(obj.message || '请求失败')
-        if (obj.type === 'done') {
-          const v = obj[doneField]
-          finalText = (v != null && String(v).trim()) || ''
-        }
+        applyDone(obj)
       }
     }
     const tail = buf.trim()
@@ -59,15 +68,12 @@ function postStoryboardNdjsonStream(url, body, onDelta, doneField = 'universal_s
       try {
         const obj = JSON.parse(tail)
         if (obj.type === 'error') throw new Error(obj.message || '请求失败')
-        if (obj.type === 'done') {
-          const v = obj[doneField]
-          finalText = (v != null && String(v).trim()) || finalText
-        }
+        applyDone(obj)
       } catch (e) {
         if (e instanceof Error && e.message && !e.message.includes('JSON')) throw e
       }
     }
-    return { [doneField]: finalText }
+    return { [doneField]: finalText, ...doneExtras }
   })
 }
 
@@ -106,7 +112,7 @@ export const storyboardsAPI = {
   generateUniversalSegmentPrompt(id, body = {}) {
     return request.post(`/storyboards/${id}/universal-segment-prompt`, body)
   },
-  /** 全能模式生成：NDJSON 流式，可选 body.duration、body.force_without_reference_images */
+  /** 全能模式生成：NDJSON 流式，可选 body.duration、body.force_without_reference_images、body.user_instruction */
   generateUniversalSegmentPromptStream(id, body, onDelta) {
     return postUniversalSegmentNdjsonStream(
       `/api/v1/storyboards/${id}/universal-segment-prompt-stream`,
@@ -116,7 +122,7 @@ export const storyboardsAPI = {
   },
   /**
    * 流式润色全能片段：NDJSON 行 {type:'delta',text} / {type:'done',universal_segment_text} / {type:'error',message}
-   * body.draft_universal_segment_text 为当前编辑区全文；可选 duration、force_without_reference_images
+   * body.draft_universal_segment_text 为当前编辑区全文；可选 duration、force_without_reference_images、user_instruction
    */
   polishUniversalSegmentPromptStream(id, body, onDelta) {
     return postStoryboardNdjsonStream(
@@ -159,6 +165,14 @@ export const storyboardsAPI = {
   /** 按对白/旁白拆成多条分镜（每条仅一人说话或仅画外旁白） */
   splitByAudio(id) {
     return request.post(`/storyboards/${id}/split-by-audio`, {})
+  },
+  /**
+   * 单独重新生成某一镜脚本（不删镜、不改镜号）
+   * @param {number|string} id
+   * @param {{ rebind_assets?: boolean, user_instruction?: string, model?: string }} [body]
+   */
+  regenerateOne(id, body = {}) {
+    return request.post(`/storyboards/${id}/regenerate`, body || {})
   },
   /** 全文解说模式：按剧本正文重新切分并写回各镜 narration（不调 AI） */
   resyncFullNarration(episodeId) {

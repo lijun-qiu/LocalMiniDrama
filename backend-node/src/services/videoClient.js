@@ -2745,37 +2745,35 @@ function buildAgnes25VideoBody({
   return { body, strategy: isFlash ? 'v25_flash_text' : 'v25_text' };
 }
 
-/** Agnes V2 原生音视频：允许 BGM/环境音，禁用人物说话/旁白/解说；同时压制画面字幕/花字 */
+/**
+ * Agnes negative_prompt（仅 V2.0；2.5 族不接受该字段）。
+ * 现默认不注入：角色对白需口型同步（对齐 ArcReel：dialogue 进视频提示词供 lip-sync）。
+ * 仍导出供显式调用方使用。
+ */
 const AGNES_SILENT_NEGATIVE_PROMPT =
-  'speech, dialogue, voiceover, talking, narration, lip sync, lip movement, English speech, subtitle, subtitles, captions, on-screen text, text overlay, karaoke, lyrics, watermark, title text, lower third, burned-in text, Chinese characters, 字幕, 花字, 标题, 歌词, 弹幕, 画面文字, 烧录文字, vocals, singing, announcer';
+  'subtitle, subtitles, captions, on-screen text, text overlay, karaoke, lyrics, watermark, title text, lower third, burned-in text, 字幕, 花字, 标题, 歌词, 弹幕, 画面文字, 烧录文字';
 
-const AGNES_SILENT_SUFFIX =
-  '【音频约束】可有轻柔背景音乐与环境音；禁止人物开口、对白、旁白、解说配音；人物闭口无口型。【画面约束】禁止画面字幕、烧录文字、标题文字、歌词、花字、弹幕、角标、任何 on-screen text / captions / subtitles / Chinese characters as overlay（旁白字幕仅由后期 ffmpeg 烧录，成片像素中不得出现可读汉字条）。';
-
-/** 提交前强制置顶的禁字约束（模型对 prompt 开头权重更高） */
-const AGNES_NO_TEXT_PREFIX =
-  '【最高优先级·禁画面字】本段为无字幕成片：画面中禁止出现任何可读文字、字幕条、标题、歌词、花字、弹幕、水印、角标；禁止把台词/旁白画进画面。';
+/** 仅禁烧录字幕（正常 / 首尾帧 / 全能均可带对白口型） */
+const AGNES_NO_CAPTION_SUFFIX =
+  '【画面约束】禁止画面字幕、烧录文字、标题文字、歌词、花字、弹幕、角标、任何 on-screen text / captions / subtitles（字幕由后期烧录）。';
 
 /**
- * 剥离会诱导模型「把字画进画面」的措辞与引号台词（全文解说旁白由后期烧录）。
+ * 全文解说：旁白后期 IndexTTS；角色对白保留并口型同步（不对白强制静音）。
  */
-function stripPromptCuesThatCauseBurnedInText(raw) {
+const AGNES_FULL_NARRATION_LIPSYNC_SUFFIX =
+  '【音频约束】画外解说旁白由后期 IndexTTS 叠加，禁止模型朗读解说/旁白；角色对白须口型同步、可带原生对白声。【画面约束】禁止画面字幕、烧录文字、花字、弹幕（字幕由后期烧录）。';
+
+/** 提交前强制置顶的禁字约束（模型对 prompt 开头权重更高）；不禁止口型说话 */
+const AGNES_NO_TEXT_PREFIX =
+  '【最高优先级·禁画面字】画面中禁止出现任何可读文字、字幕条、标题、歌词、花字、弹幕、水印、角标；禁止把旁白/台词画成字幕（角色口型说话除外）。';
+
+/**
+ * 剥离会诱导「把字烧进画面」的措辞；不碰角色对白（对话/对白/@图片N 说："…"）。
+ */
+function stripCaptionBurnCues(raw) {
   let p = (raw || '').toString();
   if (!p) return p;
   p = p
-    .replace(/解说旁白[：:][^。\n]*[。\n]?/g, '')
-    .replace(/对话[：:][^。\n]*[。\n]?/g, '')
-    .replace(/对白[：:][^。\n]*[。\n]?/g, '')
-    .replace(/\s*台词[：:][^。\n]*[。\n]?/g, '')
-    .replace(/旁白（画面无声）[：:]\s*[""「][^""」]*[""」]/g, '')
-    .replace(/第\d+秒\s*@人物\d+[：:]\s*[""「][^""」]*[""」]/g, '')
-    // 全能拍内常见：@图片N 说/道：「台词」→ 极易被画成字幕
-    .replace(
-      /@图片\s*(\d+)\s*(?:说|道|喊|叫|答|问|念|读|低语|怒吼)?[：:]\s*[「」""][^「」""]{0,120}[」""]/g,
-      '@图片$1 人物闭口无口型，无对白'
-    )
-    // 无说话者前缀的「说："…"」
-    .replace(/(?:说|道|喊|叫|答|问)[：:]\s*[「」""][^「」""]{0,120}[」""]/g, '人物闭口无口型')
     .replace(/[「」""][^「」""]{2,80}[」""]\s*字幕浮现于画面[^，。；\n]*/g, '')
     .replace(/字幕浮现于画面[^，。；\n]*/g, '')
     .replace(/下方滚动字幕[^，。；\n]*/g, '屏幕下方信息条')
@@ -2791,6 +2789,25 @@ function stripPromptCuesThatCauseBurnedInText(raw) {
   return p;
 }
 
+/**
+ * 全文解说：剥离画外解说 VO（后期 IndexTTS），保留明显角色台词供口型。
+ * 对齐 ArcReel：dialogue → 视频提示词；voiceover → 不进模型朗读。
+ */
+function stripNarrationVoCuesKeepDialogue(raw) {
+  let p = stripCaptionBurnCues(raw);
+  p = p
+    .replace(/解说旁白[：:][^。\n]*[。\n]?/g, '')
+    .replace(/旁白（画面无声）[：:]\s*[""「][^""」]*[""」]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return p;
+}
+
+/** @deprecated 保留别名；现只剥字幕诱导，不再剥对白 */
+function stripPromptCuesThatCauseBurnedInText(raw) {
+  return stripCaptionBurnCues(raw);
+}
+
 function isDramaFullNarrationVideoMode(db, dramaId) {
   if (!db || !dramaId) return false;
   try {
@@ -2804,12 +2821,14 @@ function isDramaFullNarrationVideoMode(db, dramaId) {
 }
 
 /**
- * 提交 Agnes 前剥离会触发原生配音的文案（解说/对白/旁白），并追加无对白/无字幕约束（保留 BGM）。
- * 全文解说模式下旁白由分镜视频后处理 IndexTTS 叠加，不应让 Agnes 朗读或画字。
+ * 提交 Agnes 前处理提示词：
+ * - 正常模式：保留对白，供口型/原生对白；仅压烧录字幕措辞
+ * - 全文解说（forceSilent）：剥解说旁白 VO，保留角色台词；禁止模型读旁白，不对白强制静音
+ * 不再因「提示词里有台词」而整段静音（hadSpeechCue 已废止）。
  */
 function prepareAgnesVideoPrompt(rawPrompt, { forceSilent = false, durationSec = null } = {}) {
   let p = (rawPrompt || '').toString().trim();
-  if (!p) return { prompt: p, useSilentNegative: !!forceSilent };
+  if (!p) return { prompt: p, useSilentNegative: false };
 
   try {
     const {
@@ -2818,6 +2837,12 @@ function prepareAgnesVideoPrompt(rawPrompt, { forceSilent = false, durationSec =
       AGNES_SEQUENTIAL_ORDER_SUFFIX,
     } = require('./agnesUniversalPromptAdapter');
     if (isUniversalMultiBeatPrompt(p)) {
+      try {
+        const { enforcePerBeatDialogueAndLipSync } = require('./universalOmniMultiBeatFormat');
+        p = enforcePerBeatDialogueAndLipSync(p);
+      } catch (_) {
+        /* ignore */
+      }
       const dur = durationSec != null ? Number(durationSec) : null;
       const { adapted, changed } = adaptUniversalSegmentTextForAgnes(p, {
         durationSec: Number.isFinite(dur) && dur > 0 ? dur : null,
@@ -2831,25 +2856,25 @@ function prepareAgnesVideoPrompt(rawPrompt, { forceSilent = false, durationSec =
     /* 适配失败则沿用原文 */
   }
 
-  const hadSpeechCue =
-    /解说旁白[：:]|对话[：:]|对白[：:]|台词[：:]|旁白（画面无声）|@人物\d+[：:]\s*[""「]|@图片\s*\d+\s*(?:说|道|喊)|[「」""][^「」""]{2,}[」""]/.test(
-      p
-    );
-
-  if (forceSilent || hadSpeechCue) {
-    p = stripPromptCuesThatCauseBurnedInText(p);
-    if (!p.includes('禁止人物开口') && !p.includes('禁止画面字幕')) {
-      p = p ? `${p} ${AGNES_SILENT_SUFFIX}` : AGNES_SILENT_SUFFIX;
-    } else if (!p.includes('禁止画面字幕')) {
-      p = `${p} 【画面约束】禁止画面字幕、烧录文字、标题文字、歌词、花字、弹幕、任何 on-screen text / captions / subtitles（字幕由后期烧录）。`;
+  if (forceSilent) {
+    p = stripNarrationVoCuesKeepDialogue(p);
+    if (!p.includes('角色对白须口型') && !p.includes('禁止模型朗读解说')) {
+      p = p ? `${p} ${AGNES_FULL_NARRATION_LIPSYNC_SUFFIX}` : AGNES_FULL_NARRATION_LIPSYNC_SUFFIX;
+    } else if (!p.includes('禁止画面字幕') && !p.includes('禁画面字')) {
+      p = `${p} ${AGNES_NO_CAPTION_SUFFIX}`;
     }
-    // 置顶再强调一次：Agnes 2.5 无 negative_prompt，只能靠正文权重
-    if (forceSilent && !p.startsWith('【最高优先级·禁画面字】')) {
+    if (!p.startsWith('【最高优先级·禁画面字】')) {
       p = `${AGNES_NO_TEXT_PREFIX}\n${p}`;
+    }
+  } else {
+    p = stripCaptionBurnCues(p);
+    if (!p.includes('禁止画面字幕') && !p.includes('禁画面字')) {
+      p = p ? `${p} ${AGNES_NO_CAPTION_SUFFIX}` : AGNES_NO_CAPTION_SUFFIX;
     }
   }
 
-  return { prompt: p, useSilentNegative: !!(forceSilent || hadSpeechCue) };
+  // 不对白/口型走 negative_prompt；需要禁字幕时由正文约束承担
+  return { prompt: p, useSilentNegative: false };
 }
 
 async function callAgnesVideoApi(db, config, log, opts) {

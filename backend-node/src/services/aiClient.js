@@ -9,6 +9,29 @@ function isAgnesConfig(config) {
   return (config?.provider || '').toLowerCase() === 'agnes';
 }
 
+/** Agnes 2.x 推理模型：reasoning_tokens 计入 max_tokens，过小会导致 text_tokens=0 */
+function isAgnesReasoningModel(model) {
+  return /^agnes-2\./i.test(String(model || ''));
+}
+
+const AGNES_REASONING_MIN_MAX_TOKENS = 2000;
+
+/**
+ * 抬升 Agnes 推理模型的 max_tokens，避免思考占满预算后 content 为空。
+ */
+function ensureAgnesReasoningMaxTokens(config, model, finalMaxTokens, log) {
+  if (!isAgnesConfig(config) || !isAgnesReasoningModel(model)) return finalMaxTokens;
+  if (finalMaxTokens == null || finalMaxTokens >= AGNES_REASONING_MIN_MAX_TOKENS) return finalMaxTokens;
+  if (log?.warn) {
+    log.warn('AI generateText: Agnes 推理模型 max_tokens 过低，已抬升', {
+      model,
+      was: finalMaxTokens,
+      raised_to: AGNES_REASONING_MIN_MAX_TOKENS,
+    });
+  }
+  return AGNES_REASONING_MIN_MAX_TOKENS;
+}
+
 /** Agnes 多 Key：从池中取单个 Key 再调 API，避免 Bearer 里带逗号 */
 async function withAgnesApiKey(config, fn) {
   if (!isAgnesConfig(config)) {
@@ -173,6 +196,8 @@ function postJSONStream(url, headers, body, silenceTimeoutMs = 60000, onProgress
       }
 
       let accumulated = '';
+      let reasoningAccumulated = '';
+      let finishReason = null;
       let sseBuffer = '';
       let firstToken = true;
       resetSilenceTimer();
@@ -190,7 +215,14 @@ function postJSONStream(url, headers, body, silenceTimeoutMs = 60000, onProgress
           if (data === '[DONE]') continue;
           try {
             const evt = JSON.parse(data);
-            const delta = evt.choices?.[0]?.delta?.content;
+            const choice = evt.choices?.[0];
+            if (choice?.finish_reason) finishReason = choice.finish_reason;
+            const deltaObj = choice?.delta || {};
+            // 只把正式回复计入 body；reasoning_content 仅用于诊断
+            if (deltaObj.reasoning_content) {
+              reasoningAccumulated += deltaObj.reasoning_content;
+            }
+            const delta = deltaObj.content;
             if (delta) {
               if (firstToken) {
                 firstToken = false;
@@ -205,7 +237,12 @@ function postJSONStream(url, headers, body, silenceTimeoutMs = 60000, onProgress
 
       res.on('end', () => {
         clearTimeout(silenceTimer);
-        resolve({ status: statusCode, body: accumulated });
+        resolve({
+          status: statusCode,
+          body: accumulated,
+          reasoning_len: reasoningAccumulated.length,
+          finish_reason: finishReason,
+        });
       });
       res.on('error', (e) => { clearTimeout(silenceTimer); reject(e); });
     });
@@ -341,6 +378,7 @@ async function generateText(db, log, serviceType, userPrompt, systemPrompt, opti
       finalMaxTokens = minVal;
     }
   }
+  finalMaxTokens = ensureAgnesReasoningMaxTokens(config, model, finalMaxTokens, log);
 
   let body = {
     model,
@@ -353,22 +391,57 @@ async function generateText(db, log, serviceType, userPrompt, systemPrompt, opti
     ...(json_mode ? { response_format: { type: 'json_object' } } : {}),
   };
   body = applyDeepSeekChatOptions(config, body);
-  const startMs = Date.now();
-  log.info('AI generateText request', { url: url.slice(0, 60), model, max_tokens: finalMaxTokens ?? '(model default)', json_mode, stream: true });
-  const res = await withAgnesApiKey(config, (apiKey) => postJSONStream(url, { Authorization: 'Bearer ' + apiKey }, body, 60000, (receivedLen, event, accumulated) => {
-    if (event === 'first_token') {
-      log.info('AI stream first token', { model, ttft_ms: Date.now() - startMs });
-    } else if (receivedLen > 0 && receivedLen % 500 < 20) {
-      // 每积累约 500 字符记录一次进度
-      log.info('AI stream progress', { model, received_chars: receivedLen, elapsed_ms: Date.now() - startMs });
+  // Agnes 拥堵时偶发「流结束但 content 为空」；有限次退避重试
+  const maxAttempts = Math.max(1, Number(options.empty_retry_attempts) || 3);
+  let content = null;
+  let elapsedMs = 0;
+  let lastReasoningLen = 0;
+  let lastFinishReason = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const startMs = Date.now();
+    log.info('AI generateText request', {
+      url: url.slice(0, 60),
+      model,
+      max_tokens: finalMaxTokens ?? '(model default)',
+      json_mode,
+      stream: true,
+      attempt,
+      max_attempts: maxAttempts,
+    });
+    const res = await withAgnesApiKey(config, (apiKey) => postJSONStream(url, { Authorization: 'Bearer ' + apiKey }, body, 60000, (receivedLen, event, accumulated) => {
+      if (event === 'first_token') {
+        log.info('AI stream first token', { model, ttft_ms: Date.now() - startMs, attempt });
+      } else if (receivedLen > 0 && receivedLen % 500 < 20) {
+        // 每积累约 500 字符记录一次进度
+        log.info('AI stream progress', { model, received_chars: receivedLen, elapsed_ms: Date.now() - startMs });
+      }
+      // 调用者提供的流式回调（如分镜增量解析），传入当前已积累的完整文本
+      if (streamCallback && accumulated) streamCallback(accumulated);
+    }));
+    // 流式模式下 res.body 已是拼接好的完整文本内容（非 JSON）
+    content = res.body;
+    elapsedMs = Date.now() - startMs;
+    lastReasoningLen = Number(res.reasoning_len) || 0;
+    lastFinishReason = res.finish_reason || null;
+    if (content) break;
+    log.warn('AI generateText empty response, will retry', {
+      model,
+      attempt,
+      max_attempts: maxAttempts,
+      elapsed_ms: elapsedMs,
+      reasoning_len: lastReasoningLen,
+      finish_reason: lastFinishReason,
+    });
+    if (attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 800 * attempt));
     }
-    // 调用者提供的流式回调（如分镜增量解析），传入当前已积累的完整文本
-    if (streamCallback && accumulated) streamCallback(accumulated);
-  }));
-  // 流式模式下 res.body 已是拼接好的完整文本内容（非 JSON）
-  const content = res.body;
-  const elapsedMs = Date.now() - startMs;
+  }
   if (!content) {
+    if (lastReasoningLen > 0) {
+      throw new Error(
+        `AI 返回内容为空（推理占用了输出配额 reasoning_len=${lastReasoningLen}, finish_reason=${lastFinishReason || 'unknown'}，请提高 max_tokens）`
+      );
+    }
     throw new Error('AI 返回内容为空');
   }
   log.info('AI raw response received', { model, text_length: content.length, elapsed_ms: elapsedMs, text_preview: content.slice(0, 200) });
@@ -437,6 +510,7 @@ async function streamGenerateText(db, log, serviceType, userPrompt, systemPrompt
       finalMaxTokens = minVal;
     }
   }
+  finalMaxTokens = ensureAgnesReasoningMaxTokens(config, model, finalMaxTokens, log);
 
   let body = {
     model,

@@ -164,4 +164,16 @@ describe('enforceFullNarrationSegments', () => {
     assert.equal(out[0].narration, segs[0]);
     assert.equal(out[1].narration, segs[1]);
   });
+
+  it('extracts spoken dialogue out of narration on bind', () => {
+    const segs = [
+      '你走进停尸房。陈警官说："第二具。昨天发现的。"你盯着那张脸。',
+    ];
+    const boards = [{ shot_number: 1, title: 'A', narration: '旧', dialogue: '无' }];
+    const out = enforceFullNarrationSegments(boards, segs, { warn() {}, info() {} }, 't2');
+    assert.match(out[0].dialogue, /陈警官/);
+    assert.match(out[0].dialogue, /第二具/);
+    assert.doesNotMatch(out[0].narration, /第二具/);
+    assert.match(out[0].narration, /你走进停尸房|你盯着那张脸/);
+  });
 });

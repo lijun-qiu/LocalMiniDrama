@@ -161,6 +161,39 @@ function updateStoryboard(db, log, id, req) {
     req = { ...req, video_review: vr === 'ok' || vr === 'revise' ? vr : null };
   }
 
+  // 经典模式保存 video_prompt：统一口型/对白后处理（与 AI 重新生成同一套）
+  if (req.video_prompt !== undefined && String(row.creation_mode || '') !== 'universal') {
+    const vpIn = req.video_prompt != null ? String(req.video_prompt).trim() : '';
+    if (vpIn) {
+      try {
+        const full = db.prepare(
+          'SELECT dialogue, action, result, atmosphere, sound_effect, narration FROM storyboards WHERE id = ? AND deleted_at IS NULL'
+        ).get(Number(id));
+        const { applyClassicVideoPromptPostProcess } = require('./dialogueVisualSeparation');
+        const merged = {
+          id: Number(id),
+          dialogue: req.dialogue !== undefined ? req.dialogue : full?.dialogue,
+          action: req.action !== undefined ? req.action : full?.action,
+          result: req.result !== undefined ? req.result : full?.result,
+          atmosphere: req.atmosphere !== undefined ? req.atmosphere : full?.atmosphere,
+          sound_effect: full?.sound_effect,
+          narration: req.narration !== undefined ? req.narration : full?.narration,
+        };
+        const cleaned = applyClassicVideoPromptPostProcess(vpIn, merged, {
+          preferPromptAction: true,
+          log,
+        });
+        if (cleaned && cleaned !== vpIn) {
+          req = { ...req, video_prompt: cleaned };
+        } else if (cleaned) {
+          req = { ...req, video_prompt: cleaned };
+        }
+      } catch (e) {
+        log.warn('classic video_prompt post-process on update failed', { id, message: e.message });
+      }
+    }
+  }
+
   // 全能片段：duration ↔ 子分镜秒数之和 双向同步
   const { syncUniversalSegmentDurationPair } = require('./universalSegmentDurationSync');
   const uniIncoming = req.universal_segment_text !== undefined;

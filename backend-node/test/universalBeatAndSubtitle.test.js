@@ -44,11 +44,93 @@ describe('buildFallbackUniversalMultiBeatText narration-visual sync', () => {
     );
     assert.match(text, /生成一个由以下[12]个分镜组成的视频/);
     assert.doesNotMatch(text, /旁白（画面无声）：/);
-    assert.match(text, /人物闭口无口型，无对白/);
+    assert.match(text, /人物闭口无口型/);
+    assert.match(text, /对话：无/);
     const firstBeat = text.split('\n').find((l) => l.startsWith('分镜1：'));
     assert.ok(firstBeat);
     assert.match(firstBeat, /@图片2/);
     assert.doesNotMatch(firstBeat, /雨下了一整夜/);
+    assert.doesNotMatch(firstBeat, /对话：/);
+  });
+
+  it('puts dialogue in trailing block not beat body', () => {
+    const text = buildFallbackUniversalMultiBeatText(
+      { location: '会议室', time: '午后' },
+      {
+        action: '林薇合上简历',
+        dialogue: '陈浩："因为我在找工作。"',
+        durationSec: 6,
+        primaryImageTag: '@图片2',
+        dialogueSpeakerTag: '@图片3',
+        primarySubjectName: '陈浩',
+      },
+      'anime'
+    );
+    assert.match(text, /对话：/);
+    assert.match(text, /因为我在找工作/);
+    assert.match(text, /分镜\d+：/);
+    const beatLines = text.split('\n').filter((l) => /^分镜\d+：/.test(l));
+    for (const bl of beatLines) {
+      assert.doesNotMatch(bl, /因为我在找工作/);
+    }
+    // 仅开口拍有口型；其它拍闭口
+    const speaking = beatLines.filter((l) => /开口说话|口型同步|说话口型/.test(l));
+    const silent = beatLines.filter((l) => /闭口无口型/.test(l));
+    assert.ok(speaking.length >= 1);
+    assert.ok(silent.length >= 0);
+    assert.equal(speaking.length + silent.length, beatLines.length);
+  });
+});
+
+describe('enforcePerBeatDialogueAndLipSync', () => {
+  const { enforcePerBeatDialogueAndLipSync, parseDialogueBeatAssignments } = require('../src/services/universalOmniMultiBeatFormat');
+
+  it('tags dialogue to 分镜2 and forces other beats silent', () => {
+    const raw = [
+      '画面风格和类型: 真人写实, 电影风格, 高清画质',
+      '生成一个由以下3个分镜组成的视频。',
+      '环境参考 @图片1。',
+      '分镜1： 4秒: @图片2 合上简历。',
+      '分镜2： 5秒: @图片3 看向对方。',
+      '分镜3： 3秒: @图片2 愣住。',
+      '对话：分镜2：陈浩："因为我在找工作。"',
+    ].join('\n');
+    const out = enforcePerBeatDialogueAndLipSync(raw);
+    const beats = out.split('\n').filter((l) => /^分镜\d+：/.test(l));
+    assert.match(beats[0], /闭口无口型/);
+    assert.match(beats[0], /无对白/);
+    assert.match(beats[1], /开口说话|口型同步/);
+    assert.doesNotMatch(beats[1], /闭口无口型/);
+    assert.match(beats[2], /闭口无口型/);
+    assert.match(out, /对话：分镜2：/);
+    assert.match(out, /因为我在找工作/);
+  });
+
+  it('forces all silent when dialogue is 无', () => {
+    const raw = [
+      '画面风格和类型: 测试',
+      '生成一个由以下2个分镜组成的视频。',
+      '环境 @图片1。',
+      '分镜1： 3秒: @图片2 开口说话口型同步。',
+      '分镜2： 3秒: @图片2 继续说。',
+      '对话：陈浩："不该出现。"',
+    ].join('\n');
+    const out = enforcePerBeatDialogueAndLipSync(raw, { dialogueField: '无' });
+    assert.match(out, /对话：无/);
+    assert.doesNotMatch(out, /不该出现/);
+    const beats = out.split('\n').filter((l) => /^分镜\d+：/.test(l));
+    for (const bl of beats) {
+      assert.match(bl, /闭口无口型/);
+      assert.doesNotMatch(bl, /开口说话|口型同步/);
+    }
+  });
+
+  it('parseDialogueBeatAssignments reads 镜头k tags', () => {
+    const { byBeat } = parseDialogueBeatAssignments(
+      '对话：镜头1：林薇："为什么？" 分镜2：陈浩："因为找工作。"'
+    );
+    assert.equal(byBeat.get(1), '林薇："为什么？"');
+    assert.match(byBeat.get(2), /因为找工作/);
   });
 });
 
@@ -97,9 +179,26 @@ describe('universalMultiBeatParse', () => {
 
   it('compose round-trip keeps structure', () => {
     const p = parseUniversalMultiBeatText(sample);
-    const text = composeUniversalMultiBeatText(p.headerLines, p.beats);
+    const text = composeUniversalMultiBeatText(p.headerLines, p.beats, p.dialogueTrailer);
     assert.match(text, /分镜1： 5秒:/);
     assert.match(text, /分镜2： 5秒:/);
+  });
+
+  it('parses trailing 对话 block without merging into last beat', () => {
+    const raw = [
+      '画面风格和类型: 真人写实, 电影风格, 高清画质',
+      '生成一个由以下1个分镜组成的视频。',
+      '环境参考 @图片1。',
+      '分镜1： 6秒: @图片2 开口说话口型。',
+      '对话：陈浩："因为我在找工作。"林薇："为什么要来我们这儿？"',
+    ].join('\n');
+    const p = parseUniversalMultiBeatText(raw);
+    assert.equal(p.ok, true);
+    assert.equal(p.beats.length, 1);
+    assert.doesNotMatch(p.beats[0].body, /因为我在找工作/);
+    assert.match(p.dialogueTrailer, /因为我在找工作/);
+    const round = composeUniversalMultiBeatText(p.headerLines, p.beats, p.dialogueTrailer);
+    assert.match(round, /对话：陈浩/);
   });
 });
 

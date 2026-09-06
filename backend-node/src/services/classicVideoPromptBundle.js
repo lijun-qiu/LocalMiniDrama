@@ -138,6 +138,8 @@ function buildClassicRequiredCoverageDigest(sbRow, linkedSceneText) {
     if (Number.isFinite(ei)) add('情绪强度', String(ei));
     else add('情绪强度', String(sbRow.emotion_intensity).trim());
   }
+  add('现场音效', sbRow.sound_effect || require('./dialogueVisualSeparation').resolveSoundEffectForStoryboard(sbRow));
+  add('配乐侧写', sbRow.bgm_prompt);
   add('景别', sbRow.shot_type);
   const ang = angleCoverageLine(sbRow);
   if (ang) add('镜头方式（视角/机位）', ang);
@@ -326,6 +328,8 @@ async function loadClassicVideoPromptContext(db, sbRow, body = {}) {
     ['NARRATION', sbRow.narration],
     ['RESULT', sbRow.result],
     ['ATMOSPHERE', sbRow.atmosphere],
+    ['SOUND_EFFECT', sbRow.sound_effect || require('./dialogueVisualSeparation').resolveSoundEffectForStoryboard(sbRow)],
+    ['BGM_PROMPT', sbRow.bgm_prompt],
     ['EMOTION', sbRow.emotion],
     ['EMOTION_INTENSITY', sbRow.emotion_intensity],
     ['SHOT_TYPE', sbRow.shot_type],
@@ -382,24 +386,32 @@ function buildClassicVideoPromptUserPrompt(ctx, sbRow, opts = {}) {
   const mode = opts.mode === 'generate' ? 'generate' : 'polish';
   const fullNarration = !!ctx.fullNarration;
   const task =
-    mode === 'generate' && fullNarration
-      ? 'GENERATE_FULL_NARRATION_CLASSIC_VIDEO_PROMPT'
+    mode === 'generate'
+      ? fullNarration
+        ? 'GENERATE_FULL_NARRATION_CLASSIC_VIDEO_PROMPT'
+        : 'GENERATE_CLASSIC_STILL_TO_VIDEO_PROMPT'
       : 'POLISH_CLASSIC_STORYBOARD_STILL_TO_VIDEO_PROMPT';
   const polishPassStamp = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
   const outputGoal =
     mode === 'generate' && fullNarration
       ? '根据旁白与分镜字段生成单段、可直接送图生视频模型的专业提示词；旁白驱动画面，成片须无声（旁白后处理叠加）。'
-      : '单段、可直接送图生视频模型的专业提示词；首帧画面已由参考图锁定，文案负责动效、节奏、运镜意图、声画暗示与画风气质。';
+      : mode === 'generate'
+        ? '根据分镜字段与首帧锚点，从零生成单段可直接送图生视频模型的专业提示词；动作纯画面，台词只放「对话：」。'
+        : '单段、可直接送图生视频模型的专业提示词；首帧画面已由参考图锁定，文案负责动效、节奏、运镜意图、声画暗示与画风气质。';
 
   const draftSection =
-    mode === 'generate' && fullNarration && !ctx.currentDraft
-      ? '(empty — generate from STORYBOARD_FIELDS + NARRATION + FULL_EPISODE_SCRIPT + NARRATION_LOCAL_CONTEXT/neighbors; AUTO_COMPOSED 仅作字段顺序参考，须据旁白合理扩展动作与运镜)'
+    mode === 'generate' && !ctx.currentDraft
+      ? fullNarration
+        ? '(empty — generate from STORYBOARD_FIELDS + NARRATION + FULL_EPISODE_SCRIPT + NARRATION_LOCAL_CONTEXT/neighbors; AUTO_COMPOSED 仅作字段顺序参考，须据旁白合理扩展动作与运镜)'
+        : '(empty — generate from STORYBOARD_FIELDS + FIRST_FRAME_VISUAL_ANCHOR + AUTO_COMPOSED；AUTO_COMPOSED 仅作标签顺序与事实底线，须按台词↔画面分离合同重写，动作不含台词原文)'
       : ctx.currentDraft || '(empty — use AUTO_COMPOSED + FIELDS)';
 
   const polishRefreshLine =
     mode === 'polish'
       ? 'POLISH_REFRESH: 用户可多次润色；事实与时长不变，但须明显换表述；禁止与 CURRENT_VIDEO_DRAFT 仅标点或个别虚词差异。'
-      : 'GENERATE_REFRESH: 首次生成或重建；须完整覆盖字段与旁白，动作/运镜须与 narration 及 NARRATION_LOCAL_CONTEXT 语义匹配（整集剧本仅作因果/语气参考）。';
+      : fullNarration
+        ? 'GENERATE_REFRESH: 首次生成或重建；须完整覆盖字段与旁白，动作/运镜须与 narration 及 NARRATION_LOCAL_CONTEXT 语义匹配（整集剧本仅作因果/语气参考）。'
+        : 'GENERATE_REFRESH: 首次生成或重建；须完整覆盖 STORYBOARD_FIELDS；「动作：」纯画面、「对话：」逐字台词（无对白写对话：无）；勿把台词写进动作。';
 
   return [
     `TASK: ${task}`,
@@ -407,7 +419,7 @@ function buildClassicVideoPromptUserPrompt(ctx, sbRow, opts = {}) {
     polishRefreshLine,
     `OUTPUT_GOAL: ${outputGoal}`,
     fullNarration
-      ? 'FULL_NARRATION_MODE: true（旁白 IndexTTS 后处理；Agnes 提交前会剥离对白/旁白配音要求，成片人物闭口）'
+      ? 'FULL_NARRATION_MODE: true（旁白 IndexTTS 后处理；提交前剥离解说旁白 VO，保留角色对白供口型同步）'
       : 'FULL_NARRATION_MODE: false',
     '',
     `PROJECT:\nDRAMA_TITLE: ${ctx.dramaTitle || '(unknown)'}\nEPISODE_TITLE: ${ctx.episodeTitle || '(unknown)'}`,
@@ -436,6 +448,8 @@ function buildClassicVideoPromptUserPrompt(ctx, sbRow, opts = {}) {
     }`,
     '',
     `AUTO_COMPOSED_VIDEO_PROMPT（程序字段拼装参考，作事实底线与标签顺序范例）:\n${ctx.autoComposed}`,
+    '',
+    require('./dialogueVisualSeparation').getDialogueVisualSeparationContract(false),
     '',
     `CURRENT_VIDEO_DRAFT（${mode === 'polish' ? '用户当前 video_prompt，优先在其上润色' : '当前库内草稿；生成模式可忽略并据字段重写'}）:\n${draftSection}`,
     '',
@@ -467,7 +481,8 @@ function hasClassicVideoPromptInputs(sbRow, ctx) {
 async function generateClassicVideoPromptWithAi(db, log, sbRow, opts = {}) {
   const mode = opts.mode === 'polish' ? 'polish' : 'generate';
   const body = {
-    draft_video_prompt: opts.draftVideoPrompt,
+    // 生成模式从字段重写，避免被旧的规则拼装草稿带偏
+    draft_video_prompt: mode === 'generate' ? '' : opts.draftVideoPrompt,
     user_instruction: opts.userInstruction,
   };
   const ctx = await loadClassicVideoPromptContext(db, sbRow, body);
@@ -506,10 +521,18 @@ async function generateClassicVideoPromptWithAi(db, log, sbRow, opts = {}) {
     });
   }
 
-  const trimmed = text != null ? String(text).trim() : '';
+  let trimmed = text != null ? String(text).trim() : '';
   if (trimmed.length < 12) {
     throw new Error('AI 返回内容过短，请检查文本模型配置');
   }
+  // AI 成稿统一走口型/对白后处理（有对白禁止全闭口、归属重标、无词开口静音）
+  const {
+    applyClassicVideoPromptPostProcess,
+  } = require('./dialogueVisualSeparation');
+  trimmed = applyClassicVideoPromptPostProcess(trimmed, sbRow, {
+    preferPromptAction: true,
+    log,
+  });
   return { text: trimmed, fullNarration: ctx.fullNarration, mode };
 }
 
@@ -658,6 +681,13 @@ async function generateFullNarrationDualPromptsWithAi(db, log, sbRow, opts = {})
   }
   if ((!polished || polished.length < 10) && (!video || video.length < 12)) {
     throw new Error('双提示词生成失败：图/视频均过短');
+  }
+  if (video && video.length >= 12) {
+    const { applyClassicVideoPromptPostProcess } = require('./dialogueVisualSeparation');
+    video = applyClassicVideoPromptPostProcess(video, sbRow, {
+      preferPromptAction: true,
+      log,
+    });
   }
   return { polished_prompt: polished, video_prompt: video, fullNarration: true };
 }

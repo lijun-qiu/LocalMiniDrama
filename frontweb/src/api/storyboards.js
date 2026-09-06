@@ -158,9 +158,17 @@ export const storyboardsAPI = {
   regenerateLayoutDescription(id) {
     return request.post(`/storyboards/${id}/regenerate-layout-description`, {})
   },
-  /** 按后端最新规则重建单镜 video_prompt（含音色锚点，不调用 AI） */
+  /** 经典模式：AI 重建单镜 video_prompt（失败时回退规则拼装） */
   rebuildVideoPrompt(id) {
     return request.post(`/storyboards/${id}/rebuild-video-prompt`, {})
+  },
+  /**
+   * 补全缺失视频提示词；经典模式默认 AI 生成。
+   * @param {number|string} episodeId
+   * @param {{ force?: boolean }} [body] force=true 时强制 AI 重写全部经典镜
+   */
+  completeMissingVideoPrompts(episodeId, body = {}) {
+    return request.post(`/episodes/${episodeId}/complete-missing-video-prompts`, body)
   },
   /** 按对白/旁白拆成多条分镜（每条仅一人说话或仅画外旁白） */
   splitByAudio(id) {
@@ -181,10 +189,6 @@ export const storyboardsAPI = {
   /** 补全本集缺失的生图提示词（polished_prompt，跳过已有） */
   completeMissingImagePrompts(episodeId) {
     return request.post(`/episodes/${episodeId}/complete-missing-image-prompts`, {})
-  },
-  /** 补全本集缺失的视频提示词 */
-  completeMissingVideoPrompts(episodeId) {
-    return request.post(`/episodes/${episodeId}/complete-missing-video-prompts`, {})
   },
   /** 全文解说：按旁白配音时长刷新 duration 并 AI 生成生图+视频提示词 */
   generatePromptsFromAudioDuration(episodeId, body = {}) {

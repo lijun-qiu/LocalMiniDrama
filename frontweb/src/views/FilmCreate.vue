@@ -3991,7 +3991,7 @@
           <el-input v-model="sbResult[videoParamsTarget.id]" type="textarea" :rows="2" placeholder="动作完成后的画面结果" />
         </el-form-item>
         <el-form-item label="视频提示词">
-          <div class="vp-video-prompt-hint">保存后将根据上方字段，由系统按最新规则自动生成（含角色音色锚点）。</div>
+          <div class="vp-video-prompt-hint">保存后将根据上方字段由 AI 生成视频提示词（失败时回退规则拼装；含角色音色锚点）。</div>
           <el-input
             v-if="videoParamsTarget?.video_prompt"
             :model-value="videoParamsTarget.video_prompt"
@@ -6012,7 +6012,7 @@ const storyboardPromptCoverage = computed(() => {
     modeNote = '全能分镜：AI 润色生图提示词；生视频主用全能片段（留空时用 video_prompt）'
     expectUniversal = true
   } else {
-    modeNote = '经典分镜：AI 润色生图提示词；video_prompt 入库时规则拼装（视频参数保存可重建）'
+    modeNote = '经典分镜：AI 润色生图提示词；video_prompt 由 AI 生成（失败回退规则拼装）'
   }
 
   const imageLine = expectImageAi
@@ -6027,7 +6027,7 @@ const storyboardPromptCoverage = computed(() => {
   } else if (expectVideoAi) {
     videoLine = `视频提示词（AI）${video}/${total}`
   } else {
-    videoLine = `视频提示词 ${video}/${total}（规则拼装）`
+    videoLine = `视频提示词 ${video}/${total}（AI 生成）`
   }
 
   const sbImageLine = `分镜图（已生成）${sbImagesReady}/${total}`
@@ -9921,8 +9921,11 @@ async function onGeneratePromptsFromAudioDuration(opts = {}) {
         const parts = []
         if (generatedN > 0) parts.push(`生成 ${generatedN} 条`)
         if (polishedN > 0) parts.push(`润色 ${polishedN} 条`)
+        const splitN = Number(data?.dialogue_split?.updated) || 0
         ElMessage.success(
-          `已按配音更新 ${synced} 镜时长，并${parts.join('、')}全能提示词` +
+          `已按配音更新 ${synced} 镜时长` +
+            (splitN > 0 ? `，旁白/对白分离 ${splitN} 镜` : '') +
+            `，并${parts.join('、')}全能提示词` +
             (failedN > 0 ? `（失败 ${failedN}）` : '')
         )
       } else if (failedN > 0) {
@@ -9944,7 +9947,13 @@ async function onGeneratePromptsFromAudioDuration(opts = {}) {
     if (failed > 0) {
       ElMessage.warning(`成功 ${rebuilt} 镜，失败 ${failed} 镜；${synced} 镜 duration 已按配音更新`)
     } else if (rebuilt > 0) {
-      ElMessage.success(data?.message || `已为 ${rebuilt} 镜生成提示词（${synced} 镜 duration 已按配音更新）`)
+      const splitN = Number(data?.dialogue_split?.updated) || 0
+      ElMessage.success(
+        (data?.message || `已为 ${rebuilt} 镜生成提示词（${synced} 镜 duration 已按配音更新）`) +
+          (splitN > 0 && !(data?.message || '').includes('旁白/对白分离')
+            ? `，旁白/对白分离 ${splitN} 镜`
+            : '')
+      )
     } else {
       ElMessage.info(data?.message || `已按配音更新 ${synced} 镜时长（无可重建的提示词）`)
     }
@@ -11333,9 +11342,9 @@ async function onSaveSbVideoFields(sb) {
     }
     await loadDrama()
     ElMessage.success(
-      storyboardFullNarrationVideoMode.value && sbCreationMode.value[sb.id] !== 'universal'
-        ? '已保存，视频提示词已根据旁白 AI 生成'
-        : '已保存，视频提示词已按最新规则自动生成'
+      rebuilt?.video_prompt_source === 'ai_full_narration' || rebuilt?.video_prompt_source === 'ai_classic'
+        ? '已保存，视频提示词已由 AI 生成'
+        : '已保存，视频提示词已重建（AI 失败时回退规则拼装）'
     )
   } catch (e) {
     ElMessage.error(e.message || '保存失败')
@@ -12104,14 +12113,29 @@ async function onCompleteMissingVideoPrompts() {
 
   completingVideoPrompts.value = true
   try {
-    const data = await storyboardsAPI.completeMissingVideoPrompts(currentEpisodeId.value)
+    const remaining = Number(storyboardPromptCoverage.value?.remainingVideoPrompts) || 0
+    // 已全部有提示词时，点「补全」改为强制 AI 重写（经典模式）
+    let force = false
+    if (!storyboardUniversalOmni.value && remaining <= 0) {
+      try {
+        await ElMessageBox.confirm(
+          '本集视频提示词已齐全。是否用 AI 全部重新生成？（覆盖现有内容）',
+          'AI 重写视频提示词',
+          { type: 'warning', confirmButtonText: 'AI 重写', cancelButtonText: '取消' }
+        )
+        force = true
+      } catch (_) {
+        return
+      }
+    }
+    const data = await storyboardsAPI.completeMissingVideoPrompts(currentEpisodeId.value, { force })
     await loadDrama()
     const rebuilt = Number(data?.rebuilt) || 0
     const failed = Number(data?.failed) || 0
     if (failed > 0) {
-      ElMessage.warning(`视频提示词补全完成：成功 ${rebuilt} 条，失败 ${failed} 条`)
+      ElMessage.warning(`视频提示词${force ? '重写' : '补全'}完成：成功 ${rebuilt} 条，失败 ${failed} 条`)
     } else if (rebuilt > 0) {
-      ElMessage.success(`已补全 ${rebuilt} 条视频提示词`)
+      ElMessage.success(`已${force ? 'AI 重写' : '补全'} ${rebuilt} 条视频提示词`)
     } else {
       ElMessage.info('没有需要补全的视频提示词')
     }

@@ -137,11 +137,25 @@ function buildFlatTimelineSegments(beats) {
 function renderTimelineSegment(segments, index) {
   const seg = segments[index];
   const win = `${fmtSec(seg.start)}～${fmtSec(seg.end)}秒`;
+  const body = String(seg.body || '');
+  const silent =
+    /闭口无口型|无对白|无对话/.test(body) && !/说话口型|口型同步|开口说话|开口对口型/.test(body);
+  const speaking = /说话口型|口型同步|开口说话|开口对口型|对口型/.test(body);
   const parts = [
     `【${win}·仅此时间段内允许的画面】`,
-    seg.body,
+    body,
     `【本段唯一主事件·${win}】只演绎本段正文所写内容；须完整演完本段后再进入下一段；禁止跳切到结果态、禁止闪回、禁止预演未到时段。`,
   ];
+
+  if (silent) {
+    parts.push(
+      `【本段无对白·${win}】人物须闭口无口型；禁止开口说话、禁止口型、禁止对白声；本时段不得出现任何台词。`
+    );
+  } else if (speaking) {
+    parts.push(
+      `【本段对白口型·${win}】仅本段允许说话人口型与台词同步（可带原生对白声）；其它时段若未写开口则须闭口。`
+    );
+  }
 
   const later = segments.slice(index + 1);
   if (later.length) {
@@ -183,7 +197,8 @@ function buildTimelineIntro(totalSec) {
     '1. 严格按下列【X～Y秒·仅此时间段】顺序播放；禁止打乱、闪回、把后续时段画面提前。',
     '2. 每一时段只允许该时段正文中的画面；后段摘要中的动作/道具/场景变化在未到时间窗前一律不得出现。',
     '3. 前序时段已完成的动作禁止在后段再次完整重演；后段只承接结果态或新动作。',
-    '4. 参考图：<Picture N> 与 @图片N 对应；人物闭口无口型，无对白；画面中禁止字幕/花字/标题/任何可读文字。',
+    '4. 参考图：<Picture N> 与 @图片N 对应；对白与口型按时段正文：写了「开口/口型同步」的时段才允许说话口型与对白声；写了「闭口无口型/无对白」的时段禁止开口、禁止对白、禁止口型；文末「对话：分镜k」仅作用于对应时段。',
+    '5. 画面中禁止字幕/花字/标题/任何可读文字。',
   ].join('\n');
 }
 
@@ -220,7 +235,8 @@ function adaptUniversalSegmentTextForAgnes(text, opts = {}) {
   const rendered = flatSegments.map((_, i) => renderTimelineSegment(flatSegments, i));
 
   const totalSec = fmtSec(targetSec || flatSegments[flatSegments.length - 1]?.end || 0);
-  const adapted = [headerStyle, buildTimelineIntro(totalSec), ...rendered, lockSuffix]
+  const dialogueTrailer = String(parsed.dialogueTrailer || '').trim();
+  const adapted = [headerStyle, buildTimelineIntro(totalSec), ...rendered, dialogueTrailer, lockSuffix]
     .filter(Boolean)
     .join('\n\n');
   return { adapted, changed: true };

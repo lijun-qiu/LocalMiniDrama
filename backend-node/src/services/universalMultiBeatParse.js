@@ -1,17 +1,21 @@
 /**
  * 解析全能片段多子分镜段落文本。
- * 结构：第1–3行固定头 + 「分镜k： Tk秒: 正文」行。
+ * 结构：第1–3行固定头 + 「分镜k： Tk秒: 正文」行 + 可选文末「对话：」块。
  */
 
 const BEAT_LINE_RE = /^分镜\s*(\d+)\s*[：:]\s*([\d.]+)\s*秒\s*[：:]\s*(.*)$/;
 /** 行内粘连的「分镜k：」拆到新行，避免编辑后整段挤成一行导致解析失败 */
 const INLINE_BEAT_SPLIT_RE = /(?=分镜\s*\d+\s*[：:]\s*[\d.]+\s*秒\s*[：:])/g;
 
+const { isDialogueTrailerStartLine } = require('./dialogueVisualSeparation');
+
 function normalizeUniversalMultiBeatNewlines(text) {
   let raw = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
   if (!raw) return '';
   // 「……连续画面。分镜1：」→ 换行后再接分镜
   raw = raw.replace(/([^\n])(分镜\s*\d+\s*[：:])/g, '$1\n$2');
+  // 文末「……。对话：」→ 换行后再接对话块
+  raw = raw.replace(/([^\n])((?:对话|对白)\s*[：:]|【\s*对话\s*】)/g, '$1\n$2');
   // 同一行多个分镜：按「分镜k：」切开
   const parts = raw.split(INLINE_BEAT_SPLIT_RE);
   return parts
@@ -23,14 +27,26 @@ function normalizeUniversalMultiBeatNewlines(text) {
 function parseUniversalMultiBeatText(text) {
   const raw = normalizeUniversalMultiBeatNewlines(text);
   if (!raw) {
-    return { headerLines: [], beats: [], ok: false };
+    return { headerLines: [], beats: [], dialogueTrailer: '', ok: false };
   }
   const lines = raw.split('\n');
   const headerLines = [];
   const beats = [];
+  const dialogueLines = [];
   let seenBeat = false;
+  let inDialogueTrailer = false;
   for (const line of lines) {
-    const m = String(line).trim().match(BEAT_LINE_RE);
+    const trimmed = String(line).trim();
+    if (seenBeat && isDialogueTrailerStartLine(trimmed)) {
+      inDialogueTrailer = true;
+      dialogueLines.push(line);
+      continue;
+    }
+    if (inDialogueTrailer) {
+      dialogueLines.push(line);
+      continue;
+    }
+    const m = trimmed.match(BEAT_LINE_RE);
     if (m) {
       seenBeat = true;
       beats.push({
@@ -42,7 +58,7 @@ function parseUniversalMultiBeatText(text) {
     } else if (!seenBeat) {
       headerLines.push(line);
     } else {
-      // 节拍行之后的非标准行并入上一拍正文
+      // 节拍行之后、对话块之前的非标准行并入上一拍正文
       if (beats.length) {
         const last = beats[beats.length - 1];
         last.body = `${last.body}\n${line}`.trim();
@@ -52,10 +68,15 @@ function parseUniversalMultiBeatText(text) {
       }
     }
   }
-  return { headerLines, beats, ok: beats.length > 0 };
+  return {
+    headerLines,
+    beats,
+    dialogueTrailer: dialogueLines.join('\n').trim(),
+    ok: beats.length > 0,
+  };
 }
 
-function composeUniversalMultiBeatText(headerLines, beats) {
+function composeUniversalMultiBeatText(headerLines, beats, dialogueTrailer) {
   const heads = (headerLines || []).map((l) => String(l ?? ''));
   const beatLines = (beats || []).map((b, i) => {
     const idx = Number(b.index) || i + 1;
@@ -63,7 +84,10 @@ function composeUniversalMultiBeatText(headerLines, beats) {
     const body = String(b.body || '').replace(/\r?\n/g, ' ').trim();
     return `分镜${idx}： ${sec}秒: ${body}`;
   });
-  return [...heads, ...beatLines].join('\n').trim();
+  const parts = [...heads, ...beatLines];
+  const dia = dialogueTrailer != null ? String(dialogueTrailer).trim() : '';
+  if (dia) parts.push(dia);
+  return parts.join('\n').trim();
 }
 
 function replaceBeatInUniversalText(fullText, beatIndex1Based, newBody, secondsOpt) {
@@ -78,7 +102,7 @@ function replaceBeatInUniversalText(fullText, beatIndex1Based, newBody, secondsO
   }
   return {
     ok: true,
-    text: composeUniversalMultiBeatText(parsed.headerLines, parsed.beats),
+    text: composeUniversalMultiBeatText(parsed.headerLines, parsed.beats, parsed.dialogueTrailer),
   };
 }
 

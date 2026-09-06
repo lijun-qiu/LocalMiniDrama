@@ -26,6 +26,22 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
   ).get(sbId);
   if (!sb) return { ok: false, code: 'not_found', message: '分镜不存在' };
 
+  // 全能生成/润色前：全文解说明显对白写入 dialogue，旁白去重（覆盖库字段，供本轮提示词使用）
+  let fullNarrationVoSplit = false;
+  try {
+    const { isDramaFullNarrationVideoMode } = require('./videoClient');
+    const epMeta = db.prepare('SELECT drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL').get(sb.episode_id);
+    if (epMeta?.drama_id && isDramaFullNarrationVideoMode(db, epMeta.drama_id)) {
+      fullNarrationVoSplit = true;
+      const { applyFullNarrationVoDialogueSplitToStoryboard } = require('./dialogueVisualSeparation');
+      const splitOut = applyFullNarrationVoDialogueSplitToStoryboard(db, null, sbId);
+      if (splitOut) {
+        sb.dialogue = splitOut.dialogue || null;
+        sb.narration = splitOut.narration || null;
+      }
+    }
+  } catch (_) {}
+
   const pickField = (key) => {
     if (Object.prototype.hasOwnProperty.call(fieldOverrides, key) && fieldOverrides[key] != null) {
       return fieldOverrides[key];
@@ -50,8 +66,40 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
   const fLocation = pickField('location');
   const fTime = pickField('time');
   const fAction = pickField('action');
-  const fDialogue = pickField('dialogue');
-  const fNarration = pickField('narration');
+  let fDialogue = pickField('dialogue');
+  let fNarration = pickField('narration');
+  // 前端 field_overrides 可能仍是未分离的旧旁白：对生效字段再拆一次并回写 DB
+  if (fullNarrationVoSplit) {
+    try {
+      const {
+        splitFullNarrationVoAndDialogue,
+        loadKnownSpeakerNamesForStoryboard,
+      } = require('./dialogueVisualSeparation');
+      const knownNames = loadKnownSpeakerNamesForStoryboard(db, sbId);
+      const rawNarr = fNarration != null ? String(fNarration).trim() : '';
+      const rawDlg = fDialogue != null ? String(fDialogue).trim() : '';
+      if (rawNarr || rawDlg) {
+        const split = splitFullNarrationVoAndDialogue(rawNarr || rawDlg, rawDlg || fDialogue, {
+          knownNames,
+        });
+        let newNarr = String(split.narration || '').trim();
+        let newDlg = String(split.dialogue || '').trim();
+        if (!newNarr && rawNarr) newNarr = rawNarr;
+        fDialogue = newDlg || null;
+        fNarration = newNarr || null;
+        const dbDlg = sb.dialogue != null ? String(sb.dialogue).trim() : '';
+        const dbNarr = sb.narration != null ? String(sb.narration).trim() : '';
+        if (newDlg !== dbDlg || newNarr !== dbNarr) {
+          const now = new Date().toISOString();
+          db.prepare(
+            'UPDATE storyboards SET dialogue = ?, narration = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL'
+          ).run(newDlg || null, newNarr || null, now, sbId);
+          sb.dialogue = newDlg || null;
+          sb.narration = newNarr || null;
+        }
+      }
+    } catch (_) {}
+  }
   const fResult = pickField('result');
   const fAtmosphere = pickField('atmosphere');
   const fShotType = pickField('shot_type');
@@ -518,9 +566,10 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
 
   const multiBeatContract = [
     'MULTI_BEAT_OUTPUT（一条成片 API 内的多节拍文案）:',
-    '- 总行数 = 3 + M。M 为你选择的子分镜条数（时间轴节拍），整数 1～8。',
+    '- 总行数 = 3 + M + 1（文末「对话：」块）。M 为你选择的子分镜条数（时间轴节拍），整数 1～8。',
     '- **M 选择**：按 NARRATION 句读与 ACTION 步骤合理分配，**禁止固定三镜**或机械照抄 M_HEURISTIC；短旁白/单一动作 → M=1～2；多句旁白才提高 M；秒数不够则合并短句，禁止空镜凑数。',
     '- **声画同步**：每个「分镜k」正文只写画面；可见动作须与 NARRATION 该拍语义对齐；**禁止** beat 内 旁白（画面无声）："…"。',
+    '- **台词分离**：分镜正文禁止引号台词；全部台词放在全部「分镜k」之后的「对话：…」行，且须标注归属「对话：分镜2：角色："原文"」（或镜头2：）；无对白写「对话：无」、禁止编造。仅标注到的拍写开口口型，其它拍必须「人物闭口无口型，无对白」。舞台指示不进对话块。',
     '- 第1行：「画面风格和类型:」…',
     `- 第2行：必须为「生成一个由以下M个分镜组成的视频。」（将 M 替换为你的整数；与下文实际「分镜1…分镜M」条数一致）。`,
     '- 第3行：必须逐字等于 LINE3_REQUIRED（见下）。',
@@ -528,7 +577,8 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     `- 约束：T1+T2+…+TM 必须严格等于 TOTAL_CLIP_SECONDS（数值与 ${durationLabel} 一致）；每个 Tk>0；子分镜序号连续无跳号。`,
     '- 若 M=1：即仅一行「分镜1： TOTAL秒:」写满整段（仍须声画同步）；若 M>1：每行只覆盖本子时段，前后行衔接成连续时间线，避免剧情跳跃或重复前一行已完成的动作。',
     require('./universalAgnesTimelineContract').MULTI_BEAT_TIMELINE_LINE_ZH,
-    '- 禁止额外说明行、markdown、英文小标题；禁止把「子分镜」写成多次独立成片 API。',
+    '- 禁止 markdown、英文小标题；禁止把「子分镜」写成多次独立成片 API。文末「对话：」块除外。',
+    require('./dialogueVisualSeparation').getDialogueVisualSeparationContract(false),
   ].join('\n');
 
   const userPrompt = [
@@ -573,6 +623,7 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     durationLabel,
     durationSec,
     narration: fNarration != null ? String(fNarration) : '',
+    dialogue: fDialogue != null ? String(fDialogue) : '',
     beatM: mHeuristic,
     sbId,
     episodeId: Number(sb.episode_id) || 0,

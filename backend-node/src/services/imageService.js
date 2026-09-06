@@ -104,13 +104,16 @@ function sceneRefLabelSuffix(scene, isPanel) {
   return ' (current scene image)';
 }
 
-function characterRefLabelSuffix({ isUserRef, isPanel }) {
+function characterRefLabelSuffix({ isUserRef, isPanel, isFaceCrop }) {
+  if (isFaceCrop) {
+    return ' (single-person FACE HERO crop — one face only; never copy multi-panel layout or spawn clones)';
+  }
   if (isPanel) return ' (front full-body view from history panel)';
   if (isUserRef) return ' (user-uploaded character reference)';
   return ' (current character image)';
 }
 
-/** 角色参考图：ref_image 优先，无主图时降级 quad_panel_1 历史面板 */
+/** @deprecated 同步旧入口；分镜生图请用 pickCharacterRefForStoryboard（优先 FACE HERO 裁切） */
 function pickCharacterRefWithPanelFallback(db, characterId, row) {
   const charRef = pickStoryboardEntityRef(row);
   const isUserRef = !!(row?.ref_image && String(row.ref_image).trim());
@@ -126,10 +129,11 @@ function pickCharacterRefWithPanelFallback(db, characterId, row) {
         charRef: charPanel.local_path || charPanel.image_url,
         isPanel: true,
         isUserRef: false,
+        isFaceCrop: false,
       };
     }
   }
-  return { charRef, isPanel, isUserRef };
+  return { charRef, isPanel, isUserRef, isFaceCrop: false };
 }
 
 /**
@@ -876,15 +880,20 @@ async function processImageGeneration(db, log, imageGenId) {
           }
         }
         if (charListParsed && charListParsed.length) {
+          const { pickCharacterRefForStoryboard } = require('../utils/characterStoryboardRef');
+          const { resolveStorageRoot } = require('../utils/sceneRefPicker');
+          const storageRootForChar = resolveStorageRoot(cfg);
           for (const item of charListParsed) {
             if (!imageClient.canAddStoryboardCharacterRef(refLabels, refLimits)) break;
             const cid = typeof item === 'object' && item != null ? item.id : item;
             const c = db.prepare('SELECT image_url, local_path, ref_image, name FROM characters WHERE id = ? AND deleted_at IS NULL').get(Number(cid));
             if (!c) continue;
-            const { charRef, isPanel, isUserRef } = pickCharacterRefWithPanelFallback(db, cid, c);
+            const { charRef, isPanel, isUserRef, isFaceCrop } = await pickCharacterRefForStoryboard(
+              db, cid, c, storageRootForChar, log
+            );
             if (charRef) {
               refs.push(charRef);
-              refLabels.push(`Image ${refs.length}: character appearance reference for "${c.name || 'character'}"${characterRefLabelSuffix({ isUserRef, isPanel })}`);
+              refLabels.push(`Image ${refs.length}: character appearance reference for "${c.name || 'character'}"${characterRefLabelSuffix({ isUserRef, isPanel, isFaceCrop })}`);
             }
           }
         }
@@ -944,11 +953,32 @@ async function processImageGeneration(db, log, imageGenId) {
             const libNameLower = String(lib.name || '').trim().toLowerCase();
             if (libNameLower && coveredCharNamesFromLabels.has(libNameLower)) continue;
             if (coveredNames.has(lib.name)) continue;
-            // 优先使用角色库当前主图（four_view_image_url → image_url → local_path），只有当前字段为空才降级使用历史 quad_panel_1 面板
-            // 这样“重新生成角色四视图/主图”后，分镜图生成能立即取到最新图片
-            let libRef = lib.four_view_image_url || lib.local_path || lib.image_url;
+            // 分镜参考优先：本地主图的 FACE HERO 裁切 / 正面面板，避免整张四视图合图被当成多人
+            let libRef = null;
             let isPanel = false;
-            let isFourView = !!lib.four_view_image_url;
+            let isFourView = false;
+            let isFaceCrop = false;
+            const libLocal = lib.local_path && String(lib.local_path).trim();
+            if (libLocal) {
+              const { pickCharacterRefForStoryboard } = require('../utils/characterStoryboardRef');
+              const { resolveStorageRoot } = require('../utils/sceneRefPicker');
+              const pickedLib = await pickCharacterRefForStoryboard(
+                db,
+                null,
+                { local_path: libLocal, image_url: lib.image_url, ref_image: null },
+                resolveStorageRoot(cfg),
+                log
+              );
+              if (pickedLib.charRef) {
+                libRef = pickedLib.charRef;
+                isPanel = !!pickedLib.isPanel;
+                isFaceCrop = !!pickedLib.isFaceCrop;
+              }
+            }
+            if (!libRef) {
+              libRef = lib.four_view_image_url || lib.local_path || lib.image_url;
+              isFourView = !!lib.four_view_image_url;
+            }
             if (!libRef) {
               const libPanel = db.prepare(
                 `SELECT local_path, image_url FROM image_generations
@@ -963,7 +993,14 @@ async function processImageGeneration(db, log, imageGenId) {
             }
             if (libRef && !imageClient.refListHasCanonical(refs, libRef)) {
               refs.push(libRef);
-              refLabels.push(`Image ${refs.length}: character appearance reference for "${lib.name || 'character'}"${isPanel ? ' (front full-body view from history panel)' : isFourView ? ' (four-view reference sheet)' : ' (character image)'}`);
+              const libSuffix = isFaceCrop
+                ? ' (single-person FACE HERO crop — one face only; never copy multi-panel layout or spawn clones)'
+                : isPanel
+                  ? ' (front full-body view from history panel)'
+                  : isFourView
+                    ? ' (four-view reference sheet)'
+                    : ' (character image)';
+              refLabels.push(`Image ${refs.length}: character appearance reference for "${lib.name || 'character'}"${libSuffix}`);
               coveredNames.add(lib.name);
             }
           }
@@ -1002,10 +1039,14 @@ async function processImageGeneration(db, log, imageGenId) {
               const dCharRow = db.prepare(
                 'SELECT image_url, local_path, ref_image FROM characters WHERE id = ? AND deleted_at IS NULL'
               ).get(Number(dChar.id));
-              const { charRef, isPanel, isUserRef } = pickCharacterRefWithPanelFallback(db, dChar.id, dCharRow);
+              const { pickCharacterRefForStoryboard } = require('../utils/characterStoryboardRef');
+              const { resolveStorageRoot } = require('../utils/sceneRefPicker');
+              const { charRef, isPanel, isUserRef, isFaceCrop } = await pickCharacterRefForStoryboard(
+                db, dChar.id, dCharRow, resolveStorageRoot(cfg), log
+              );
               if (charRef && !imageClient.refListHasCanonical(refs, charRef)) {
                 refs.push(charRef);
-                refLabels.push(`Image ${refs.length}: character appearance reference for "${dChar.name}"${characterRefLabelSuffix({ isUserRef, isPanel })}`);
+                refLabels.push(`Image ${refs.length}: character appearance reference for "${dChar.name}"${characterRefLabelSuffix({ isUserRef, isPanel, isFaceCrop })}`);
                 coveredCharNames.add(dChar.name.toLowerCase());
                 log.info('[图生] Step2.1 文本补扫到未关联角色，已添加参考图', { id: imageGenId, name: dChar.name });
                 // 同步回写到 storyboards.characters，避免下次重复扫描
@@ -1265,7 +1306,8 @@ async function processImageGeneration(db, log, imageGenId) {
           const systemPrompt = promptI18n.getImagePolishPrompt(cfg);
           const polishedPrompt = await aiClient.generateText(db, log, 'text', userPrompt, systemPrompt, {
             scene_key: 'image_polish',
-            max_tokens: 300,
+            // Agnes 2.x：reasoning 会先吃掉 completion；300 会导致 text_tokens=0 →「返回内容为空」
+            max_tokens: 2400,
             temperature: 0.3,
           });
           if (polishedPrompt && polishedPrompt.trim().length > 10) {
@@ -1298,7 +1340,7 @@ async function processImageGeneration(db, log, imageGenId) {
               const snapshotUserPrompt = [`PROMPT: ${finalPrompt}`, `ASSETS: ${assetNames || 'none'}`].join('\n');
               aiClient.generateText(db, log, 'text', snapshotUserPrompt, snapshotPrompt, {
                 scene_key: 'image_polish',
-                max_tokens: 200,
+                max_tokens: 1200,
                 temperature: 0.1,
               }).then((snapshotJson) => {
                 if (!snapshotJson?.trim()) return;
@@ -1322,12 +1364,20 @@ async function processImageGeneration(db, log, imageGenId) {
       }
     }
 
-    // ── Step 3.8: 单帧分镜注入防分割指令 ──────────────────────────────
+    // ── Step 3.8: 单帧分镜注入防分割 + 防角色克隆指令 ──────────────────────────────
     // 当有多张参考图时，部分模型（如 Doubao）会生成左右分栏/对比布局，加入负面约束抑制该行为
+    // Agnes 不支持 negative_prompt，角色参考表又常含多角度同人 → 必须在正文里锁「一人一体」
     if (isSingleStoryboard && reference_image_urls && reference_image_urls.length > 1) {
       const antiSplitSuffix = ', single continuous scene, no split panels, no side-by-side layout, no collage';
       if (!finalPrompt.includes('no split')) {
         finalPrompt = finalPrompt.trimEnd() + antiSplitSuffix;
+      }
+    }
+    if (isSingleStoryboard && reference_context_note && /character appearance reference/i.test(reference_context_note)) {
+      const antiCloneZh =
+        '。【角色一人一体铁律】画面中每个具名角色只允许出现一次、一人一体；禁止克隆、双胞胎、同脸重复、重叠人影。角色参考图若含多角度/多栏，仅为同一人外貌参考，严禁按参考表面板数复制出多个身体。';
+      if (!finalPrompt.includes('角色一人一体铁律') && !finalPrompt.includes('ONE BODY PER NAMED CHARACTER')) {
+        finalPrompt = finalPrompt.trimEnd() + antiCloneZh;
       }
     }
 

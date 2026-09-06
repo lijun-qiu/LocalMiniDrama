@@ -209,6 +209,8 @@ function ensureAllColumns(database) {
     { name: 'narration',         type: 'TEXT' },
     { name: 'action',            type: 'TEXT' },
     { name: 'atmosphere',        type: 'TEXT' },
+    { name: 'bgm_prompt',        type: 'TEXT' },               // 单镜配乐侧写（通常空/禁BGM）
+    { name: 'sound_effect',      type: 'TEXT' },               // 现场环境声/动作 Foley（不含对白语气）
     { name: 'image_prompt',      type: 'TEXT' },
     { name: 'video_prompt',      type: 'TEXT' },
     { name: 'characters',        type: 'TEXT' },

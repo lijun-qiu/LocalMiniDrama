@@ -82,11 +82,28 @@ describe('agnesUniversalPromptAdapter', () => {
     assert.doesNotMatch(adapted, /已落定的塑料水瓶静止不动/);
   });
 
-  it('prepareAgnesVideoPrompt adds sequential order suffix', () => {
-    const { prompt } = prepareAgnesVideoPrompt(SB9_LIKE, { forceSilent: true });
+  it('prepareAgnesVideoPrompt adds sequential order suffix and keeps lipsync path', () => {
+    const withDlg = [
+      '画面风格和类型: 真人写实, 电影风格, 高清画质',
+      '生成一个由以下2个分镜组成的视频。',
+      '环境 @图片1。',
+      '分镜1： 3秒: @图片2 合上简历，人物闭口无口型，无对白。',
+      '分镜2： 3秒: @图片3 开口说话口型同步。',
+      '对话：分镜2：陈浩："因为我在找工作。"',
+    ].join('\n');
+    const { prompt, useSilentNegative } = prepareAgnesVideoPrompt(withDlg, { forceSilent: true });
+    assert.equal(useSilentNegative, false);
     assert.match(prompt, /【Agnes 连续单镜头/);
     assert.match(prompt, /【顺序约束·最高优先级】/);
-    assert.ok(prompt.includes('禁止人物开口'));
+    assert.match(prompt, /有对白时说话人口型与台词同步|角色对白须口型|本段对白口型|口型与台词同步/);
+    assert.match(prompt, /本段无对白|闭口无口型/);
+    assert.ok(!prompt.includes('禁止人物开口') || prompt.includes('本段无对白'));
+  });
+
+  it('silent beats get explicit no-dialogue constraint in Agnes timeline', () => {
+    const { adapted } = adaptUniversalSegmentTextForAgnes(SB9_LIKE);
+    assert.match(adapted, /本段无对白/);
+    assert.match(adapted, /禁止开口说话/);
   });
 
   it('SB12: put-back and exit bodies preserved (no enter+pickup rewrite)', () => {

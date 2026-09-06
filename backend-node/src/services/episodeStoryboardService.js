@@ -523,9 +523,31 @@ function generateVideoPrompt(sb, style, videoRatio) {
     parts.push('场景：' + scene);
   }
   if (sb.title) parts.push('镜头标题：' + sb.title);
-  // 动作与对白（核心叙事）
-  if (sb.action) parts.push('动作：' + sb.action);
-  if (sb.dialogue) parts.push('对话：' + sb.dialogue);
+  // 动作与对白分离（对齐 ArcReel：画面不含台词原文；对话单独字段，无对白写「无」）
+  const {
+    stripDialogueEchoFromVisual,
+    normalizeDialogueFieldForPrompt,
+    formatClassicDialogueTaggedToShots,
+    silenceUntaggedSpeakingShots,
+  } = require('./dialogueVisualSeparation');
+  let visualAction = sb.action
+    ? stripDialogueEchoFromVisual(sb.action, sb.dialogue)
+    : '';
+  let dlgTagged = formatClassicDialogueTaggedToShots(
+    normalizeDialogueFieldForPrompt(sb.dialogue),
+    visualAction || sb.action
+  );
+  if (visualAction) {
+    visualAction = silenceUntaggedSpeakingShots(visualAction, dlgTagged);
+    // 闭口调整后如开口集合变化，再标一次对白归属
+    dlgTagged = formatClassicDialogueTaggedToShots(
+      normalizeDialogueFieldForPrompt(sb.dialogue),
+      visualAction
+    );
+    visualAction = silenceUntaggedSpeakingShots(visualAction, dlgTagged);
+  }
+  if (visualAction) parts.push('动作：' + visualAction);
+  parts.push('对话：' + dlgTagged);
   if (sb.narration) parts.push('解说旁白：' + sb.narration);
   if (sb.result) parts.push('结果：' + sb.result);
   // 镜头与运镜
@@ -548,16 +570,18 @@ function generateVideoPrompt(sb, style, videoRatio) {
   if (sb.emotion_intensity != null && sb.emotion_intensity !== '') {
     parts.push('情绪强度：' + String(sb.emotion_intensity));
   }
-  // 声音
+  // 声音（配乐通常空；音效：优先字段，否则从动作/氛围提炼）
   if (sb.bgm_prompt) parts.push('配乐：' + sb.bgm_prompt);
-  if (sb.sound_effect) parts.push('音效：' + sb.sound_effect);
+  const { resolveSoundEffectForStoryboard } = require('./dialogueVisualSeparation');
+  parts.push('音效：' + resolveSoundEffectForStoryboard(sb));
   // 时长
   const durationSec = normalizeDuration(sb.duration) || 5;
   parts.push('时长：' + durationSec + '秒');
   // 风格（英文 token 保持英文以兼容视频 AI）与画面比例
   if (style) parts.push('风格：' + style);
   if (videoRatio) parts.push('=VideoRatio: ' + videoRatio);
-  return parts.length ? parts.join('。') : '视频场景';
+  // 用换行分隔字段，避免「动作。对话。」糊成一段看不清分离
+  return parts.length ? parts.join('\n') : '视频场景';
 }
 
 /**
@@ -714,6 +738,7 @@ function updateStoryboardRowFromDerived(db, existingId, episodeIdNum, d, sb, now
     `UPDATE storyboards SET
       scene_id = ?, title = ?, description = ?, location = ?, time = ?, duration = ?,
       dialogue = ?, narration = ?, action = ?, result = ?, atmosphere = ?,
+      bgm_prompt = ?, sound_effect = ?,
       image_prompt = ?, video_prompt = ?, characters = ?,
       shot_type = ?, angle = ?, angle_h = ?, angle_v = ?, angle_s = ?, movement = ?,
       lighting_style = ?, depth_of_field = ?, segment_index = ?, segment_title = ?,
@@ -732,6 +757,12 @@ function updateStoryboardRowFromDerived(db, existingId, episodeIdNum, d, sb, now
     d.action || null,
     d.result || null,
     sb.atmosphere ?? null,
+    (sb.bgm_prompt != null && String(sb.bgm_prompt).trim()) || null,
+    (() => {
+      const { normalizeSoundEffectForPrompt } = require('./dialogueVisualSeparation');
+      const sfx = normalizeSoundEffectForPrompt(sb.sound_effect);
+      return sfx === '无' ? null : sfx;
+    })(),
     d.imagePrompt,
     d.videoPrompt,
     charactersJson,
@@ -769,14 +800,19 @@ function updateStoryboardRowFromDerived(db, existingId, episodeIdNum, d, sb, now
 function insertOneStoryboard(db, episodeIdNum, sb, style, videoRatio, now, deriveOpts = {}) {
   const d = deriveStoryboardFieldsFromAi(sb, style, videoRatio, deriveOpts);
   const shotNumber = d.shotNumber;
+  const { normalizeSoundEffectForPrompt } = require('./dialogueVisualSeparation');
+  const soundEffect = normalizeSoundEffectForPrompt(sb.sound_effect);
+  const bgmPrompt = sb.bgm_prompt != null ? String(sb.bgm_prompt).trim() : '';
   try {
     db.prepare(
-      `INSERT INTO storyboards (episode_id, scene_id, storyboard_number, title, description, location, time, duration, dialogue, narration, action, result, atmosphere, image_prompt, video_prompt, characters, shot_type, angle, angle_h, angle_v, angle_s, movement, lighting_style, depth_of_field, segment_index, segment_title, creation_mode, universal_segment_text, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+      `INSERT INTO storyboards (episode_id, scene_id, storyboard_number, title, description, location, time, duration, dialogue, narration, action, result, atmosphere, bgm_prompt, sound_effect, image_prompt, video_prompt, characters, shot_type, angle, angle_h, angle_v, angle_s, movement, lighting_style, depth_of_field, segment_index, segment_title, creation_mode, universal_segment_text, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
     ).run(
       episodeIdNum, d.sceneId, shotNumber, d.title || null, d.description,
       sb.location ?? null, sb.time ?? null, sb.duration ?? 5,
       d.dialogue || null, d.narration || null, d.action || null, d.result || null, sb.atmosphere ?? null,
+      bgmPrompt || null,
+      soundEffect === '无' ? null : soundEffect,
       d.imagePrompt, d.videoPrompt, d.charactersJson,
       d.shotType || null, d.angle, d.angleH, d.angleV, d.angleS,
       d.movement || null, d.lightingStyle, d.depthOfField, d.segmentIndex, d.segmentTitle,
@@ -939,15 +975,20 @@ function saveStoryboards(db, log, episodeId, storyboards, cfg, styleOverride, sk
     }
 
     const d = deriveStoryboardFieldsFromAi(sb, style, videoRatio, deriveOpts);
+    const { normalizeSoundEffectForPrompt } = require('./dialogueVisualSeparation');
+    const soundEffect = normalizeSoundEffectForPrompt(sb.sound_effect);
+    const bgmPrompt = sb.bgm_prompt != null ? String(sb.bgm_prompt).trim() : '';
+    const sfxDb = soundEffect === '无' ? null : soundEffect;
 
     try {
       db.prepare(
-        `INSERT INTO storyboards (episode_id, scene_id, storyboard_number, title, description, location, time, duration, dialogue, narration, action, result, atmosphere, image_prompt, video_prompt, characters, shot_type, angle, angle_h, angle_v, angle_s, movement, lighting_style, depth_of_field, segment_index, segment_title, creation_mode, universal_segment_text, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+        `INSERT INTO storyboards (episode_id, scene_id, storyboard_number, title, description, location, time, duration, dialogue, narration, action, result, atmosphere, bgm_prompt, sound_effect, image_prompt, video_prompt, characters, shot_type, angle, angle_h, angle_v, angle_s, movement, lighting_style, depth_of_field, segment_index, segment_title, creation_mode, universal_segment_text, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
       ).run(
         episodeIdNum, d.sceneId, shotNumber, d.title || null, d.description,
         sb.location ?? null, sb.time ?? null, sb.duration ?? 5,
         d.dialogue || null, d.narration || null, d.action || null, d.result || null, sb.atmosphere ?? null,
+        bgmPrompt || null, sfxDb,
         d.imagePrompt, d.videoPrompt, d.charactersJson,
         d.shotType || null, d.angle, d.angleH, d.angleV, d.angleS,
         d.movement || null, d.lightingStyle, d.depthOfField, d.segmentIndex, d.segmentTitle,
@@ -2017,15 +2058,30 @@ function enforceFullNarrationSegments(storyboards, segments, log, taskId, limits
   const rebuilt = [];
   for (let i = 0; i < segCount; i++) {
     const base = ordered[i] || ordered[ordered.length - 1] || assetDonor || structuralTemplate;
+    const { splitFullNarrationVoAndDialogue } = require('./dialogueVisualSeparation');
+    const rawSeg = collapseNarrationBlankLines(safeSegments[i]);
+    // 从已有分镜 dialogue / 全段文本里推断说话人，尽量避免标成「角色」
+    const nameGuess = new Set();
+    for (const sb of ordered) {
+      const d = String(sb?.dialogue || '');
+      for (const m of d.matchAll(/([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9·・]{0,11})\s*[：:]/g)) {
+        if (m[1] && m[1] !== '角色') nameGuess.add(m[1]);
+      }
+    }
+    const split = splitFullNarrationVoAndDialogue(rawSeg, base.dialogue, {
+      knownNames: [...nameGuess],
+    });
+    const voText = split.narration || rawSeg;
     const shot = {
       ...structuralTemplate,
       ...base,
       shot_number: i + 1,
       storyboard_number: i + 1,
       title: base.title || (structuralTemplate.title ? `${structuralTemplate.title}·解说${i + 1}` : `解说${i + 1}`),
-      dialogue: base.dialogue != null ? base.dialogue : '',
-      narration: collapseNarrationBlankLines(safeSegments[i]),
-      duration: estimateDurationFromSpeechText(safeSegments[i], limits),
+      // 明显角色对白进 dialogue；旁白不再重复同一句台词
+      dialogue: split.dialogue || '',
+      narration: voText,
+      duration: estimateDurationFromSpeechText(voText, limits),
     };
     inheritStoryboardAssetFields(shot, assetDonor);
     rebuilt.push(shot);
@@ -2377,6 +2433,17 @@ async function generateStoryboardPromptsFromAudioDurationAsync(db, log, episodeI
   }
 
   const storageRoot = resolveStorageRoot(loadConfig());
+  // 按配音润色前：明显角色对白写入 dialogue，旁白去掉重复台词
+  let dialogueSplit = { updated: 0, total: 0 };
+  try {
+    const { applyFullNarrationVoDialogueSplitForEpisode } = require('./dialogueVisualSeparation');
+    dialogueSplit = applyFullNarrationVoDialogueSplitForEpisode(db, log, episodeIdNum);
+  } catch (err) {
+    if (log?.warn) {
+      log.warn('[分镜] 按配音前旁白/对白分离失败（继续时长同步）', { error: err.message });
+    }
+  }
+
   const { syncStoryboardDurationsFromNarrationAudio } = require('./narrationAudioService');
   const durationSync = syncStoryboardDurationsFromNarrationAudio(db, log, episodeIdNum, storageRoot);
 
@@ -2398,10 +2465,16 @@ async function generateStoryboardPromptsFromAudioDurationAsync(db, log, episodeI
       skipped: 0,
       mode: 'universal_duration_sync',
       duration_sync: durationSync,
+      dialogue_split: dialogueSplit,
       total_duration: totalDuration,
       storyboard_count: saved.length,
       storyboards: saved,
-      message: `已按配音时长更新 ${durationSync.updated || 0} 镜 duration（全能模式请继续润色全能提示词）`,
+      message:
+        `已按配音时长更新 ${durationSync.updated || 0} 镜 duration` +
+        (dialogueSplit.updated
+          ? `，旁白/对白分离 ${dialogueSplit.updated} 镜`
+          : '') +
+        '（全能模式请继续润色全能提示词）',
     };
   }
 
@@ -2450,6 +2523,7 @@ async function generateStoryboardPromptsFromAudioDurationAsync(db, log, episodeI
     ...promptResult,
     mode: 'classic',
     duration_sync: durationSync,
+    dialogue_split: dialogueSplit,
     total_duration: totalDuration,
     storyboard_count: saved.length,
     storyboards: saved,
@@ -3143,22 +3217,21 @@ async function rebuildVideoPromptForStoryboardAsync(db, log, storyboardId, opts 
 
   let videoPrompt = '';
   let source = 'rule';
-  const { isFullNarrationClassicStoryboard, generateClassicVideoPromptWithAi } = require('./classicVideoPromptBundle');
-  const useAi =
-    !opts.forceRuleBased &&
-    isFullNarrationClassicStoryboard(db, row);
+  const { generateClassicVideoPromptWithAi } = require('./classicVideoPromptBundle');
+  // 经典首尾帧 / 全文解说：默认 AI 写 video_prompt；仅 forceRuleBased 时走规则拼装
+  const useAi = !opts.forceRuleBased && row.creation_mode !== 'universal';
 
   if (useAi) {
     try {
-      const { text } = await generateClassicVideoPromptWithAi(db, log, row, {
+      const { text, fullNarration } = await generateClassicVideoPromptWithAi(db, log, row, {
         mode: 'generate',
         userInstruction: opts.userInstruction,
       });
       videoPrompt = text;
-      source = 'ai_full_narration';
+      source = fullNarration ? 'ai_full_narration' : 'ai_classic';
     } catch (err) {
       if (log?.warn) {
-        log.warn('[分镜] 全文解说 AI 生成 video_prompt 失败，回退规则拼装', {
+        log.warn('[分镜] AI 生成 video_prompt 失败，回退规则拼装', {
           id: sbId,
           error: err.message,
         });
@@ -3171,7 +3244,29 @@ async function rebuildVideoPromptForStoryboardAsync(db, log, storyboardId, opts 
   }
 
   const now = new Date().toISOString();
-  db.prepare('UPDATE storyboards SET video_prompt = ?, updated_at = ? WHERE id = ?').run(videoPrompt, now, sbId);
+  // 库内 sound_effect 为空时，把解析出的现场声回写，避免下次再变成「无」
+  try {
+    const { resolveSoundEffectForStoryboard } = require('./dialogueVisualSeparation');
+    const sfx = resolveSoundEffectForStoryboard(row);
+    const cur = row.sound_effect != null ? String(row.sound_effect).trim() : '';
+    if ((!cur || cur === '无') && sfx && sfx !== '无') {
+      db.prepare(
+        'UPDATE storyboards SET video_prompt = ?, sound_effect = ?, updated_at = ? WHERE id = ?'
+      ).run(videoPrompt, sfx, now, sbId);
+    } else {
+      db.prepare('UPDATE storyboards SET video_prompt = ?, updated_at = ? WHERE id = ?').run(
+        videoPrompt,
+        now,
+        sbId
+      );
+    }
+  } catch (_) {
+    db.prepare('UPDATE storyboards SET video_prompt = ?, updated_at = ? WHERE id = ?').run(
+      videoPrompt,
+      now,
+      sbId
+    );
+  }
 
   if (log?.info) {
     log.info('[分镜] 已重建 video_prompt', {
@@ -3461,13 +3556,14 @@ async function batchRebuildClassicVideoPromptsForEpisode(db, log, episodeId, opt
 const SB_PROMPT_MIN_POLISHED_LEN = 10;
 const SB_PROMPT_MIN_VIDEO_LEN = 12;
 
-/** 仅为缺少 video_prompt（全文解说经典时含 polished_prompt）的分镜补全提示词 */
+/** 仅为缺少 video_prompt（全文解说经典时含 polished_prompt）的分镜补全提示词；opts.force 时强制 AI 重写全部经典镜 */
 async function completeMissingVideoPromptsForEpisode(db, log, episodeId, opts = {}) {
   const episodeIdNum = Number(episodeId);
   if (!Number.isFinite(episodeIdNum) || episodeIdNum <= 0) {
     return { rebuilt: 0, failed: 0, skipped: 0, total: 0, targets: 0 };
   }
 
+  const force = !!opts.force;
   const { isFullNarrationClassicStoryboard } = require('./classicVideoPromptBundle');
   const rows = db
     .prepare(
@@ -3481,6 +3577,7 @@ async function completeMissingVideoPromptsForEpisode(db, log, episodeId, opts = 
     .all(episodeIdNum);
 
   const targets = rows.filter((row) => {
+    if (force) return true;
     const vp = String(row.video_prompt || '').trim();
     const needVideo = vp.length < SB_PROMPT_MIN_VIDEO_LEN;
     const needPolished =
@@ -3513,6 +3610,7 @@ async function completeMissingVideoPromptsForEpisode(db, log, episodeId, opts = 
       failed,
       skipped,
       targets: targets.length,
+      force,
     });
   }
 

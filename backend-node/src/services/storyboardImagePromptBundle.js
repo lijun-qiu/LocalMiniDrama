@@ -12,6 +12,9 @@ const { runConcurrentPool } = require('../utils/concurrentPool');
 const taskService = require('./taskService');
 
 const BATCH_IMAGE_PROMPT_CONCURRENCY = 7;
+/** Agnes 2.x 会先占 reasoning_tokens；过小的 max_tokens 会把正文挤成空 */
+const IMAGE_POLISH_MAX_TOKENS = 2400;
+const CONTINUITY_SNAPSHOT_MAX_TOKENS = 1200;
 const BATCH_IMAGE_PROMPT_PROGRESS_START = 76;
 const BATCH_IMAGE_PROMPT_PROGRESS_END = 81;
 
@@ -108,7 +111,7 @@ function scheduleContinuitySnapshot(db, log, sbId, polished, assetNames) {
     aiClient
       .generateText(db, log, 'text', snapshotUserPrompt, snapshotPrompt, {
         scene_key: 'image_polish',
-        max_tokens: 200,
+        max_tokens: CONTINUITY_SNAPSHOT_MAX_TOKENS,
         temperature: 0.1,
       })
       .then((snapshotJson) => {
@@ -194,7 +197,7 @@ async function polishStoryboardImagePrompt(db, log, storyboardId, opts = {}) {
     'text',
     userPromptLines.join('\n'),
     promptI18n.getImagePolishPrompt(cfg),
-    { scene_key: 'image_polish', max_tokens: 300, temperature: 0.3 }
+    { scene_key: 'image_polish', max_tokens: IMAGE_POLISH_MAX_TOKENS, temperature: 0.3 }
   );
 
   if (!polishedPrompt || polishedPrompt.trim().length < 10) {

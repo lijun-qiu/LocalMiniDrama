@@ -349,13 +349,18 @@ ${ld}
       parts.unshift(`【角色视觉锚点 - 最高优先级铁律，必须严格遵守，禁止任何脑补或添加未提供的外貌细节】\n${characterNames.join('\n')}`);
     }
   }
-  if (sb.action) {
+  // description 已含【动作】/【对话】/【结果】时不再重复拼字段，避免对白双份
+  const descText = String(sb.description || '');
+  const descHasAction = /【\s*动作\s*】/.test(descText);
+  const descHasResult = /【\s*结果\s*】/.test(descText);
+  const descHasDialogue = /【\s*对话\s*】/.test(descText);
+  if (sb.action && !descHasAction) {
     parts.push(promptI18n.formatUserPrompt(cfg, 'action_label', sb.action));
   }
-  if (sb.result) {
+  if (sb.result && !descHasResult) {
     parts.push(promptI18n.formatUserPrompt(cfg, 'result_label', sb.result));
   }
-  if (sb.dialogue) {
+  if (sb.dialogue && !descHasDialogue) {
     parts.push(promptI18n.formatUserPrompt(cfg, 'dialogue_label', sb.dialogue));
   }
   if (sb.atmosphere) {
@@ -701,7 +706,8 @@ async function regenerateLayoutDescription(db, log, storyboardId) {
   log.info('[布局重生成] 开始', { storyboard_id: sid, has_prev: !!prevSb, has_next: !!nextSb });
 
   const raw = await aiClient.generateText(db, log, 'text', userPrompt, systemPrompt, {
-    max_tokens: 300,
+    // Agnes 2.x reasoning 会先占 completion；300 易导致 content 为空
+    max_tokens: 1200,
     temperature: 0.35,
   });
 

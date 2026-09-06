@@ -74,16 +74,40 @@ function normalizeUniversalSegmentAtImageSpacing(text) {
   );
 }
 
-/** 生成/润色后：时长对齐、旁白时间轴加权、@图片 空格、剔除 beat 内嵌旁白 */
+/** 生成/润色后：时长对齐、旁白时间轴加权、@图片 空格、剔除 beat 内嵌旁白；强制文末「对话：」与字段一致 */
 function finalizeUniversalSegmentText(text, durationLabel, durationSec, opts = {}) {
   let out = normalizeUniversalSegmentShotDurations(text, durationLabel, durationSec);
   const narr = opts.narration != null ? String(opts.narration).trim() : '';
+  const dlg = opts.dialogue != null ? String(opts.dialogue).trim() : '';
   if (narr) {
-    const M = opts.beatM || chooseBeatCount(durationSec, { narration: narr });
+    const M = opts.beatM || chooseBeatCount(durationSec, { narration: narr, dialogue: dlg });
     out = alignUniversalBeatSecondsToNarration(out, durationSec, narr, M);
   }
   out = normalizeUniversalSegmentAtImageSpacing(out);
-  out = stripInlineNarrationFromUniversalText(out);
+  out = stripInlineNarrationFromUniversalText(out, { dialogueField: dlg || '无' });
+  // 字段有对白时，文末「对话：」必须承载；旁白不进对话块；再按子分镜强制口型
+  try {
+    const { parseUniversalMultiBeatText, composeUniversalMultiBeatText } = require('../services/universalMultiBeatParse');
+    const { normalizeDialogueFieldForPrompt } = require('../services/dialogueVisualSeparation');
+    const { enforcePerBeatDialogueAndLipSync } = require('../services/universalOmniMultiBeatFormat');
+    const parsed = parseUniversalMultiBeatText(out);
+    if (parsed.ok) {
+      const norm = normalizeDialogueFieldForPrompt(dlg);
+      let trailer = parsed.dialogueTrailer || '';
+      if (norm && norm !== '无') {
+        // 若 trailer 已按分镜标注则保留结构，仅在全空/无时用字段回填
+        const { parseDialogueBeatAssignments } = require('../services/universalOmniMultiBeatFormat');
+        const asg = parseDialogueBeatAssignments(trailer);
+        if (asg.empty) {
+          trailer = `对话：${norm}`;
+        }
+      } else {
+        trailer = '对话：无';
+      }
+      out = composeUniversalMultiBeatText(parsed.headerLines, parsed.beats, trailer);
+      out = enforcePerBeatDialogueAndLipSync(out, { dialogueField: norm });
+    }
+  } catch (_) {}
   return out;
 }
 
@@ -236,12 +260,13 @@ function routes(db, log) {
         if (!id) return response.badRequest(res, '缺少分镜 id');
         const sb = await episodeStoryboardService.rebuildVideoPromptForStoryboardAsync(db, log, id);
         if (!sb) return response.notFound(res, '分镜不存在');
-        const aiUsed = sb.video_prompt_source === 'ai_full_narration';
+        const src = sb.video_prompt_source || '';
+        const aiUsed = src === 'ai_full_narration' || src === 'ai_classic';
         response.success(res, {
           ...sb,
           message: aiUsed
-            ? '视频提示词已根据旁白 AI 生成并保存'
-            : '视频提示词已按最新规则重建并保存',
+            ? '视频提示词已由 AI 生成并保存'
+            : '视频提示词已按规则重建并保存',
         });
       } catch (err) {
         log.error('storyboards rebuildVideoPrompt', { error: err.message, id: req.params.id });
@@ -341,7 +366,13 @@ function routes(db, log) {
       try {
         const episodeId = Number(req.params.episode_id);
         if (!episodeId) return response.badRequest(res, '缺少 episode_id');
-        const result = await episodeStoryboardService.completeMissingVideoPromptsForEpisode(db, log, episodeId);
+        const force = !!req.body?.force;
+        const result = await episodeStoryboardService.completeMissingVideoPromptsForEpisode(
+          db,
+          log,
+          episodeId,
+          { force }
+        );
         response.success(res, result);
       } catch (err) {
         log.error('episode complete missing video prompts', { error: err.message, episode_id: req.params.episode_id });
@@ -406,7 +437,7 @@ function routes(db, log) {
           if (built.code === 'not_found') return response.notFound(res, built.message);
           return response.badRequest(res, built.message);
         }
-        const { userPrompt, durationLabel, durationSec, narration, beatM } = built;
+        const { userPrompt, durationLabel, durationSec, narration, dialogue, beatM } = built;
         const out = await aiClient.generateText(
           db,
           log,
@@ -419,7 +450,7 @@ function routes(db, log) {
           return response.badRequest(res, 'AI 返回内容过短，请检查文本模型配置');
         }
         let text = String(out).trim();
-        text = finalizeUniversalSegmentText(text, durationLabel, durationSec, { narration, beatM });
+        text = finalizeUniversalSegmentText(text, durationLabel, durationSec, { narration, dialogue, beatM });
         const nowIso = new Date().toISOString();
         const alignedAt = saveUniversalSegmentText(db, sbId, text, nowIso);
         log.info('[分镜] generateUniversalSegmentPrompt 完成', {
@@ -445,7 +476,7 @@ function routes(db, log) {
         if (built.code === 'not_found') return response.notFound(res, built.message);
         return response.badRequest(res, built.message);
       }
-      const { userPrompt, durationLabel, durationSec, narration, beatM } = built;
+      const { userPrompt, durationLabel, durationSec, narration, dialogue, beatM } = built;
 
       res.status(200);
       res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
@@ -484,7 +515,7 @@ function routes(db, log) {
         return res.end();
       }
       let text = String(finalRaw).trim();
-      text = finalizeUniversalSegmentText(text, durationLabel, durationSec, { narration, beatM });
+      text = finalizeUniversalSegmentText(text, durationLabel, durationSec, { narration, dialogue, beatM });
       const nowIso = new Date().toISOString();
       const alignedAt = saveUniversalSegmentText(db, sbId, text, nowIso);
       log.info('[分镜] generateUniversalSegmentStream 完成', {
@@ -520,7 +551,7 @@ function routes(db, log) {
         if (built.code === 'not_found') return response.notFound(res, built.message);
         return response.badRequest(res, built.message);
       }
-      const { userPrompt: baseUser, durationLabel, durationSec, episodeId, storyboardNumber, narration, beatM } = built;
+      const { userPrompt: baseUser, durationLabel, durationSec, episodeId, storyboardNumber, narration, dialogue, beatM } = built;
 
       let scriptText = '';
       try {
@@ -585,7 +616,7 @@ function routes(db, log) {
           ? ['USER_INSTRUCTION（用户润色要求；优先满足）:', userInstruction, '']
           : []),
         'POLISH_REFRESH（多次点击「润色」时强制）: 在严格遵守 MULTI_BEAT_OUTPUT、子分镜秒数之和=TOTAL_CLIP_SECONDS、IMAGE_SLOT_MAP、不编造剧本外情节的前提下，**本轮输出须与 CURRENT_OMNI_DRAFT 在中文表述上有明显差异**（换动词/语序、合并或拆分从句、加强或收紧运镜与情绪描写均可；**第3行仍须与 LINE3_REQUIRED 完全一致**）。除第3行外，**禁止**与草稿逐字相同或仅标点差异；若 M 与秒数分配不变，子分镜正文也须重写措辞。',
-        'DIALOGUE_RETENTION（硬性，与 system 全能润色一致）: BASE_OMNI_CONTRACT 内 STORYBOARD FIELDS 的 DIALOGUE、NARRATION、VIDEO_PROMPT 及 CURRENT_OMNI_DRAFT 中一切对白/旁白/引号句，成稿各「分镜k」行须**逐条以「」或明确旁白写出**，保留笑点、数字、剧名、奖项名等关键信息；禁止用「两人对话」「念词带过」等概括替代具体台词。总秒数与各 Tk 不变前提下提高信息密度：台词与反应优先，少写无推进的纯氛围叠句。',
+        'DIALOGUE_RETENTION（硬性，与 system 全能润色一致）: STORYBOARD FIELDS 的 DIALOGUE 及 CURRENT_OMNI_DRAFT / DIALOGUE_VERBATIM 中的角色台词，成稿须**逐条原文**落在全部「分镜k」行之后的文末「对话：」块，并标注归属拍（格式 对话：分镜2：角色名："台词"，也可用镜头2：）；「分镜k」正文只写纯画面与口型；**仅标注到的拍**写开口口型同步，其它拍必须「人物闭口无口型，无对白」。**禁止**嵌入引号台词或「@图片N 说："…"」。无对白写「对话：无」，禁止编造。旁白 NARRATION 仅作画外解说语义，不得把对白原文塞进旁白或分镜正文。禁止用「两人对话」「念词带过」等概括替代具体台词。总秒数与各 Tk 不变前提下提高信息密度：反应与动作优先，少写无推进的纯氛围叠句。',
         'You are refining the CURRENT omni multi-beat prompt for a short drama vertical-video shot.',
         `FULL_EPISODE_SCRIPT（本集完整剧本，用于信息对齐与连戏；不得引入剧本未写的情节）:\n${scriptText || '(本集剧本正文为空，请仅依据下方 STORYBOARD FIELDS 与邻镜信息)'}`,
         '本镜画面设计优先对齐 BASE_OMNI_CONTRACT 内的 NARRATION_LOCAL_CONTEXT（当前旁白±约100字）；整集剧本仅作因果/语气，勿把后文提前拍完。',
@@ -656,7 +687,7 @@ function routes(db, log) {
           if (merged.ok) text = merged.text;
         }
       }
-      text = finalizeUniversalSegmentText(text, durationLabel, durationSec, { narration, beatM });
+      text = finalizeUniversalSegmentText(text, durationLabel, durationSec, { narration, dialogue, beatM });
       const nowIso = new Date().toISOString();
       // 全文解说生视频门槛：润色成功即视为已按配音对齐（单拍重生成也刷新时间戳）
       db.prepare(

@@ -51,7 +51,7 @@ function sleepMs(ms) {
 }
 
 // 多参考图时注入到所有支持 negative_prompt 的模型，防止生成分割/拼贴布局；同时加入安全词以减少敏感拦截
-const ANTI_SPLIT_NEGATIVE_PROMPT = 'nsfw, nudity, naked, violence, blood, gore, sensitive content, split panels, side-by-side layout, collage, diptych, triptych, grid layout, multiple panels, comparison view, composite image, two images in one frame';
+const ANTI_SPLIT_NEGATIVE_PROMPT = 'nsfw, nudity, naked, violence, blood, gore, sensitive content, split panels, side-by-side layout, collage, diptych, triptych, grid layout, multiple panels, comparison view, composite image, two images in one frame, duplicate character, twin clones, identical face twice, overlapping people, two copies of same person';
 
 function mergeNegativePromptFragments(auto, user) {
   const a = (auto || '').trim();
@@ -1888,6 +1888,22 @@ function createAndGenerateImage(db, log, opts) {
           }
         }
         log.info('Character image updated', { character_id: charIdNum, image_url: result.image_url, local_path: localPath });
+        // 宽幅工业参考表预裁 FACE HERO，供分镜生图用单人正脸锚点（避免整表多角度被当成多人）
+        if (localPath) {
+          try {
+            const { ensureCharacterFaceHeroCrop, resolveAbsUnderStorage } = require('../utils/characterStoryboardRef');
+            const { resolveStorageRoot } = require('../utils/sceneRefPicker');
+            const loadConfig = require('../config').loadConfig;
+            const root = resolveStorageRoot(loadConfig());
+            const abs = resolveAbsUnderStorage(root, localPath);
+            if (abs) await ensureCharacterFaceHeroCrop(abs, log);
+          } catch (cropErr) {
+            log.warn('[角色参考裁切] 角色成图后预裁失败（不影响主图）', {
+              character_id: charIdNum,
+              error: cropErr.message,
+            });
+          }
+        }
       }
       if (sceneIdNum != null) {
         try {

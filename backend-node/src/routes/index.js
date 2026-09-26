@@ -19,6 +19,7 @@ const videoRoutes = require('./videos');
 const videoMergeRoutes = require('./videoMerges');
 const assetRoutes = require('./assets');
 const audioRoutes = require('./audio');
+const aiVoicesRoutes = require('./aiVoices');
 const promptOverridesRoutes = require('./promptOverrides');
 const sceneModelMapRoutes = require('./sceneModelMap');
 
@@ -46,6 +47,7 @@ function setupRouter(cfg, db, log) {
   const videoMerges = videoMergeRoutes(db, log);
   const assets = assetRoutes(db, log);
   const audio = audioRoutes(db, log, cfg);
+  const aiVoices = aiVoicesRoutes(db, log, cfg);
   const promptOverrides = promptOverridesRoutes.routes(db, log);
 
   // ---------- dramas ----------
@@ -86,6 +88,12 @@ function setupRouter(cfg, db, log) {
   r.put('/dramas/:id/progress', drama.saveProgress);
   r.put('/dramas/:id/canvas-layout', drama.saveCanvasLayout);
   r.get('/dramas/:id/props', drama.listProps);
+  r.post(
+    '/dramas/:id/narration-sd2-voice-upload',
+    uploadModule.multerAudioSingle,
+    drama.narrationSd2VoiceUpload
+  );
+  r.post('/dramas/:id/narration-sd2-voice-refresh', drama.narrationSd2VoiceRefresh);
   r.get('/dramas/:id', drama.getDrama);
   r.put('/dramas/:id', drama.updateDrama);
   r.delete('/dramas/:id', drama.deleteDrama);
@@ -218,6 +226,18 @@ function setupRouter(cfg, db, log) {
   r.get('/episodes/:episode_id/storyboards', storyboards.episodeStoryboardsGet);
   r.post('/episodes/:episode_id/finalize', drama.finalizeEpisode);
   r.get('/episodes/:episode_id/download', drama.downloadEpisodeVideo);
+  r.get('/episodes/:episode_id/coverage-plates/plan', storyboards.planCoveragePlates);
+  r.post('/episodes/:episode_id/coverage-plates/drafts', storyboards.draftCoveragePlates);
+  r.post('/episodes/:episode_id/coverage-plates/generate', storyboards.generateCoveragePlates);
+  r.get('/episodes/:episode_id/coverage-plates', storyboards.listCoveragePlates);
+  r.post('/episodes/:episode_id/coverage-plates/assign', storyboards.assignCoveragePlates);
+  r.put('/coverage-plates/:id', storyboards.updateCoveragePlate);
+  r.delete('/coverage-plates/:id', storyboards.deleteCoveragePlate);
+  r.post('/coverage-plates/:id/regenerate', storyboards.regenerateCoveragePlate);
+  r.get('/coverage-plates/:id/versions', storyboards.listCoveragePlateVersions);
+  r.post('/coverage-plates/:id/versions/restore', storyboards.restoreCoveragePlateVersion);
+  r.delete('/coverage-plates/:id/versions/:version_id', storyboards.deleteCoveragePlateVersion);
+  r.post('/coverage-plates/:id/upload-image', storyboards.uploadCoveragePlateImage);
 
   // ---------- tasks ----------
   r.get('/tasks/:task_id', task.getTaskStatus);
@@ -289,6 +309,8 @@ function setupRouter(cfg, db, log) {
   r.post('/storyboards/:id/classic-video-prompt-polish-stream', storyboards.polishClassicVideoPromptStream);
   r.post('/storyboards/:id/universal-segment-prompt-stream', storyboards.generateUniversalSegmentStream);
   r.post('/storyboards/:id/universal-segment-prompt', storyboards.generateUniversalSegmentPrompt);
+  r.post('/storyboards/:id/universal-segment-to-arcreel-yaml', storyboards.convertUniversalSegmentToArcReelYaml);
+  r.post('/storyboards/:id/classic-to-arcreel-yaml', storyboards.convertClassicToArcReelYaml);
   r.post('/storyboards/batch-infer-params', storyboards.batchInferParams);
   r.post('/storyboards/:id/upscale', storyboards.upscale);
   r.post('/storyboards/:id/regenerate-layout-description', storyboards.regenerateLayoutDescription);
@@ -298,6 +320,16 @@ function setupRouter(cfg, db, log) {
   // ---------- audio ----------
   r.post('/audio/extract', audio.extract);
   r.post('/audio/extract/batch', audio.extractBatch);
+
+  // ---------- ai-voices (IndexTTS 克隆音色) ----------
+  r.get('/ai-voices/indextts/health', aiVoices.indexttsHealth);
+  r.post('/ai-voices/indextts/ensure', aiVoices.indexttsEnsure);
+  r.post('/ai-voices/indextts/unload', aiVoices.indexttsUnload);
+  r.get('/ai-voices/clone/voices', aiVoices.listCloneVoices);
+  r.post('/ai-voices/clone/voices', aiVoices.saveCloneVoice);
+  r.delete('/ai-voices/clone/voices/:id', aiVoices.deleteCloneVoice);
+  r.post('/ai-voices/clone/upload-ref', aiVoices.uploadRef);
+  r.post('/ai-voices/preview', aiVoices.preview);
 
   // ---------- settings ----------
   r.get('/settings/language', settings.getLanguage);

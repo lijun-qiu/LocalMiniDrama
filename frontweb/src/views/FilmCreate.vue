@@ -185,6 +185,14 @@
         style="display: none"
         @change="onSbImageFileChange"
       />
+      <!-- 定镜模板图上传 -->
+      <input
+        ref="coverageImageFileInput"
+        type="file"
+        accept="image/jpeg,image/png,image/gif,image/webp"
+        style="display: none"
+        @change="onCoverageImageFileChange"
+      />
       <!-- 剧本工作台：单卡片 + 选项卡（创作 / 选择） -->
       <section class="section card script-workbench-unified">
         <el-tabs v-model="scriptWorkbenchMode" class="script-workbench-tabs">
@@ -495,10 +503,9 @@
                       </el-button>
                     </div>
 
-                    <!-- Seedance 2.0 音色参考（仅该模型有效，其他模型不生效） -->
+                    <!-- 角色台词音色参考（Seedance 2.0 / volcengine_omni） -->
                     <div class="sd2-voice-row" style="margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
                       <template v-if="char.seedance2_voice_asset?.status === 'active'">
-                        <!-- 音色参考已设置：显示试听 + 更换 -->
                         <el-button
                           size="small"
                           type="success"
@@ -515,14 +522,14 @@
                           :loading="sd2VoiceUploadingId === char.id"
                           @click="onSd2VoiceReplace(char)"
                         >
-                          更换
+                          更换音色
                         </el-button>
-                        <span style="font-size:11px;color:#67c23a">音色已设置</span>
+                        <span style="font-size:11px;color:#67c23a">台词音色已设</span>
                       </template>
                       <template v-else>
                         <el-button
                           size="small"
-                          :type="char.seedance2_voice_asset?.status === 'stale' ? 'warning' : 'info'"
+                          :type="char.seedance2_voice_asset?.status === 'stale' ? 'warning' : 'primary'"
                           plain
                           :loading="sd2VoiceUploadingId === char.id"
                           @click="onSd2VoicePrimaryAction(char)"
@@ -531,7 +538,7 @@
                         </el-button>
                         <span v-if="char.seedance2_voice_asset?.status === 'stale'" style="font-size:11px;color:#e6a23c">需刷新</span>
                       </template>
-                      <span style="font-size:10px;color:#909399">仅 Seedance 2.0 模型生效</span>
+                      <span style="font-size:10px;color:#909399">上传短音频作台词音色（Seedance 2.0 / Agnes 2.5 Flash）</span>
                     </div>
                     <div v-if="getCharAffectedStoryboards(char.id).length" class="asset-storyboard-link">
                       <span class="asl-label">影响的分镜：</span>
@@ -712,7 +719,7 @@
                 <el-button size="small" @click="showSceneLibrary = true">本剧场景库</el-button>
               </div>
               <div class="scene-gen-mode" style="margin: 8px 0; font-size: 13px;">
-                <el-checkbox v-model="sceneUseQuadGrid">生成四宫格场景（默认单图）</el-checkbox>
+                <el-checkbox v-model="sceneUseQuadGrid">生成四宫格场景（默认开启，取消则单图）</el-checkbox>
               </div>
               <div class="asset-list asset-list-two">
                 <div v-for="scene in scenes" :key="scene.id" class="asset-item asset-item-left-right">
@@ -839,6 +846,130 @@
           <el-checkbox v-model="storyboardIncludeNarration" @change="() => saveProjectSettings(false)">
             生成分镜时生成解说旁白（narration，与对白分开，便于后期 TTS）
           </el-checkbox>
+          <div class="sb-indextts-block">
+            <div class="sb-indextts-title-row">
+              <strong>旁白配音 · IndexTTS2</strong>
+              <el-tag v-if="indexttsAvailable" type="success" size="small">已就绪</el-tag>
+              <el-tag v-else type="warning" size="small">未启动</el-tag>
+              <span v-if="gsvCatalogVoices.length" class="sb-indextts-count">{{ gsvCatalogVoices.length }} 个克隆音色</span>
+              <span v-else class="sb-indextts-count sb-indextts-count--warn">音色列表为空，请点刷新</span>
+            </div>
+            <div class="sb-indextts-config">
+              <el-select
+                v-model="indexttsVoiceId"
+                placeholder="选择克隆音色（默认宇少）"
+                size="small"
+                filterable
+                clearable
+                style="width: 220px"
+                @change="persistIndexTtsPrefs"
+                @visible-change="(open) => open && loadGsvCatalogVoices()"
+              >
+                <el-option
+                  v-for="v in gsvCatalogVoices"
+                  :key="v.voice_id"
+                  :label="`${v.voice_name || v.voice_id}${v.voice_id === DEFAULT_INDEXTTS_VOICE ? '（默认）' : ''}`"
+                  :value="v.voice_id"
+                />
+              </el-select>
+              <el-select v-model="indexttsSpeed" size="small" style="width: 96px" @change="persistIndexTtsPrefs">
+                <el-option v-for="opt in indexttsSpeedOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
+              </el-select>
+              <el-button size="small" type="primary" :loading="indexttsStarting" @click="onStartIndexTts">启动</el-button>
+              <el-button size="small" :disabled="!indexttsAvailable" :loading="indexttsUnloading" @click="onUnloadIndexTts">卸载</el-button>
+              <el-button size="small" :loading="gsvCatalogLoading" @click="onRefreshIndexTtsVoices">刷新音色</el-button>
+              <el-button size="small" :loading="gsvPreviewing" :disabled="!indexttsVoiceId" @click="onPreviewIndexTtsVoice">试听</el-button>
+              <el-button size="small" @click="openGsvAddPanel">添加音色</el-button>
+            </div>
+            <el-input
+              v-model="indexttsEmotionText"
+              size="small"
+              placeholder="情感指令，如：自然流畅的解说语气，情绪饱满"
+              maxlength="500"
+              show-word-limit
+              class="sb-indextts-emotion"
+              @change="persistIndexTtsPrefs"
+            />
+            <div v-if="gsvPanelOpen" class="sb-indextts-clone-panel">
+              <el-input v-model="gsvForm.voice_id" size="small" placeholder="音色 ID，如 009" style="width:120px" :disabled="!!gsvEditingId" />
+              <el-input v-model="gsvForm.voice_name" size="small" placeholder="显示名" style="width:120px" />
+              <input type="file" accept="audio/*" @change="onGsvFilePick" />
+              <el-input v-model="gsvForm.prompt_text" size="small" placeholder="参考文本（与音频一致）" style="width:220px" />
+              <el-button type="primary" size="small" :loading="gsvSaving" @click="saveGsvVoice">保存</el-button>
+              <el-button size="small" @click="closeGsvPanel">收起</el-button>
+            </div>
+            <div class="sd2-voice-row" style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <strong style="font-size:12px">画外音音色 · Seedance / Agnes</strong>
+              <template v-if="narrationSd2VoiceAsset?.status === 'active'">
+                <el-button size="small" type="success" plain @click="playNarrationSd2Voice">
+                  <el-icon><VideoPlay /></el-icon>
+                  <span style="margin-left:4px">试听</span>
+                </el-button>
+                <el-button
+                  size="small"
+                  type="primary"
+                  plain
+                  :loading="narrationSd2VoiceUploading"
+                  :disabled="!dramaId"
+                  @click="onNarrationSd2VoiceReplace"
+                >
+                  更换音色
+                </el-button>
+                <span style="font-size:11px;color:#67c23a">画外音音色已设</span>
+              </template>
+              <template v-else>
+                <el-button
+                  size="small"
+                  :type="narrationSd2VoiceAsset?.status === 'stale' ? 'warning' : 'primary'"
+                  plain
+                  :loading="narrationSd2VoiceUploading"
+                  :disabled="!dramaId"
+                  @click="onNarrationSd2VoicePrimaryAction"
+                >
+                  {{ narrationSd2VoiceActionLabel }}
+                </el-button>
+                <span v-if="narrationSd2VoiceAsset?.status === 'stale'" style="font-size:11px;color:#e6a23c">需刷新</span>
+              </template>
+              <span style="font-size:10px;color:#909399">上传短音频作画外音/旁白音色（与角色台词音色同理，视频生成时注入 @音频）</span>
+            </div>
+          </div>
+          <el-checkbox v-model="storyboardStaticDialogue" @change="() => saveProjectSettings(false)">
+            定镜对白（按台词切镜：无对白铺垫会被丢掉；对白镜固定机位）
+          </el-checkbox>
+          <el-button
+            v-if="storyboardStaticDialogue"
+            size="small"
+            type="primary"
+            plain
+            :loading="coveragePlatesRunning"
+            :disabled="!currentEpisodeId || !storyboards.length || coveragePlatesRunning || storyboardGenerating"
+            @click="onDraftCoveragePlates"
+          >
+            生成提示词
+          </el-button>
+          <el-button
+            v-if="storyboardStaticDialogue"
+            size="small"
+            type="primary"
+            :loading="coveragePlatesRunning"
+            :disabled="!currentEpisodeId || !coveragePlates.length || coveragePlatesRunning || storyboardGenerating"
+            @click="onGenerateCoveragePlateImages"
+          >
+            生成模板图
+          </el-button>
+          <el-tooltip
+            v-if="storyboardStaticDialogue"
+            placement="top"
+            :show-after="200"
+          >
+            <template #content>
+              <div style="max-width:320px;line-height:1.45">
+                POV目标构图：隔桌正脸 POV（前景大桌约1/3 + 人物正脸居中 + 身后落地窗）。参考=全景裁条+身份。点近景「生图」。
+              </div>
+            </template>
+            <el-icon class="sb-coverage-hint-icon" style="margin-left:-4px;cursor:help;color:#94a3b8"><QuestionFilled /></el-icon>
+          </el-tooltip>
+          <span v-if="coveragePlatesHint" class="sb-coverage-hint-text">{{ coveragePlatesHint }}</span>
           <el-button
             v-if="storyboards.length > 0"
             class="sb-export-srt-btn"
@@ -863,6 +994,149 @@
             导出解说 SRT
           </el-button>
         </div>
+        <div
+          v-if="storyboardStaticDialogue && (coveragePlates.length || coveragePlatesLoading)"
+          class="sb-coverage-gallery"
+        >
+          <div class="sb-coverage-gallery-head">
+            <span class="sb-coverage-gallery-title">固定机位模板图</span>
+            <span v-if="coveragePlatesRunning" class="sb-coverage-progress">
+              <span class="sb-coverage-spinner" aria-hidden="true"></span>
+              {{ coveragePlatesHint || '生成中…' }}
+            </span>
+            <el-button
+              size="small"
+              :loading="coverageAssignRunning"
+              :disabled="!coverageCompletedCount || coveragePlatesRunning"
+              @click="onAssignCoveragePlates('by_speaker')"
+            >
+              按说话人分配
+            </el-button>
+            <el-button
+              size="small"
+              :loading="coverageAssignRunning"
+              :disabled="!coverageCompletedCount || coveragePlatesRunning"
+              @click="onAssignCoveragePlates('prefer_two_shot')"
+            >
+              全部用全景/同框
+            </el-button>
+            <el-button
+              size="small"
+              text
+              :loading="coveragePlatesLoading"
+              :disabled="!currentEpisodeId"
+              @click="loadCoveragePlates"
+            >
+              刷新
+            </el-button>
+          </div>
+          <div v-if="coveragePlatesLoading && !coveragePlates.length" class="sb-coverage-gallery-empty">加载中…</div>
+          <div v-else class="sb-coverage-gallery-grid">
+            <div
+              v-for="p in coveragePlates"
+              :key="p.id"
+              class="sb-coverage-card"
+              :class="{
+                'is-failed': p.status === 'failed',
+                'is-pending': p.status === 'pending',
+                'is-generating': p.status === 'generating',
+                'is-draft': p.status === 'draft',
+                'is-just-done': coverageJustDoneIds.has(p.id),
+              }"
+            >
+              <div class="sb-coverage-card-img">
+                <img
+                  v-if="hasAssetImage(p) && p.status !== 'generating'"
+                  :src="assetImageUrl(p)"
+                  alt=""
+                  @click="openImagePreview(assetImageUrl(p))"
+                />
+                <div v-else-if="p.status === 'generating'" class="sb-coverage-gen-overlay">
+                  <span class="sb-coverage-spinner sb-coverage-spinner--lg" aria-hidden="true"></span>
+                  <span>生成中…</span>
+                </div>
+                <span v-else class="sb-coverage-card-empty">{{ coveragePlateStatusText(p) }}</span>
+              </div>
+              <div class="sb-coverage-card-label" :title="coveragePlateLabel(p)">
+                {{ coveragePlateLabel(p) }}
+                <span v-if="(p.version_count || 0) > 0" class="sb-coverage-ver-badge">历史 {{ p.version_count }}</span>
+              </div>
+              <el-input
+                v-model="coveragePlatePromptDraft[p.id]"
+                type="textarea"
+                :rows="4"
+                size="small"
+                class="sb-coverage-card-prompt"
+                placeholder="生图提示词"
+                :disabled="coveragePlatesRunning || coveragePlateRegenId === p.id"
+              />
+              <div class="sb-coverage-card-actions">
+                <el-button size="small" link type="primary" :loading="coveragePlateSavingId === p.id" @click="onSaveCoveragePlatePrompt(p)">保存</el-button>
+                <el-button size="small" link type="primary" @click="onCopyCoveragePlatePrompt(p)">复制词</el-button>
+                <el-button
+                  size="small"
+                  link
+                  type="primary"
+                  :loading="coveragePlateCopyingId === p.id"
+                  :disabled="!(p.local_path || p.image_url)"
+                  @click="onCopyCoveragePlateImage(p)"
+                >复制图</el-button>
+                <el-button size="small" link type="primary" :loading="coveragePlateRegenId === p.id" :disabled="coveragePlatesRunning" @click="onRegenCoveragePlate(p)">生图</el-button>
+                <el-button size="small" link type="primary" :loading="coveragePlateUploadingId === p.id" :disabled="coveragePlatesRunning" @click="onUploadCoveragePlateClick(p)">上传</el-button>
+                <el-button size="small" link :disabled="p.status !== 'completed'" @click="onApplyCoveragePlate(p)">套用</el-button>
+                <el-button
+                  size="small"
+                  link
+                  :loading="coverageHistoryLoadingId === p.id"
+                  @click="onOpenCoverageHistory(p)"
+                >
+                  历史
+                </el-button>
+                <el-button size="small" link type="danger" :loading="coveragePlateDeletingId === p.id" :disabled="coveragePlatesRunning" @click="onDeleteCoveragePlate(p)">删除</el-button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <el-dialog
+          v-model="coverageHistoryVisible"
+          title="模板图历史版本"
+          width="720px"
+          destroy-on-close
+          class="sb-coverage-history-dialog"
+        >
+          <div v-if="coverageHistoryPlate" class="sb-coverage-history-head">
+            {{ coveragePlateLabel(coverageHistoryPlate) }}
+          </div>
+          <div v-if="!coverageHistoryItems.length" class="sb-coverage-gallery-empty">暂无历史版本（重生或替换后会在此保留）</div>
+          <div v-else class="sb-coverage-history-grid">
+            <div v-for="v in coverageHistoryItems" :key="v.id" class="sb-coverage-history-card">
+              <div class="sb-coverage-card-img">
+                <img
+                  v-if="v.local_path || v.image_url"
+                  :src="assetImageUrl(v)"
+                  alt=""
+                  @click="openImagePreview(assetImageUrl(v))"
+                />
+                <span v-else class="sb-coverage-card-empty">无图</span>
+              </div>
+              <div class="sb-coverage-history-meta">{{ formatCoverageHistoryTime(v.created_at) }}</div>
+              <div class="sb-coverage-history-prompt" :title="v.prompt || ''">{{ (v.prompt || '').slice(0, 80) }}{{ (v.prompt || '').length > 80 ? '…' : '' }}</div>
+              <div class="sb-coverage-history-actions">
+                <el-button size="small" type="primary" plain :loading="coverageHistoryRestoringId === v.id" @click="onRestoreCoverageVersion(v)">恢复</el-button>
+                <el-button
+                  size="small"
+                  plain
+                  :disabled="!(v.local_path || v.image_url)"
+                  :loading="coverageHistoryCopyingId === v.id"
+                  @click="onCopyCoverageHistoryImage(v)"
+                >复制图</el-button>
+                <el-button size="small" type="danger" plain :loading="coverageHistoryDeletingId === v.id" @click="onDeleteCoverageVersion(v)">删除</el-button>
+              </div>
+            </div>
+          </div>
+        </el-dialog>
+
         <div class="asset-actions sb-batch-actions">
           <div class="flex">
             <el-button
@@ -885,23 +1159,45 @@
                 plain
                 size="large"
                 :loading="batchImageRunning"
-                :disabled="!currentEpisodeId || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
+                :disabled="!currentEpisodeId || batchImageRunning || batchImageDeleting || batchVideoRunning || batchArcReelRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
                 @click="startBatchImageGeneration"
               >
                 批量生成分镜图
+              </el-button>
+              <el-button
+                type="danger"
+                plain
+                size="large"
+                :loading="batchImageDeleting"
+                :disabled="!currentEpisodeId || batchImageRunning || batchImageDeleting || batchVideoRunning || batchArcReelRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
+                @click="startBatchDeleteImages"
+              >
+                批量删除分镜图
               </el-button>
               <el-button
                 type="warning"
                 plain
                 size="large"
                 :loading="batchVideoRunning"
-                :disabled="!currentEpisodeId || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
+                :disabled="!currentEpisodeId || batchImageRunning || batchImageDeleting || batchVideoRunning || batchArcReelRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
                 @click="startBatchVideoGeneration"
               >
                 批量生成分镜视频
               </el-button>
+              <el-button
+                type="primary"
+                plain
+                size="large"
+                :loading="batchArcReelRunning"
+                :disabled="!currentEpisodeId || batchImageRunning || batchImageDeleting || batchVideoRunning || batchArcReelRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
+                title="将本集各镜提示词一键转为 ArcReel 结构化（Action / Dialogue / Voice_Profiles）"
+                @click="onBatchConvertToArcReel"
+              >
+                一键转 ArcReel
+              </el-button>
               <el-button v-if="batchImageRunning" size="large" type="danger" plain @click="batchImageStopping = true">停止图片</el-button>
               <el-button v-if="batchVideoRunning" size="large" type="danger" plain @click="batchVideoStopping = true">停止视频</el-button>
+              <el-button v-if="batchArcReelRunning" size="large" type="danger" plain @click="batchArcReelStopping = true">停止转换</el-button>
             </div>
             <!-- 连贯帧模式 UI 暂时隐藏（保留变量与批量生成逻辑，后续可快速恢复） -->
             <div v-if="false" class="batch-video-options" style="margin-top:8px;display:flex;align-items:center;gap:8px;font-size:13px;">
@@ -927,18 +1223,30 @@
           </template>
         </div>
         <!-- 批量生成进度 -->
-        <div v-if="batchImageRunning || batchVideoRunning || batchImageErrors.length || batchVideoErrors.length" class="batch-status">
+        <div v-if="batchImageRunning || batchImageDeleting || batchVideoRunning || batchArcReelRunning || batchImageErrors.length || batchVideoErrors.length || batchArcReelErrors.length" class="batch-status">
           <div v-if="batchImageRunning" class="batch-progress">
             <el-icon class="is-loading"><Loading /></el-icon>
             <span>批量生成分镜图：{{ batchImageProgress.current }}/{{ batchImageProgress.total }}</span>
             <span v-if="batchImageProgress.failed > 0" class="batch-failed">{{ batchImageProgress.failed }} 条失败</span>
             <span v-if="batchImageStopping" class="batch-stopping">（正在停止...）</span>
           </div>
+          <div v-if="batchImageDeleting" class="batch-progress">
+            <el-icon class="is-loading"><Loading /></el-icon>
+            <span>正在批量删除分镜图…</span>
+          </div>
           <div v-if="batchVideoRunning" class="batch-progress">
             <el-icon class="is-loading"><Loading /></el-icon>
             <span>批量生成分镜视频：{{ batchVideoProgress.current }}/{{ batchVideoProgress.total }}</span>
             <span v-if="batchVideoProgress.failed > 0" class="batch-failed">{{ batchVideoProgress.failed }} 条失败</span>
             <span v-if="batchVideoStopping" class="batch-stopping">（正在停止...）</span>
+          </div>
+          <div v-if="batchArcReelRunning" class="batch-progress">
+            <el-icon class="is-loading"><Loading /></el-icon>
+            <span>一键转 ArcReel：{{ batchArcReelProgress.current }}/{{ batchArcReelProgress.total }}</span>
+            <span v-if="batchArcReelProgress.label" class="batch-arc-label">· {{ batchArcReelProgress.label }}</span>
+            <span v-if="batchArcReelProgress.failed > 0" class="batch-failed">{{ batchArcReelProgress.failed }} 条失败</span>
+            <span v-if="batchArcReelProgress.skipped > 0" class="batch-failed">跳过 {{ batchArcReelProgress.skipped }}</span>
+            <span v-if="batchArcReelStopping" class="batch-stopping">（正在停止...）</span>
           </div>
           <div v-if="batchImageErrors.length > 0" class="batch-error-log">
             <div class="batch-error-title">分镜图生成失败记录：</div>
@@ -947,6 +1255,10 @@
           <div v-if="batchVideoErrors.length > 0" class="batch-error-log">
             <div class="batch-error-title">分镜视频生成失败记录：</div>
             <div v-for="(e, i) in batchVideoErrors" :key="i" class="batch-error-line">{{ e }}</div>
+          </div>
+          <div v-if="batchArcReelErrors.length > 0" class="batch-error-log">
+            <div class="batch-error-title">ArcReel 转换失败记录：</div>
+            <div v-for="(e, i) in batchArcReelErrors" :key="i" class="batch-error-line">{{ e }}</div>
           </div>
         </div>
         <div v-if="storyboardGenerating || universalOmniPolishRunning" class="storyboard-generating-tip">
@@ -1170,7 +1482,7 @@
                   @blur="() => onSaveSbNarrationField(sb)"
                 />
                 <div v-if="(sbNarration[sb.id] || sb.narration || '').toString().trim()" class="sb-narration-actions">
-                  <el-tooltip content="解说旁白配音（TTS）" placement="top">
+                  <el-tooltip content="解说旁白配音（IndexTTS2 克隆音色）" placement="top">
                     <el-button size="small" :loading="ttsSbNarrationIds.has(sb.id)" @click="onTtsSbNarration(sb)">
                       解说配音
                     </el-button>
@@ -1186,6 +1498,16 @@
             <!-- 中：经典模式=分镜参考图；全能模式=片段描述（独立字段，与参考图并存） -->
             <div class="sb-panel sb-image" :class="{ 'sb-image--universal': isSbUniversalMode(sb.id) }">
               <template v-if="isSbUniversalMode(sb.id)">
+                <div v-if="getSbCoveragePlate(sb)" class="sb-coverage-template-row">
+                  <span class="sb-coverage-template-label">模板图</span>
+                  <img
+                    class="sb-coverage-template-thumb"
+                    :src="assetImageUrl(getSbCoveragePlate(sb))"
+                    alt=""
+                    @click="openImagePreview(assetImageUrl(getSbCoveragePlate(sb)))"
+                  />
+                  <span class="sb-coverage-template-name">{{ coveragePlateLabel(getSbCoveragePlate(sb)) }}</span>
+                </div>
                 <div class="sb-prompt-label sb-universal-label-row">
                   <div class="sb-universal-label-left">
                     <span class="sb-dot"></span>
@@ -1193,7 +1515,7 @@
                     <el-tooltip placement="top" :show-after="280" :show-arrow="false" popper-class="sb-universal-tooltip-popper">
                       <template #content>
                         <div class="sb-universal-tooltip">
-                          全能生视频链路（<strong>AI 配置 · 视频</strong> 中选接口规范：<code>kling_omni</code> 可灵 Omni，或 <code>volcengine_omni</code> 火山即梦 Seedance 2.0 多图参考；模型如 <code>kling-video-o1</code>、<code>doubao-seedance-2-0-260128</code> 等以控制台为准）：此处为提交主提示词；只要本框有内容，生视频时<strong>只</strong>发送这段，不会拼接下方「视频提示词」里的动作/对话/旁白。参考图顺序一般为：场景 → 角色（多张）→ 物品（<strong>不含</strong>经典分镜中间主图）；请用 <strong>@图片1</strong>、<strong>@图片2</strong>…（<strong>@图片N 后建议加半角空格</strong>）对应参考图，勿用 @姓名 指图；有场景图时 <strong>@图片1</strong> 只表环境，人物从 <strong>@图片2</strong> 起。若场景参考是<strong>四宫格/多视角拼图</strong>，仅借空间与氛围，须在文案中写明<strong>单镜头完整画幅、禁止分屏宫格</strong>，避免成片模仿拼图布局。全能提示词下拉中「生成」会按<strong>本条分镜总时长</strong>与本集剧本、镜序、邻镜信息，自动决定子分镜数 M（第2行「由以下M个分镜…」），第4行起为「分镜1：T1秒:」…多行，且各段秒数之和等于本镜时长；第3行仍为环境/参考图约束；「生成」与「润色」均为<strong>流式输出</strong>到本框；「润色」在此基础上增强。若本框留空，则退回仅用「视频提示词」。
+                          全能生视频链路（<strong>AI 配置 · 视频</strong> 中选接口规范：<code>kling_omni</code> 可灵 Omni，或 <code>volcengine_omni</code> 火山即梦 Seedance 2.0 多图参考）：本框为提交主提示词，有内容时<strong>只</strong>发这段。参考图顺序：场景 → 角色 → 物品（不含经典分镜主图）；<strong>@图片1</strong> 为环境，人物从 <strong>@图片2</strong> 起。<strong>版式</strong>：【风格锚点】→【场景设定】→ 默认单个【分镜1】（整段时长）→【环境音】（无【台词】栏）；台词用 <code>&lt;角色&gt;说 {原文}</code>；提交时若角色已上传音色，会自动加【主体与音色】与 <code>@音频N</code>。「生成/润色」流式写入本框；秒数之和等于本镜时长。留空则退回「视频提示词」。
                         </div>
                       </template>
                       <el-icon class="sb-universal-hint-icon" tabindex="0" role="img" aria-label="片段说明">
@@ -1232,6 +1554,12 @@
                           :disabled="!sbUniversalSegmentTrimmed(sb)"
                         >
                           改为 grok视频格式
+                        </el-dropdown-item>
+                        <el-dropdown-item
+                          command="to-arcreel-structured"
+                          :disabled="!sbUniversalSegmentTrimmed(sb)"
+                        >
+                          改为 ArcReel 结构化
                         </el-dropdown-item>
                       </el-dropdown-menu>
                     </template>
@@ -1514,7 +1842,7 @@
               </div>
               <!-- 视频历史条：有多条历史时显示，点击可切换 -->
               <div v-if="getVideoStripItems(sb.id).length" class="sb-videos-strip">
-                <el-tooltip content="历史视频：点击可切换为当前视频" placement="top" :show-arrow="false">
+                <el-tooltip content="历史视频：点击可切换为当前视频，右上角删除" placement="top" :show-arrow="false">
                   <el-icon class="sb-strip-hint-icon"><InfoFilled /></el-icon>
                 </el-tooltip>
                 <div
@@ -1526,6 +1854,12 @@
                 >
                   <video :src="item.src" preload="metadata" class="sb-video-thumb-player" />
                   <span class="sb-video-thumb-label">{{ item.label }}</span>
+                  <button
+                    v-if="item.video?.id"
+                    class="extra-thumb-remove"
+                    title="删除历史视频"
+                    @click.stop="onRemoveSbVideo(sb, item.video.id)"
+                  >×</button>
                 </div>
               </div>
               <div v-if="getSbVideo(sb.id)" class="sb-video-actions">
@@ -1543,6 +1877,13 @@
                     <el-icon><VideoPlay /></el-icon>
                   </el-button>
                 </el-tooltip>
+                <el-button
+                  size="small"
+                  type="danger"
+                  plain
+                  :disabled="isSbVideoGenerating(sb.id)"
+                  @click="onRemoveSbVideo(sb, getSbVideo(sb.id)?.id)"
+                >删除</el-button>
               </div>
               <div class="sb-video-prompt-label">
                 <span class="sb-dot"></span>
@@ -1550,6 +1891,14 @@
               </div>
               <div class="sb-video-params-bar">
                 <span class="sb-video-prompt-text sb-video-prompt-text--preview">{{ sb.video_prompt || '暂无视频提示词（在「视频配置」保存后自动生成）' }}</span>
+                <el-button
+                  size="small"
+                  link
+                  type="primary"
+                  :loading="classicArcReelConvertingIds.has(sb.id)"
+                  :disabled="isSbUniversalMode(sb.id) || classicArcReelConvertingIds.has(sb.id) || !(sb.video_prompt || sb.action || sb.dialogue || sb.narration)"
+                  @click="onClassicVideoPromptToArcReel(sb)"
+                >改为 ArcReel 结构化</el-button>
                 <el-button size="small" link type="primary" @click="onOpenSbPromptDialog(sb)">手工编辑</el-button>
               </div>
             </div>
@@ -1600,7 +1949,7 @@
           <el-form-item label="字幕">
             <div class="video-option-row">
               <el-switch v-model="videoSubtitle" />
-              <span v-if="videoSubtitle" class="video-option-hint">开启后，合成整集时会检测解说旁白：若有文案则自动生成 SRT、按分镜时长合成旁白语音（过长加速 / 过短补静音）、与成片对齐后烧录字幕并混音。</span>
+              <span v-if="videoSubtitle" class="video-option-hint">开启后，合成整集时会检测解说旁白：优先使用已生成的 IndexTTS 配音，否则按所选克隆音色（默认宇少）自动合成，再生成 SRT、对齐分镜时长并烧录字幕混音。</span>
             </div>
           </el-form-item>
           <el-form-item label="对白烧录">
@@ -1748,6 +2097,30 @@
         </el-form-item>
         <el-form-item label="简介">
           <el-input v-model="editCharacterForm.description" type="textarea" :autosize="{ minRows: 3, maxRows: 8 }" placeholder="角色背景简介，供剧本生成参考" />
+        </el-form-item>
+        <el-form-item label="声音特征">
+          <el-input
+            v-model="editCharacterForm.voice_style"
+            placeholder="如：清亮冷静女声、低沉沙哑男声（写入全能提示词音色声明）"
+          />
+        </el-form-item>
+        <el-form-item v-if="editCharacterForm.id" label="台词音色">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <template v-if="editCharacterForm.seedance2_voice_asset?.status === 'active'">
+              <el-button size="small" type="success" plain @click="playSd2Voice(editCharacterForm)">试听</el-button>
+              <el-button size="small" type="primary" plain :loading="sd2VoiceUploadingId === editCharacterForm.id" @click="onSd2VoiceReplace(editCharacterForm)">更换音频</el-button>
+              <span style="font-size:12px;color:#67c23a">已上传参考音频</span>
+            </template>
+            <el-button
+              v-else
+              size="small"
+              type="primary"
+              plain
+              :loading="sd2VoiceUploadingId === editCharacterForm.id"
+              @click="onSd2VoicePrimaryAction(editCharacterForm)"
+            >上传音色参考</el-button>
+            <span style="font-size:12px;color:#909399">短音频，Seedance 2.0 / Agnes 2.5 生视频时按说话人绑定</span>
+          </div>
         </el-form-item>
         <el-form-item v-if="editCharacterForm.id">
           <template #label>
@@ -2552,7 +2925,7 @@
           <el-input v-model="sbResult[videoParamsTarget.id]" type="textarea" :rows="2" placeholder="动作完成后的画面结果" />
         </el-form-item>
         <el-form-item label="视频提示词">
-          <div class="vp-video-prompt-hint">保存后将根据上方字段，由系统按最新规则自动生成（含角色音色锚点）。</div>
+          <div class="vp-video-prompt-hint">保存后将根据上方字段，由系统按最新规则自动生成（含角色音色锚点）。生视频时会自动转为 ArcReel 结构化；也可手动转换。</div>
           <el-input
             v-if="videoParamsTarget?.video_prompt"
             :model-value="videoParamsTarget.video_prompt"
@@ -2561,6 +2934,16 @@
             readonly
             style="color:#6b7280;margin-top:8px"
           />
+          <el-button
+            v-if="videoParamsTarget?.id && sbCreationMode[videoParamsTarget.id] !== 'universal'"
+            size="small"
+            style="margin-top:8px"
+            :loading="videoParamsTarget?.id != null && classicArcReelConvertingIds.has(videoParamsTarget.id)"
+            :disabled="!videoParamsTarget?.id || classicArcReelConvertingIds.has(videoParamsTarget.id)"
+            @click="onClassicVideoPromptToArcReel(videoParamsTarget)"
+          >
+            改为 ArcReel 结构化
+          </el-button>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -2639,6 +3022,7 @@ import { useFilmStore } from '@/stores/film'
 import { useGenerationTaskStore, GEN_RESOURCE } from '@/stores/generationTaskStore'
 import { syncGeneratingSetsFromStore, buildEpisodeContext, buildExtractTaskMeta, isEpisodeExtractRunning } from '@/composables/useGenerationTaskSync'
 import { dramaAPI } from '@/api/drama'
+import { aiVoicesAPI } from '@/api/aiVoices'
 import { generationAPI } from '@/api/generation'
 import { aiAPI } from '@/api/ai'
 import { characterAPI } from '@/api/characters'
@@ -2798,6 +3182,122 @@ const videoBurnDialogue = ref(false)
 const videoWatermark = ref(false)
 /** 水印开启时烧录到成片右下角 */
 const videoWatermarkText = ref('')
+
+/** IndexTTS2 旁白配音（默认宇少 gsv:007） */
+const DEFAULT_INDEXTTS_VOICE = 'gsv:007'
+const indexttsAvailable = ref(false)
+const indexttsVoiceId = ref(DEFAULT_INDEXTTS_VOICE)
+const indexttsEmotionText = ref('自然流畅的解说语气，情绪饱满')
+const indexttsSpeed = ref(1.2)
+const indexttsSpeedOptions = [
+  { label: '0.8x', value: 0.8 },
+  { label: '0.9x', value: 0.9 },
+  { label: '1.0x', value: 1.0 },
+  { label: '1.1x', value: 1.1 },
+  { label: '1.2x', value: 1.2 },
+  { label: '1.3x', value: 1.3 },
+  { label: '1.5x', value: 1.5 },
+]
+const gsvCatalogVoices = ref([])
+const gsvCatalogLoading = ref(false)
+const gsvPreviewing = ref(false)
+const gsvPanelOpen = ref(false)
+const gsvEditingId = ref('')
+const gsvSaving = ref(false)
+const indexttsStarting = ref(false)
+const indexttsUnloading = ref(false)
+const gsvForm = reactive({
+  voice_id: '',
+  voice_name: '',
+  ref_audio_path: '',
+  prompt_text: '',
+})
+const selectedGsvVoice = computed(() =>
+  gsvCatalogVoices.value.find((v) => v.voice_id === indexttsVoiceId.value) || null
+)
+
+/** 画外音 Seedance / Agnes 音色参考（剧级，与角色台词音色同结构） */
+const narrationSd2VoiceUploading = ref(false)
+const narrationSd2VoiceAsset = computed(() => store.drama?.narration_seedance2_voice_asset || null)
+const narrationSd2VoiceActionLabel = computed(() => {
+  const status = String(narrationSd2VoiceAsset.value?.status || '').toLowerCase()
+  if (status === 'active') return '画外音音色'
+  if (status === 'processing' || status === 'stale') return '刷新音色'
+  if (status === 'failed') return '重新上传音色'
+  return '上传画外音音色'
+})
+
+async function onNarrationSd2VoicePrimaryAction() {
+  const status = String(narrationSd2VoiceAsset.value?.status || '').toLowerCase()
+  if (status === 'active') {
+    ElMessage.info('画外音音色已设置，将在 Seedance 2.0 / Agnes 视频中使用')
+    return
+  }
+  if (status === 'processing' || status === 'stale') {
+    await onNarrationSd2VoiceRefresh()
+    return
+  }
+  await triggerNarrationSd2VoiceUpload()
+}
+
+async function onNarrationSd2VoiceReplace() {
+  await triggerNarrationSd2VoiceUpload()
+}
+
+async function onNarrationSd2VoiceRefresh() {
+  if (!dramaId.value) return
+  narrationSd2VoiceUploading.value = true
+  try {
+    const res = await dramaAPI.narrationSd2VoiceRefresh(dramaId.value)
+    await loadDrama()
+    ElMessage.success(res?.data?.message || '画外音音色状态已刷新')
+  } catch (e) {
+    ElMessage.error(e?.message || '刷新失败')
+  } finally {
+    narrationSd2VoiceUploading.value = false
+  }
+}
+
+async function triggerNarrationSd2VoiceUpload() {
+  if (!dramaId.value) return
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = 'audio/*'
+  input.onchange = async () => {
+    const file = input.files && input.files[0]
+    if (!file) return
+    narrationSd2VoiceUploading.value = true
+    try {
+      await dramaAPI.narrationSd2VoiceUpload(dramaId.value, file)
+      ElMessage.success('画外音音色参考已上传')
+      await loadDrama()
+    } catch (e) {
+      ElMessage.error(e?.message || '音色上传失败')
+    } finally {
+      narrationSd2VoiceUploading.value = false
+    }
+  }
+  input.click()
+}
+
+function playNarrationSd2Voice() {
+  const url = narrationSd2VoiceAsset.value?.url
+  if (!url) {
+    ElMessage.warning('暂无画外音音色参考音频')
+    return
+  }
+  try {
+    const audio = new Audio(url)
+    audio.onerror = () => {
+      ElMessage.error('音频播放失败：文件可能不存在或路径不匹配，请尝试重新上传')
+    }
+    audio.play().catch(() => {
+      ElMessage.error('音频播放失败，请检查文件或稍后重试')
+    })
+  } catch (_) {
+    ElMessage.error('无法播放音频')
+  }
+}
 
 const dramaId = computed(() => store.dramaId)
 const characters = computed(() => store.characters)
@@ -3015,7 +3515,7 @@ const resourcePanelCollapsed = ref(false)
 const charactersBlockCollapsed = ref(false)
 const propsBlockCollapsed = ref(false)
 const scenesBlockCollapsed = ref(false)
-const sceneUseQuadGrid = ref(false)
+const sceneUseQuadGrid = ref(true)
 const propUseQuadGrid = ref(false)  // 道具四视图（与场景四宫格同级选项）
 
 // 分镜行内编辑状态（按 storyboard id 存储）
@@ -3125,10 +3625,18 @@ const allActiveTaskItems = computed(() => {
   if (batchImageRunning.value) {
     addItem({ id: 'batch-image', label: '批量生成分镜图...', kind: 'batchImage' })
   }
+  if (batchImageDeleting.value) {
+    addItem({ id: 'batch-image-delete', label: '批量删除分镜图...', kind: 'batchImageDelete' })
+  }
   if (batchVideoRunning.value) {
     const p = batchVideoProgress.value
     const suffix = p?.total ? ` ${p.current}/${p.total}` : ''
     addItem({ id: 'batch-video', label: `批量生成分镜视频${suffix}...`, kind: 'batchVideo' })
+  }
+  if (batchArcReelRunning.value) {
+    const p = batchArcReelProgress.value
+    const suffix = p?.total ? ` ${p.current}/${p.total}` : ''
+    addItem({ id: 'batch-arcreel', label: `一键转 ArcReel${suffix}...`, kind: 'batchArcReel' })
   }
   return items
 })
@@ -3176,6 +3684,11 @@ async function cancelActiveTask(item) {
       ElMessage.info('正在停止批量生视频...')
       return
     }
+    if (item.kind === 'batchArcReel') {
+      batchArcReelStopping.value = true
+      ElMessage.info('正在停止 ArcReel 转换...')
+      return
+    }
   } catch (e) {
     ElMessage.error(e?.message || '取消失败')
   }
@@ -3221,6 +3734,12 @@ const regenSbImagesProgress = ref({})
 const batchImageRunning = ref(false)
 const batchImageStopping = ref(false)
 const batchImageProgress = ref({ current: 0, total: 0, failed: 0 })
+const batchImageDeleting = ref(false)
+/** 一键转 ArcReel 结构化 */
+const batchArcReelRunning = ref(false)
+const batchArcReelStopping = ref(false)
+const batchArcReelProgress = ref({ current: 0, total: 0, failed: 0, skipped: 0, label: '' })
+const batchArcReelErrors = ref([])
 const inferringParams = ref(false)
 const showVideoParamsDialog = ref(false)
 const videoParamsTarget = ref(null)
@@ -3285,6 +3804,35 @@ const storyboardCount = ref(null) // 分镜数量
 const videoDuration = ref(null) // 视频总长度
 /** 分镜生成时是否要求 AI 输出 narration（解说旁白） */
 const storyboardIncludeNarration = ref(false)
+/** 有对白的镜头默认定镜对话（禁止横摇扫双方，正反打用切镜） */
+const storyboardStaticDialogue = ref(false)
+const coveragePlatesRunning = ref(false)
+const coveragePlatesHint = ref('')
+const coveragePlates = ref([])
+const coveragePlatesLoading = ref(false)
+const coverageAssignRunning = ref(false)
+const coveragePlatePromptDraft = ref({})
+const coveragePlateSavingId = ref(null)
+const coveragePlateRegenId = ref(null)
+const coveragePlateDeletingId = ref(null)
+const coveragePlateUploadingId = ref(null)
+const coveragePlateCopyingId = ref(null)
+const coverageUploadTargetId = ref(null)
+const coverageImageFileInput = ref(null)
+const coverageJustDoneIds = ref(new Set())
+const coverageHistoryVisible = ref(false)
+const coverageHistoryPlate = ref(null)
+const coverageHistoryItems = ref([])
+const coverageHistoryLoadingId = ref(null)
+const coverageHistoryRestoringId = ref(null)
+const coverageHistoryDeletingId = ref(null)
+const coverageHistoryCopyingId = ref(null)
+const coverageCompletedCount = computed(
+  () =>
+    (coveragePlates.value || []).filter(
+      (p) => p.status === 'completed' && !!(p.image_url || p.local_path)
+    ).length
+)
 /** 分镜生成是否使用全能模式（universal_segment_text，对接 Seedance / 可灵 Omni） */
 const storyboardUniversalOmni = ref(false)
 const storyboardUseFirstLastFrame = ref(false)
@@ -3783,6 +4331,49 @@ function onSelectSbMainVideo(sb, video) {
     video_url: video.video_url || null,
     local_path: video.local_path || undefined,
   }).catch(e => console.warn('[主视频] 保存后端失败', e))
+}
+
+/** 删除分镜当前视频或历史视频 */
+async function onRemoveSbVideo(sb, videoGenId) {
+  if (!sb?.id || !videoGenId) return
+  const isCurrent = getSbVideo(sb.id)?.id === videoGenId
+  try {
+    await ElMessageBox.confirm(
+      isCurrent ? '确定删除当前视频？此操作不可恢复。' : '确定删除这条历史视频？此操作不可恢复。',
+      isCurrent ? '删除视频' : '删除历史视频',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        distinguishCancelAndClose: true,
+      }
+    )
+    await videosAPI.delete(videoGenId)
+    if (sbSelectedVideoId.value[sb.id] === videoGenId) {
+      const next = { ...sbSelectedVideoId.value }
+      delete next[sb.id]
+      sbSelectedVideoId.value = next
+    }
+    await loadSingleStoryboardMedia(sb.id)
+    const remaining = getSbVideo(sb.id)
+    if (remaining) {
+      sbSelectedVideoId.value = { ...sbSelectedVideoId.value, [sb.id]: remaining.id }
+      storyboardsAPI.update(sb.id, {
+        video_url: remaining.video_url || null,
+        local_path: remaining.local_path || undefined,
+      }).catch((e) => console.warn('[主视频] 删除后同步失败', e))
+    } else {
+      storyboardsAPI.update(sb.id, {
+        video_url: null,
+        local_path: null,
+      }).catch((e) => console.warn('[主视频] 清空失败', e))
+    }
+    ElMessage.success(isCurrent ? '视频已删除' : '历史视频已删除')
+  } catch (err) {
+    if (err !== 'cancel' && err !== 'close') {
+      ElMessage.error(err?.message || '删除失败')
+    }
+  }
 }
 /** 取该分镜最近一次视频生成的错误信息（从 API 返回的记录或本地即时错误） */
 function getSbVideoError(storyboardId) {
@@ -4592,6 +5183,7 @@ async function loadDrama() {
     projectAspectRatio.value = (d.metadata && d.metadata.aspect_ratio) ? d.metadata.aspect_ratio : '16:9'
     videoClipDuration.value = (d.metadata && d.metadata.video_clip_duration) ? Number(d.metadata.video_clip_duration) : 5
     storyboardIncludeNarration.value = !!(d.metadata && d.metadata.storyboard_include_narration)
+    storyboardStaticDialogue.value = !!(d.metadata && d.metadata.storyboard_static_dialogue)
     storyboardUniversalOmni.value = !!(d.metadata && d.metadata.storyboard_universal_omni)
     storyboardUseFirstLastFrame.value = !!(d.metadata && d.metadata.storyboard_use_first_last_frame)
     lastFrameUseFirstLayoutLock.value = d.metadata?.last_frame_use_first_layout_lock !== false
@@ -4619,6 +5211,8 @@ async function loadDrama() {
     syncStoryboardStateFromEpisode(ep)
     await loadStoryboardMedia()
     await recoverAndSyncEpisodeTasks(ep?.id)
+    if (storyboardStaticDialogue.value) await loadCoveragePlates()
+    else coveragePlates.value = []
   } catch (e) {
     ElMessage.error(e.message || '加载失败')
   }
@@ -4979,10 +5573,567 @@ async function saveScriptToBackend(content) {
   return { created: false }
 }
 
-/**
- * @param {boolean} includeGenerationStyle - 仅在选择「画面风格」为 true：写入 dramas.style 与 style_prompt_*。
- * 其它项目设置改为 false，避免界面未刷新时仍用旧的 generationStyle 覆盖外部已更新的画风（如直接调 API PUT outline）。
- */
+async function loadCoveragePlates(opts = {}) {
+  const silent = !!opts.silent
+  if (!currentEpisodeId.value) {
+    coveragePlates.value = []
+    coveragePlatePromptDraft.value = {}
+    return
+  }
+  if (!silent) coveragePlatesLoading.value = true
+  try {
+    const prevDone = new Set(
+      (coveragePlates.value || [])
+        .filter((p) => p.status === 'completed' && (p.local_path || p.image_url))
+        .map((p) => Number(p.id))
+    )
+    const res = await storyboardsAPI.listCoveragePlates(currentEpisodeId.value)
+    const items = Array.isArray(res?.items) ? res.items : Array.isArray(res) ? res : []
+    coveragePlates.value = items.filter((p) => p && !p.deleted_at)
+    const drafts = { ...coveragePlatePromptDraft.value }
+    for (const p of coveragePlates.value) {
+      // 生成中不覆盖用户正在编辑的提示词草稿
+      if (drafts[p.id] == null || drafts[p.id] === '' || !coveragePlatesRunning.value) {
+        drafts[p.id] = p.prompt || drafts[p.id] || ''
+      }
+    }
+    coveragePlatePromptDraft.value = drafts
+
+    const just = new Set(coverageJustDoneIds.value)
+    for (const p of coveragePlates.value) {
+      const id = Number(p.id)
+      if (p.status === 'completed' && (p.local_path || p.image_url) && !prevDone.has(id)) {
+        just.add(id)
+        setTimeout(() => {
+          const next = new Set(coverageJustDoneIds.value)
+          next.delete(id)
+          coverageJustDoneIds.value = next
+        }, 1600)
+      }
+    }
+    coverageJustDoneIds.value = just
+  } catch (_) {
+    if (!silent) coveragePlates.value = []
+  } finally {
+    if (!silent) coveragePlatesLoading.value = false
+  }
+}
+
+function coveragePlateLabel(p) {
+  if (!p) return ''
+  const loc = (p.location || '').toString().trim()
+  if (p.plate_type === 'wide') return loc ? `全景座位表 · ${loc}` : '全景座位表'
+  if (p.plate_type === 'zone') {
+    const z =
+      p.zone_key === 'left' ? '左侧' : p.zone_key === 'center' ? '中央' : p.zone_key === 'right' ? '右侧' : '分区'
+    const favor = (p.speaker_name || '').toString().trim()
+    const duoBias = Array.isArray(p.members) && p.members.length >= 2 && favor
+    if (duoBias) {
+      return loc ? `POV近景 · ${favor} · ${loc}` : `POV近景 · ${favor}`
+    }
+    const members = Array.isArray(p.members) && p.members.length ? p.members.join('、') : ''
+    const base = loc ? `分区 · ${z}区 · ${loc}` : `分区 · ${z}区`
+    return members ? `${base}（${members}）` : base
+  }
+  if (p.plate_type === 'two_shot') return loc ? `同框面对面 · ${loc}` : '同框面对面'
+  if (p.plate_type === 'speaker') {
+    const name = (p.speaker_name || '说话人').toString().trim()
+    const duoish = Array.isArray(p.members) && p.members.length >= 2
+    if (duoish) return loc ? `偏主体同框 · ${name} · ${loc}` : `偏主体同框 · ${name}`
+    return loc ? `单人 · ${name} · ${loc}` : `单人 · ${name}`
+  }
+  return loc || `母版 #${p.id}`
+}
+
+function coveragePlateStatusText(p) {
+  if (!p) return ''
+  if (p.status === 'failed') return '失败'
+  if (p.status === 'generating') return '生成中'
+  if (p.status === 'pending') return '排队中'
+  if (p.status === 'draft') return '待生图'
+  return '无图'
+}
+
+function formatCoverageHistoryTime(t) {
+  if (!t) return ''
+  try {
+    const d = new Date(t)
+    if (Number.isNaN(d.getTime())) return String(t)
+    return d.toLocaleString()
+  } catch (_) {
+    return String(t)
+  }
+}
+
+function getSbCoveragePlate(sb) {
+  if (!sb?.coverage_plate_id) return null
+  const id = Number(sb.coverage_plate_id)
+  return (coveragePlates.value || []).find((p) => Number(p.id) === id) || null
+}
+
+async function pollCoverageTask(taskId) {
+  let pollRes = { status: 'failed', error: '轮询中断' }
+  const maxAttempts = 450
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((r) => setTimeout(r, 1500))
+    const t = await taskAPI.get(taskId)
+    if (t?.message) coveragePlatesHint.value = String(t.message)
+    // 逐张刷新：每完成一张就出现在页面上
+    await loadCoveragePlates({ silent: true })
+    if (t?.status === 'completed') {
+      pollRes = { status: 'completed', result: t.result }
+      break
+    }
+    if (t?.status === 'failed') {
+      pollRes = { status: 'failed', error: t.error || t.message || '生成失败' }
+      break
+    }
+    if (i === maxAttempts - 1) {
+      pollRes = { status: 'timeout', error: '生成超时，请刷新后查看结果' }
+    }
+  }
+  await loadCoveragePlates({ silent: true })
+  return pollRes
+}
+
+async function onOpenCoverageHistory(plate) {
+  if (!plate?.id) return
+  coverageHistoryLoadingId.value = plate.id
+  coverageHistoryPlate.value = plate
+  try {
+    const res = await storyboardsAPI.listCoveragePlateVersions(plate.id)
+    coverageHistoryItems.value = Array.isArray(res?.items) ? res.items : []
+    coverageHistoryVisible.value = true
+  } catch (e) {
+    ElMessage.error(e.message || '加载历史失败')
+  } finally {
+    coverageHistoryLoadingId.value = null
+  }
+}
+
+async function onRestoreCoverageVersion(ver) {
+  if (!coverageHistoryPlate.value?.id || !ver?.id) return
+  try {
+    await ElMessageBox.confirm('将当前图存入历史，并恢复为此版本？', '恢复历史版本', {
+      confirmButtonText: '恢复',
+      cancelButtonText: '取消',
+      type: 'info',
+    })
+  } catch (e) {
+    if (e === 'cancel' || e === 'close') return
+    throw e
+  }
+  coverageHistoryRestoringId.value = ver.id
+  try {
+    await storyboardsAPI.restoreCoveragePlateVersion(coverageHistoryPlate.value.id, ver.id)
+    await loadCoveragePlates()
+    await loadDrama()
+    const res = await storyboardsAPI.listCoveragePlateVersions(coverageHistoryPlate.value.id)
+    coverageHistoryItems.value = Array.isArray(res?.items) ? res.items : []
+    ElMessage.success('已恢复历史版本')
+  } catch (e) {
+    ElMessage.error(e.message || '恢复失败')
+  } finally {
+    coverageHistoryRestoringId.value = null
+  }
+}
+
+async function onDeleteCoverageVersion(ver) {
+  if (!coverageHistoryPlate.value?.id || !ver?.id) return
+  try {
+    await ElMessageBox.confirm('确定删除该历史版本？此操作不可恢复。', '删除历史', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch (e) {
+    if (e === 'cancel' || e === 'close') return
+    throw e
+  }
+  coverageHistoryDeletingId.value = ver.id
+  try {
+    await storyboardsAPI.deleteCoveragePlateVersion(coverageHistoryPlate.value.id, ver.id)
+    coverageHistoryItems.value = (coverageHistoryItems.value || []).filter(
+      (x) => Number(x.id) !== Number(ver.id)
+    )
+    await loadCoveragePlates({ silent: true })
+    ElMessage.success('已删除历史版本')
+  } catch (e) {
+    ElMessage.error(e.message || '删除失败')
+  } finally {
+    coverageHistoryDeletingId.value = null
+  }
+}
+
+async function onCopyCoveragePlatePrompt(plate) {
+  const text = String(
+    coveragePlatePromptDraft.value?.[plate.id] ?? plate?.prompt ?? ''
+  ).trim()
+  if (!text) {
+    ElMessage.warning('暂无提示词可复制')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制提示词')
+  } catch (e) {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.left = '-9999px'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+      ElMessage.success('已复制提示词')
+    } catch (e2) {
+      ElMessage.error(e2?.message || e?.message || '复制失败')
+    }
+  }
+}
+
+async function copyAssetImageToClipboard(item) {
+  const url = assetImageUrl(item)
+  if (!url) {
+    ElMessage.warning('暂无图片可复制')
+    return false
+  }
+  if (!window.ClipboardItem || !navigator.clipboard?.write) {
+    ElMessage.warning('当前浏览器不支持复制图片，请右键图片另存或用预览下载')
+    return false
+  }
+  const res = await fetch(url, { credentials: 'same-origin' })
+  if (!res.ok) throw new Error('读取图片失败')
+  const blob = await res.blob()
+  let pngBlob = blob
+  if (!/^image\/png$/i.test(blob.type || '')) {
+    const bmp = await createImageBitmap(blob)
+    const canvas = document.createElement('canvas')
+    canvas.width = bmp.width
+    canvas.height = bmp.height
+    canvas.getContext('2d').drawImage(bmp, 0, 0)
+    bmp.close?.()
+    pngBlob = await new Promise((resolve, reject) => {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('图片转码失败'))), 'image/png')
+    })
+  }
+  await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })])
+  ElMessage.success('已复制图片')
+  return true
+}
+
+async function onCopyCoveragePlateImage(plate) {
+  coveragePlateCopyingId.value = plate.id
+  try {
+    await copyAssetImageToClipboard(plate)
+  } catch (e) {
+    ElMessage.error(e?.message || '复制图片失败')
+  } finally {
+    coveragePlateCopyingId.value = null
+  }
+}
+
+async function onCopyCoverageHistoryImage(ver) {
+  coverageHistoryCopyingId.value = ver.id
+  try {
+    await copyAssetImageToClipboard(ver)
+  } catch (e) {
+    ElMessage.error(e?.message || '复制图片失败')
+  } finally {
+    coverageHistoryCopyingId.value = null
+  }
+}
+
+function onUploadCoveragePlateClick(plate) {
+  if (!plate?.id || coveragePlatesRunning.value) return
+  coverageUploadTargetId.value = plate.id
+  coverageImageFileInput.value?.click()
+}
+
+async function onCoverageImageFileChange(ev) {
+  const file = ev?.target?.files?.[0]
+  const plateId = coverageUploadTargetId.value
+  if (ev?.target) ev.target.value = ''
+  coverageUploadTargetId.value = null
+  if (!file || !plateId) return
+  coveragePlateUploadingId.value = plateId
+  try {
+    const res = await uploadAPI.uploadImage(file, { dramaId: dramaId.value })
+    const data = res?.data ?? res
+    const localPath = data?.local_path || data?.path || null
+    const url = data?.url || localPath
+    if (!url && !localPath) {
+      ElMessage.error('上传未返回地址')
+      return
+    }
+    await storyboardsAPI.uploadCoveragePlateImage(plateId, {
+      image_url: url || undefined,
+      local_path: localPath || undefined,
+    })
+    await loadCoveragePlates()
+    ElMessage.success('模板图已上传（旧图已进历史）')
+  } catch (e) {
+    ElMessage.error(e.message || '上传失败')
+  } finally {
+    coveragePlateUploadingId.value = null
+  }
+}
+
+async function onDraftCoveragePlates() {
+  if (!currentEpisodeId.value) {
+    ElMessage.warning('请先选择集数')
+    return
+  }
+  if (!storyboardStaticDialogue.value) {
+    ElMessage.warning('请先开启「定镜对白」')
+    return
+  }
+  if (!storyboards.value?.length) {
+    ElMessage.warning('请先生成分镜')
+    return
+  }
+  if (coveragePlatesRunning.value) return
+
+  coveragePlatesRunning.value = true
+  coveragePlatesHint.value = '生成提示词…'
+  try {
+    const plan = await storyboardsAPI.planCoveragePlates(currentEpisodeId.value)
+    const g = plan?.group_count || 0
+    const p = plan?.plate_count || 0
+    if (!p) {
+      ElMessage.warning('无法规划母版：请确认分镜有对白与场景')
+      coveragePlatesHint.value = ''
+      return
+    }
+    try {
+      await ElMessageBox.confirm(
+        `将按 ${g} 个场景生成约 ${p} 条提示词（全景座位表 + 分区板 + 近景；分区随人数缩放）。已有模板会被替换。是否继续？`,
+        '生成固定机位提示词',
+        { confirmButtonText: '生成提示词', cancelButtonText: '取消', type: 'info' }
+      )
+    } catch (e) {
+      if (e === 'cancel' || e === 'close') {
+        coveragePlatesHint.value = ''
+        return
+      }
+      throw e
+    }
+    const res = await storyboardsAPI.draftCoveragePlates(currentEpisodeId.value, { replace: true })
+    await loadCoveragePlates()
+    ElMessage.success(`已生成 ${res?.plate_count ?? p} 条提示词，可修改后再点「生成模板图」`)
+    coveragePlatesHint.value = `提示词 ${res?.plate_count ?? p} 条 · 待生图`
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') {
+      ElMessage.error(e.message || '生成提示词失败')
+      coveragePlatesHint.value = ''
+    }
+  } finally {
+    coveragePlatesRunning.value = false
+  }
+}
+
+async function onGenerateCoveragePlateImages() {
+  if (!currentEpisodeId.value) {
+    ElMessage.warning('请先选择集数')
+    return
+  }
+  if (!coveragePlates.value?.length) {
+    ElMessage.warning('请先生成提示词')
+    return
+  }
+  if (coveragePlatesRunning.value) return
+
+  coveragePlatesRunning.value = true
+  coveragePlatesHint.value = '生成模板图…'
+  try {
+    try {
+      await ElMessageBox.confirm(
+        '将按当前提示词生成模板图（仅对待生图/失败项；改过提示词的也会重生）。生图完成后可「按说话人分配」。是否继续？',
+        '生成模板图',
+        { confirmButtonText: '开始生图', cancelButtonText: '取消', type: 'info' }
+      )
+    } catch (e) {
+      if (e === 'cancel' || e === 'close') {
+        coveragePlatesHint.value = ''
+        return
+      }
+      throw e
+    }
+
+    const res = await storyboardsAPI.generateCoveragePlates(currentEpisodeId.value, {
+      assign: false,
+      strategy: 'by_speaker',
+      only_missing: true,
+      concurrency: 7,
+    })
+    const taskId = res?.task_id
+    if (!taskId) {
+      ElMessage.warning('未返回任务 ID')
+      coveragePlatesHint.value = ''
+      return
+    }
+    const pollRes = await pollCoverageTask(taskId)
+    await loadCoveragePlates()
+    if (pollRes?.status !== 'completed') {
+      ElMessage.error(pollRes.error || '模板图生成失败')
+      coveragePlatesHint.value = '生成失败'
+      return
+    }
+    let result = pollRes.result || {}
+    if (typeof result === 'string') {
+      try {
+        result = JSON.parse(result)
+      } catch (_) {
+        result = {}
+      }
+    }
+    const ok = result.plate_ok ?? 0
+    const failed = result.plate_failed ?? 0
+    ElMessage.success(`模板图完成：成功 ${ok}${failed ? `、失败 ${failed}` : ''}。可点「按说话人分配」`)
+    coveragePlatesHint.value = ok ? `模板 ${ok} 张` : ''
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') {
+      ElMessage.error(e.message || '模板图生成失败')
+      coveragePlatesHint.value = ''
+    }
+  } finally {
+    coveragePlatesRunning.value = false
+  }
+}
+
+async function onSaveCoveragePlatePrompt(plate) {
+  if (!plate?.id) return
+  coveragePlateSavingId.value = plate.id
+  try {
+    const prompt = coveragePlatePromptDraft.value[plate.id] ?? ''
+    const updated = await storyboardsAPI.updateCoveragePlate(plate.id, { prompt })
+    const idx = coveragePlates.value.findIndex((x) => Number(x.id) === Number(plate.id))
+    if (idx >= 0) coveragePlates.value[idx] = { ...coveragePlates.value[idx], ...updated }
+    ElMessage.success('提示词已保存')
+  } catch (e) {
+    ElMessage.error(e.message || '保存失败')
+  } finally {
+    coveragePlateSavingId.value = null
+  }
+}
+
+async function onRegenCoveragePlate(plate) {
+  if (!plate?.id) return
+  // 先保存当前编辑的提示词
+  if ((coveragePlatePromptDraft.value[plate.id] ?? '') !== (plate.prompt || '')) {
+    await onSaveCoveragePlatePrompt(plate)
+  }
+  coveragePlateRegenId.value = plate.id
+  coveragePlatesHint.value = `重生：${coveragePlateLabel(plate)}…`
+  try {
+    const res = await storyboardsAPI.regenerateCoveragePlate(plate.id, { assign: false })
+    const taskId = res?.task_id
+    if (!taskId) throw new Error('未返回任务 ID')
+    const pollRes = await pollCoverageTask(taskId)
+    await loadCoveragePlates()
+    if (pollRes?.status !== 'completed') {
+      ElMessage.error(pollRes.error || '重生失败')
+      return
+    }
+    ElMessage.success('模板图已重新生成')
+  } catch (e) {
+    ElMessage.error(e.message || '重生失败')
+  } finally {
+    coveragePlateRegenId.value = null
+  }
+}
+
+async function onDeleteCoveragePlate(plate) {
+  if (!plate?.id) return
+  try {
+    await ElMessageBox.confirm(`删除「${coveragePlateLabel(plate)}」？`, '删除模板', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch (e) {
+    if (e === 'cancel' || e === 'close') return
+    throw e
+  }
+  coveragePlateDeletingId.value = plate.id
+  try {
+    await storyboardsAPI.deleteCoveragePlate(plate.id)
+    await loadCoveragePlates()
+    await loadDrama()
+    ElMessage.success('已删除')
+  } catch (e) {
+    ElMessage.error(e.message || '删除失败')
+  } finally {
+    coveragePlateDeletingId.value = null
+  }
+}
+
+async function onAssignCoveragePlates(strategy = 'by_speaker') {
+  if (!currentEpisodeId.value) {
+    ElMessage.warning('请先选择集数')
+    return
+  }
+  if (!coverageCompletedCount.value) {
+    ElMessage.warning('请先生成模板图')
+    return
+  }
+  if (coverageAssignRunning.value) return
+  coverageAssignRunning.value = true
+  try {
+    const mode = strategy === 'prefer_two_shot' ? 'prefer_two_shot' : 'by_speaker'
+    const res = await storyboardsAPI.assignCoveragePlates(currentEpisodeId.value, {
+      strategy: mode,
+      force_static: true,
+    })
+    await loadDrama()
+    await loadCoveragePlates()
+    ElMessage.success(
+      mode === 'prefer_two_shot'
+        ? `已用全景/同框分配 ${res?.assigned ?? 0}/${res?.total ?? 0}`
+        : `已按说话人/分区分配 ${res?.assigned ?? 0}/${res?.total ?? 0}`
+    )
+    coveragePlatesHint.value = `已分配 ${res?.assigned ?? 0}/${res?.total ?? 0}`
+  } catch (e) {
+    ElMessage.error(e.message || '分配失败')
+  } finally {
+    coverageAssignRunning.value = false
+  }
+}
+
+async function onApplyCoveragePlate(plate) {
+  if (!plate || plate.status !== 'completed' || !hasAssetImage(plate)) {
+    ElMessage.warning('该模板尚未生成完成')
+    return
+  }
+  if (!currentEpisodeId.value) return
+  try {
+    await ElMessageBox.confirm(
+      `将「${coveragePlateLabel(plate)}」套用到本场景所有可分配分镜（走动镜跳过）？`,
+      '套用模板图',
+      { confirmButtonText: '套用', cancelButtonText: '取消', type: 'info' }
+    )
+  } catch (e) {
+    if (e === 'cancel' || e === 'close') return
+    throw e
+  }
+  coverageAssignRunning.value = true
+  try {
+    const res = await storyboardsAPI.assignCoveragePlates(currentEpisodeId.value, {
+      force_plate_id: plate.id,
+      force_static: true,
+    })
+    await loadDrama()
+    await loadCoveragePlates()
+    ElMessage.success(`已套用：${res?.assigned ?? 0} 个分镜`)
+    coveragePlatesHint.value = `已套用 ${coveragePlateLabel(plate)}（${res?.assigned ?? 0}）`
+  } catch (e) {
+    ElMessage.error(e.message || '套用失败')
+  } finally {
+    coverageAssignRunning.value = false
+  }
+}
+
 async function saveProjectSettings(includeGenerationStyle = false) {
   if (!store.dramaId) return
   const metadata = {
@@ -4990,6 +6141,7 @@ async function saveProjectSettings(includeGenerationStyle = false) {
     aspect_ratio: projectAspectRatio.value || '16:9',
     video_clip_duration: videoClipDuration.value || 5,
     storyboard_include_narration: !!storyboardIncludeNarration.value,
+    storyboard_static_dialogue: !!storyboardStaticDialogue.value,
     storyboard_universal_omni: !!storyboardUniversalOmni.value,
     storyboard_use_first_last_frame: !!storyboardUseFirstLastFrame.value,
     last_frame_use_first_layout_lock: !!lastFrameUseFirstLayoutLock.value,
@@ -5602,7 +6754,7 @@ async function onTtsSbDialogue(sb) {
   }
 }
 
-/** 为分镜解说旁白生成 TTS（与对白共用接口，文本不同） */
+/** 为分镜解说旁白生成 TTS（IndexTTS2 克隆音色，默认宇少） */
 async function onTtsSbNarration(sb) {
   if (!sb?.id || ttsSbNarrationIds.has(sb.id)) return
   const text = ((sbNarration.value[sb.id] ?? sb.narration) || '').toString().trim()
@@ -5612,10 +6764,19 @@ async function onTtsSbNarration(sb) {
   }
   ttsSbNarrationIds.add(sb.id)
   try {
+    await ensureIndexTtsForNarration()
     const res = await fetch('/api/v1/audio/extract', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ storyboard_id: sb.id, text, tts_kind: 'narration' }),
+      body: JSON.stringify({
+        storyboard_id: sb.id,
+        text,
+        tts_kind: 'narration',
+        provider: 'indextts',
+        voice_id: String(indexttsVoiceId.value || DEFAULT_INDEXTTS_VOICE).trim(),
+        emotion_text: String(indexttsEmotionText.value || '自然流畅的解说语气，情绪饱满').trim(),
+        speed: Number(indexttsSpeed.value) || 1.2,
+      }),
     })
     const data = await res.json()
     const businessOk = data.success === true || Number(data.code) === 200
@@ -5631,6 +6792,191 @@ async function onTtsSbNarration(sb) {
     ElMessage.error(e.message || '解说 TTS 失败')
   } finally {
     ttsSbNarrationIds.delete(sb.id)
+  }
+}
+
+function indexTtsStorageKey(suffix) {
+  const epId = currentEpisodeId.value
+  return epId ? `episode-${epId}-indextts-${suffix}` : null
+}
+
+function persistIndexTtsPrefs() {
+  const keys = [
+    ['voice', indexttsVoiceId.value],
+    ['emotion', indexttsEmotionText.value],
+    ['speed', indexttsSpeed.value],
+  ]
+  for (const [suffix, val] of keys) {
+    const k = indexTtsStorageKey(suffix)
+    if (!k) continue
+    try { localStorage.setItem(k, String(val)) } catch (_) {}
+  }
+}
+
+function loadIndexTtsPrefs() {
+  try {
+    const voice = localStorage.getItem(indexTtsStorageKey('voice'))
+    if (voice) indexttsVoiceId.value = voice
+    else indexttsVoiceId.value = DEFAULT_INDEXTTS_VOICE
+    const emotion = localStorage.getItem(indexTtsStorageKey('emotion'))
+    if (emotion) indexttsEmotionText.value = emotion
+    const speed = localStorage.getItem(indexTtsStorageKey('speed'))
+    if (speed != null && speed !== '') {
+      const s = Number(speed)
+      if (Number.isFinite(s) && s > 0) indexttsSpeed.value = s
+    }
+  } catch (_) {
+    indexttsVoiceId.value = DEFAULT_INDEXTTS_VOICE
+  }
+}
+
+async function refreshIndexTtsHealth() {
+  try {
+    const res = await aiVoicesAPI.indexttsHealth()
+    indexttsAvailable.value = !!res?.ok
+  } catch (_) {
+    indexttsAvailable.value = false
+  }
+}
+
+async function loadGsvCatalogVoices() {
+  gsvCatalogLoading.value = true
+  try {
+    const res = await aiVoicesAPI.listCloneVoices()
+    const list = res?.voices || []
+    gsvCatalogVoices.value = Array.isArray(list) ? list : []
+    const preferYushao = gsvCatalogVoices.value.find((v) => v.voice_id === DEFAULT_INDEXTTS_VOICE || v.voice_name === '宇少')
+    if (!gsvCatalogVoices.value.some((v) => v.voice_id === indexttsVoiceId.value)) {
+      indexttsVoiceId.value = preferYushao?.voice_id || gsvCatalogVoices.value[0]?.voice_id || DEFAULT_INDEXTTS_VOICE
+    }
+  } catch (_) {
+    gsvCatalogVoices.value = []
+  } finally {
+    gsvCatalogLoading.value = false
+  }
+}
+
+async function onRefreshIndexTtsVoices() {
+  await Promise.all([refreshIndexTtsHealth(), loadGsvCatalogVoices()])
+  if (gsvCatalogVoices.value.length) {
+    ElMessage.success(`已加载 ${gsvCatalogVoices.value.length} 个克隆音色`)
+  } else {
+    ElMessage.warning('未读到克隆音色，请确认 data/gptsovits/voices.json 是否存在')
+  }
+}
+
+async function onStartIndexTts() {
+  if (indexttsStarting.value) return
+  indexttsStarting.value = true
+  try {
+    ElMessage.info('正在启动 IndexTTS2，首次可能需下载模型…')
+    const ensureRes = await aiVoicesAPI.indexttsEnsure()
+    indexttsAvailable.value = !!ensureRes?.ok
+    if (!indexttsAvailable.value) {
+      throw new Error(ensureRes?.error || ensureRes?.detail || 'IndexTTS2 启动失败')
+    }
+    await loadGsvCatalogVoices()
+    ElMessage.success(ensureRes?.cuda ? 'IndexTTS2 已启动（CUDA）' : 'IndexTTS2 已启动')
+  } catch (err) {
+    indexttsAvailable.value = false
+    ElMessage.error(err.message || '启动失败')
+  } finally {
+    indexttsStarting.value = false
+  }
+}
+
+async function onUnloadIndexTts() {
+  if (indexttsUnloading.value) return
+  indexttsUnloading.value = true
+  try {
+    const res = await aiVoicesAPI.indexttsUnload()
+    indexttsAvailable.value = false
+    const killed = Number(res?.killed) || 0
+    ElMessage.success(killed > 0 ? `已卸载 IndexTTS（结束 ${killed} 个进程）` : '已卸载 IndexTTS')
+  } catch (err) {
+    ElMessage.error(err.message || '卸载失败')
+  } finally {
+    indexttsUnloading.value = false
+  }
+}
+
+async function ensureIndexTtsForNarration() {
+  if (indexttsAvailable.value) return
+  await onStartIndexTts()
+  if (!indexttsAvailable.value) {
+    throw new Error('IndexTTS2 未就绪，请先点击「启动」')
+  }
+}
+
+function openGsvAddPanel() {
+  gsvEditingId.value = ''
+  gsvForm.voice_id = ''
+  gsvForm.voice_name = ''
+  gsvForm.ref_audio_path = ''
+  gsvForm.prompt_text = ''
+  gsvPanelOpen.value = true
+}
+
+function closeGsvPanel() {
+  gsvPanelOpen.value = false
+  gsvEditingId.value = ''
+}
+
+async function onGsvFilePick(e) {
+  const file = e?.target?.files?.[0]
+  if (!file) return
+  try {
+    const res = await aiVoicesAPI.uploadRef(file)
+    gsvForm.ref_audio_path = res?.ref_audio_path || ''
+    ElMessage.success('参考音频已上传')
+  } catch (err) {
+    ElMessage.error(err.message || '上传失败')
+  }
+}
+
+async function saveGsvVoice() {
+  if (!gsvForm.voice_id.trim() || !gsvForm.ref_audio_path.trim()) {
+    ElMessage.warning('请填写音色 ID 并上传参考音频')
+    return
+  }
+  gsvSaving.value = true
+  try {
+    const saved = await aiVoicesAPI.saveCloneVoice({
+      voice_id: gsvForm.voice_id.trim(),
+      voice_name: gsvForm.voice_name.trim() || gsvForm.voice_id.trim(),
+      ref_audio_path: gsvForm.ref_audio_path.trim(),
+      prompt_text: gsvForm.prompt_text.trim(),
+    })
+    ElMessage.success('音色已保存')
+    await loadGsvCatalogVoices()
+    if (saved?.voice_id) indexttsVoiceId.value = saved.voice_id
+    persistIndexTtsPrefs()
+    closeGsvPanel()
+  } catch (err) {
+    ElMessage.error(err.message || '保存失败')
+  } finally {
+    gsvSaving.value = false
+  }
+}
+
+async function onPreviewIndexTtsVoice() {
+  if (!indexttsVoiceId.value) return
+  gsvPreviewing.value = true
+  try {
+    await ensureIndexTtsForNarration()
+    const res = await aiVoicesAPI.preview({
+      text: '这是一段旁白试听，用于感受当前音色和感情效果。',
+      voice_id: indexttsVoiceId.value,
+      emotion_text: indexttsEmotionText.value,
+    })
+    const url = res?.audio_url || (res?.local_path ? `/static/${res.local_path}` : '')
+    if (!url) throw new Error('未返回试听音频')
+    const audio = new Audio(url)
+    await audio.play()
+  } catch (err) {
+    ElMessage.error(err.message || '试听失败')
+  } finally {
+    gsvPreviewing.value = false
   }
 }
 
@@ -5899,12 +7245,230 @@ function onUniversalSegmentToGrokVideoTags(sb) {
   ElMessage.success('已改为 Grok 视频占位符格式（<IMAGE_N>）')
 }
 
+/** 是否已是 ArcReel 分栏提示词（前端粗判，与后端 isArcReelStructuredPrompt 对齐） */
+function isArcReelStructuredText(text) {
+  const t = (text || '').toString().trim()
+  if (!t) return false
+  return (
+    /^Action:/m.test(t) &&
+    /^(Action|Camera_Motion|Ambiance_Audio|Dialogue|Voice_Profiles):/m.test(t)
+  )
+}
+
+const classicArcReelConvertingIds = reactive(new Set())
+
+function applyUniversalArcReelResult(sb, text) {
+  sbUniversalSegmentText.value = { ...sbUniversalSegmentText.value, [sb.id]: text }
+  const list = store.currentEpisode?.storyboards
+  if (Array.isArray(list)) {
+    const row = list.find((x) => Number(x.id) === Number(sb.id))
+    if (row) {
+      row.universal_segment_text = text
+      row.creation_mode = 'universal'
+    }
+  }
+  sbCreationMode.value = { ...sbCreationMode.value, [sb.id]: 'universal' }
+}
+
+function applyClassicArcReelResult(sb, text) {
+  const list = store.currentEpisode?.storyboards
+  if (Array.isArray(list)) {
+    const row = list.find((x) => Number(x.id) === Number(sb.id))
+    if (row) {
+      row.video_prompt = text
+      row.creation_mode = 'classic'
+    }
+  }
+  if (videoParamsTarget.value && Number(videoParamsTarget.value.id) === Number(sb.id)) {
+    videoParamsTarget.value = { ...videoParamsTarget.value, video_prompt: text, creation_mode: 'classic' }
+  }
+  sbCreationMode.value = { ...sbCreationMode.value, [sb.id]: 'classic' }
+}
+
+/**
+ * 单镜转为 ArcReel 结构化。
+ * @returns {'converted'|'skipped'|'empty'}
+ */
+async function convertStoryboardToArcReel(sb, { quiet = false } = {}) {
+  if (!sb?.id) return 'empty'
+    if (isSbUniversalMode(sb.id)) {
+    const raw = (sbUniversalSegmentText.value[sb.id] ?? sb.universal_segment_text ?? '').toString()
+    if (!raw.trim()) {
+      if (!quiet) ElMessage.warning('请先填写或生成片段描述')
+      return 'empty'
+    }
+    const narr = (sbNarration.value[sb.id] ?? sb.narration ?? '').toString().trim()
+    const dlg = (sbDialogue.value[sb.id] ?? sb.dialogue ?? '').toString().trim()
+    const hasVoDialogue = /Speaker:\s*画外音/m.test(raw) || /画外音说\s*\{/.test(raw)
+    // 已是 ArcReel 且已有画外音 Dialogue，或无旁白可补时，才跳过
+    if (isArcReelStructuredText(raw) && (!narr || hasVoDialogue) && (!dlg || /Speaker:/m.test(raw))) {
+      return 'skipped'
+    }
+    if (generatingUniversalSegmentIds.has(sb.id)) return 'skipped'
+    generatingUniversalSegmentIds.add(sb.id)
+    try {
+      const data = await storyboardsAPI.convertUniversalSegmentToArcReelYaml(sb.id, {
+        text: raw,
+        narration: narr,
+        dialogue: dlg,
+      })
+      const text = (data?.universal_segment_text ?? '').toString().trim()
+      if (!text) {
+        if (!quiet) ElMessage.warning('转换结果为空，请重试')
+        return 'empty'
+      }
+      applyUniversalArcReelResult(sb, text)
+      if (!quiet) {
+        ElMessage.success('已改为 ArcReel 结构化提示词（Dialogue / Action 分栏）；生成视频将提交此文案')
+      }
+      return 'converted'
+    } finally {
+      generatingUniversalSegmentIds.delete(sb.id)
+    }
+  }
+
+  const hasClassicSource = !!(
+    (sb.video_prompt || '').toString().trim() ||
+    (sbAction.value[sb.id] ?? sb.action ?? '').toString().trim() ||
+    (sbDialogue.value[sb.id] ?? sb.dialogue ?? '').toString().trim() ||
+    (sbNarration.value[sb.id] ?? sb.narration ?? '').toString().trim()
+  )
+  if (!hasClassicSource) {
+    if (!quiet) ElMessage.warning('请先填写动作/对白或生成视频提示词')
+    return 'empty'
+  }
+  if (isArcReelStructuredText(sb.video_prompt)) return 'skipped'
+  if (classicArcReelConvertingIds.has(sb.id)) return 'skipped'
+  classicArcReelConvertingIds.add(sb.id)
+  try {
+    const data = await storyboardsAPI.convertClassicToArcReelYaml(sb.id, {
+      action: (sbAction.value[sb.id] ?? sb.action ?? '').toString(),
+      dialogue: (sbDialogue.value[sb.id] ?? sb.dialogue ?? '').toString(),
+      narration: (sbNarration.value[sb.id] ?? sb.narration ?? '').toString(),
+      result: (sbResult.value[sb.id] ?? sb.result ?? '').toString(),
+      atmosphere: (sbAtmosphere.value[sb.id] ?? sb.atmosphere ?? '').toString(),
+      location: (sbLocation.value[sb.id] ?? sb.location ?? '').toString(),
+      time: (sbTime.value[sb.id] ?? sb.time ?? '').toString(),
+      title: (sbTitle.value[sb.id] ?? sb.title ?? '').toString(),
+      movement: (sbMovement.value[sb.id] ?? sb.movement ?? '').toString(),
+      shot_type: (sbShotType.value[sb.id] ?? sb.shot_type ?? '').toString(),
+      video_prompt: (sb.video_prompt || '').toString(),
+    })
+    const text = (data?.video_prompt ?? '').toString().trim()
+    if (!text) {
+      if (!quiet) ElMessage.warning('转换结果为空，请先填写动作/对白或生成视频提示词')
+      return 'empty'
+    }
+    applyClassicArcReelResult(sb, text)
+    if (!quiet) {
+      ElMessage.success('已改为 ArcReel 结构化提示词；经典模式生视频将提交此文案')
+    }
+    return 'converted'
+  } finally {
+    classicArcReelConvertingIds.delete(sb.id)
+  }
+}
+
+/** 全能片段 → ArcReel drama YAML（Dialogue/Action 分栏），生视频时原样提交 */
+async function onUniversalSegmentToArcReelStructured(sb) {
+  if (!sb?.id || generatingUniversalSegmentIds.has(sb.id)) return
+  try {
+    await convertStoryboardToArcReel(sb)
+  } catch (e) {
+    ElMessage.error(e.message || '转换失败')
+  }
+}
+
+/** 经典分镜 → ArcReel drama YAML，写回 video_prompt（保持经典模式） */
+async function onClassicVideoPromptToArcReel(sb) {
+  if (!sb?.id || classicArcReelConvertingIds.has(sb.id)) return
+  if (isSbUniversalMode(sb.id)) {
+    ElMessage.info('当前为全能模式，请用片段描述菜单中的「改为 ArcReel 结构化」')
+    return
+  }
+  try {
+    await convertStoryboardToArcReel(sb)
+  } catch (e) {
+    ElMessage.error(e.message || '转换失败')
+  }
+}
+
+/** 本集分镜一键转为 ArcReel 结构化提示词 */
+async function onBatchConvertToArcReel() {
+  if (batchArcReelRunning.value || !currentEpisodeId.value) return
+  const list = (storyboards.value || [])
+    .slice()
+    .sort((a, b) => (Number(a.storyboard_number) || 0) - (Number(b.storyboard_number) || 0))
+  if (!list.length) {
+    ElMessage.warning('请先生成分镜')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `将本集 ${list.length} 条分镜提示词转为 ArcReel 结构化（Action / Dialogue / Voice_Profiles）。已是 ArcReel 或无内容的镜头会跳过。`,
+      '一键转 ArcReel',
+      { type: 'info', confirmButtonText: '开始转换', cancelButtonText: '取消' }
+    )
+  } catch (_) {
+    return
+  }
+
+  batchArcReelRunning.value = true
+  batchArcReelStopping.value = false
+  batchArcReelErrors.value = []
+  batchArcReelProgress.value = { current: 0, total: list.length, failed: 0, skipped: 0, label: '' }
+  let converted = 0
+  let skipped = 0
+  let failed = 0
+  try {
+    for (let i = 0; i < list.length; i++) {
+      if (batchArcReelStopping.value) break
+      const sb = list[i]
+      const label = '#' + (sb.storyboard_number ?? i + 1) + (sb.title ? ' ' + String(sb.title).slice(0, 20) : '')
+      batchArcReelProgress.value = {
+        current: i + 1,
+        total: list.length,
+        failed,
+        skipped,
+        label,
+      }
+      try {
+        const status = await convertStoryboardToArcReel(sb, { quiet: true })
+        if (status === 'converted') converted++
+        else if (status === 'skipped') skipped++
+        else {
+          skipped++
+        }
+      } catch (e) {
+        failed++
+        batchArcReelErrors.value.push(`${label}: ${e.message || '转换失败'}`)
+      }
+      batchArcReelProgress.value = {
+        ...batchArcReelProgress.value,
+        failed,
+        skipped,
+      }
+    }
+    if (batchArcReelStopping.value) {
+      ElMessage.info(`已停止：成功 ${converted}，跳过 ${skipped}，失败 ${failed}`)
+    } else if (failed === 0) {
+      ElMessage.success(`ArcReel 转换完成：成功 ${converted}，跳过 ${skipped}`)
+    } else {
+      ElMessage.warning(`ArcReel 转换结束：成功 ${converted}，跳过 ${skipped}，失败 ${failed}`)
+    }
+  } finally {
+    batchArcReelRunning.value = false
+    batchArcReelStopping.value = false
+  }
+}
+
 function onUniversalSegmentPromptMenu(sb, cmd) {
   if (cmd === 'generate') onGenerateUniversalSegmentPrompt(sb, {})
   else if (cmd === 'generate-force') onGenerateUniversalSegmentPrompt(sb, { forceWithoutReferenceImages: true })
   else if (cmd === 'polish') onPolishUniversalSegmentPromptStream(sb, {})
   else if (cmd === 'polish-force') onPolishUniversalSegmentPromptStream(sb, { forceWithoutReferenceImages: true })
   else if (cmd === 'to-grok-video-tags') onUniversalSegmentToGrokVideoTags(sb)
+  else if (cmd === 'to-arcreel-structured') onUniversalSegmentToArcReelStructured(sb)
 }
 
 /** 全能模式：根据当前分镜结构化字段流式生成片段描述（NDJSON） */
@@ -6101,8 +7665,22 @@ function buildSbVideoPromptForApi(sb, { preferClassicPrompt = false } = {}) {
   const seg = sbUniversalSegmentTrimmed(sb)
   if (preferClassicPrompt) return vp || seg
   if (isSbUniversalMode(sb.id)) {
-    if (seg) return seg
-    return vp
+    let text = seg || vp
+    const isArcReel = isArcReelStructuredText(text)
+    // ArcReel drama YAML：勿追加全能「音轨硬约束」；负向尾由后端对齐 ArcReel 注入
+    if (
+      text &&
+      !isArcReel &&
+      !text.includes('【音轨硬约束】') &&
+      !text.includes('【音轨】') &&
+      !text.includes('禁止出现：BGM、文字字幕、水印。') &&
+      !text.includes('成片音轨硬性约束') &&
+      !text.includes('仅允许本段用 @图片N 说')
+    ) {
+      text +=
+        '\n\n【音轨硬约束】成片人声仅来自【分镜】里角色说话句式中花括号内的原文（一句一段，勿复述）；禁止输出【台词】栏；禁止编造额外对白/旁白/闲语；禁止BGM；【环境音】可写低电平现场环境声与动作音效且不得压过人声；除说话句式本身外禁止冗余口型/开口/双唇描写。'
+    }
+    return text
   }
   return vp
 }
@@ -6606,7 +8184,8 @@ async function onGenerateSbVideo(sb) {
       first_frame_url: universalOmniApi ? undefined : (vFirst || absoluteUrl || undefined),
       last_frame_url: universalOmniApi ? undefined : vLast,
       reference_image_urls: referenceUrls,
-      style: getSelectedStyle(),
+      // 视频优先中文画风，避免英文 style 注入【风格锚点】导致口播中英混说
+      style: getSelectedStylePromptZh() || getSelectedStyle(),
       aspect_ratio: projectAspectRatio.value || '16:9',
       resolution: videoResolution.value || undefined,
       duration: getSbVideoDurationForApi(sb),
@@ -6788,11 +8367,13 @@ async function onGenerateStoryboard() {
   try {
     const res = await dramaAPI.generateStoryboard(epId, {
       model: undefined,
-      style: getSelectedStyle(),
+      // 重新生成分镜用中文画风，避免全能【风格锚点】掺英文
+      style: getSelectedStylePromptZh() || getSelectedStyle(),
       storyboard_count: getStoryboardCountForApi(),
       video_duration: getVideoDurationForApi(),
       aspect_ratio: projectAspectRatio.value || '16:9',
       include_narration: !!storyboardIncludeNarration.value,
+      static_dialogue: !!storyboardStaticDialogue.value,
       universal_omni_storyboard: !!storyboardUniversalOmni.value,
     })
     const taskId = res?.task_id ?? (typeof res === 'string' ? res : null)
@@ -6880,7 +8461,7 @@ async function onInsertStoryboardBefore(sb) {
 }
 
 async function startBatchImageGeneration() {
-  if (!currentEpisodeId.value || batchImageRunning.value || pipelineRunning.value) return
+  if (!currentEpisodeId.value || batchImageRunning.value || batchImageDeleting.value || batchArcReelRunning.value || pipelineRunning.value) return
   batchImageErrors.value = []
   batchImageStopping.value = false
   batchImageRunning.value = true
@@ -6890,9 +8471,15 @@ async function startBatchImageGeneration() {
       await loadStoryboardMedia()
     }
     const boards = store.storyboards || []
-    const todo = boards.filter((sb) => !hasSbImage(sb))
+    // 全能模式不需要经典分镜主图（生视频走场景/角色/道具参考图）
+    const todo = boards.filter((sb) => !isSbUniversalMode(sb.id) && !hasSbImage(sb))
     if (todo.length === 0) {
-      ElMessage.info('所有分镜均已有图片，无需重新生成')
+      const allUniversal = boards.length > 0 && boards.every((sb) => isSbUniversalMode(sb.id))
+      ElMessage.info(
+        allUniversal
+          ? '当前均为全能模式分镜，无需生成分镜图，请直接生成视频'
+          : '所有分镜均已有图片，无需重新生成'
+      )
       return
     }
     batchImageProgress.value = { current: 0, total: todo.length, failed: 0 }
@@ -6957,8 +8544,99 @@ async function startBatchImageGeneration() {
   }
 }
 
+/** 批量删除本集全部分镜图（含历史图），并清空首/尾帧绑定 */
+async function startBatchDeleteImages() {
+  if (!currentEpisodeId.value || batchImageDeleting.value || batchImageRunning.value || batchVideoRunning.value || batchArcReelRunning.value || pipelineRunning.value) return
+  try {
+    await ElMessageBox.confirm(
+      '将删除本集所有分镜的图片（含历史图与首尾帧），此操作不可恢复。确定继续？',
+      '批量删除分镜图',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        distinguishCancelAndClose: true,
+      }
+    )
+  } catch {
+    return
+  }
+
+  batchImageDeleting.value = true
+  try {
+    await loadStoryboardMedia()
+    const boards = store.storyboards || []
+    let deleted = 0
+    let failed = 0
+    let clearedBoards = 0
+
+    for (const sb of boards) {
+      const list = Array.isArray(sbImages.value[sb.id]) ? sbImages.value[sb.id] : []
+      const ids = [...new Set(list.map((img) => img?.id).filter((id) => id != null))]
+      const needClear =
+        ids.length > 0 ||
+        hasSbImage(sb) ||
+        !!(sb.composed_image || sb.image_url || sb.first_frame_image_id || sb.last_frame_image_id || sb.last_frame_image_url || sb.last_frame_local_path)
+
+      for (const imageGenId of ids) {
+        try {
+          await imagesAPI.delete(imageGenId)
+          deleted++
+        } catch (e) {
+          failed++
+          console.warn('[批量删除分镜图] 删除失败', { storyboardId: sb.id, imageGenId, err: e?.message })
+        }
+      }
+
+      // 无论是否还有 image_generations，都清空分镜上的图字段，避免残留 URL 继续显示
+      if (needClear) {
+        try {
+          await storyboardsAPI.update(sb.id, {
+            image_url: null,
+            local_path: null,
+            composed_image: null,
+            first_frame_image_id: null,
+            last_frame_image_id: null,
+            last_frame_image_url: null,
+            last_frame_local_path: null,
+          })
+          clearedBoards++
+        } catch (e) {
+          console.warn('[批量删除分镜图] 清空绑定失败', { storyboardId: sb.id, err: e?.message })
+        }
+      }
+
+      if (sbSelectedImgId.value[sb.id] != null) {
+        const next = { ...sbSelectedImgId.value }
+        delete next[sb.id]
+        sbSelectedImgId.value = next
+      }
+      if (sbSelectedLastImgId.value[sb.id] != null) {
+        const next = { ...sbSelectedLastImgId.value }
+        delete next[sb.id]
+        sbSelectedLastImgId.value = next
+      }
+    }
+
+    await loadDrama()
+    await loadStoryboardMedia()
+
+    if (deleted === 0 && failed === 0 && clearedBoards === 0) {
+      ElMessage.info('当前没有可删除的分镜图')
+    } else if (failed === 0) {
+      ElMessage.success(deleted > 0 ? `已删除 ${deleted} 张分镜图` : `已清空 ${clearedBoards} 条分镜的图片绑定`)
+    } else {
+      ElMessage.warning(`删除完成：成功 ${deleted} 张，失败 ${failed} 张`)
+    }
+  } catch (e) {
+    ElMessage.error(e?.message || '批量删除失败')
+  } finally {
+    batchImageDeleting.value = false
+  }
+}
+
 async function startBatchVideoGeneration() {
-  if (!currentEpisodeId.value || batchVideoRunning.value || pipelineRunning.value) return
+  if (!currentEpisodeId.value || batchVideoRunning.value || batchImageDeleting.value || batchArcReelRunning.value || pipelineRunning.value) return
   batchVideoErrors.value = []
   batchVideoStopping.value = false
   batchVideoRunning.value = true
@@ -7051,7 +8729,7 @@ async function startBatchVideoGeneration() {
             first_frame_url: vFirst,
             last_frame_url: vLast,
             reference_image_urls: refUrls,
-            style: getSelectedStyle(),
+            style: getSelectedStylePromptZh() || getSelectedStyle(),
             aspect_ratio: projectAspectRatio.value || '16:9',
             resolution: videoResolution.value || undefined,
             duration: getSbVideoDurationForApi(sb),
@@ -7103,6 +8781,10 @@ function getFinalizeMergeOptions() {
     burn_narration_subtitles: !!videoSubtitle.value,
     burn_dialogue_audio: !!videoBurnDialogue.value,
     watermark_text: videoWatermark.value ? String(videoWatermarkText.value || '').trim().slice(0, 200) : '',
+    use_indextts_narration: !!videoSubtitle.value,
+    indextts_voice: String(indexttsVoiceId.value || DEFAULT_INDEXTTS_VOICE).trim(),
+    indextts_emotion: String(indexttsEmotionText.value || '自然流畅的解说语气，情绪饱满').trim(),
+    indextts_speed: Number(indexttsSpeed.value) || 1.2,
   }
 }
 
@@ -7471,11 +9153,12 @@ async function runOneClickPipeline(textOnly = false) {
       const sbRefreshTimer = setInterval(refreshStoryboardsOnly, 2000)
       try {
         const res = await dramaAPI.generateStoryboard(episodeId, {
-          style,
+          style: getSelectedStylePromptZh() || style,
           aspect_ratio: projectAspectRatio.value || '16:9',
           storyboard_count: getStoryboardCountForApi(),
           video_duration: getVideoDurationForApi(),
           include_narration: !!storyboardIncludeNarration.value,
+          static_dialogue: !!storyboardStaticDialogue.value,
           universal_omni_storyboard: !!storyboardUniversalOmni.value,
         })
         const taskId = res?.task_id ?? (typeof res === 'string' ? res : null)
@@ -7647,63 +9330,69 @@ async function runOneClickPipeline(textOnly = false) {
     }
 
     // ════════════════════════════════════════════════════════
-    // ⏱ 倒计时 30 秒：请浏览角色/场景/道具图，确认后开始生成分镜图
+    // ⏱ 倒计时 30 秒：请浏览角色/场景/道具图，确认后继续
     // ════════════════════════════════════════════════════════
-    await runPipelineCountdown(30, '角色、场景、道具图片生成完毕，请浏览确认效果。倒计时结束后将开始生成分镜图（消耗较多 Token）。')
-    await checkPause()
+    await loadStoryboardMedia()
+    boards = store.storyboards || []
+    const boardsNeedClassicImg = boards.filter((sb) => !isSbUniversalMode(sb.id) && !hasSbImage(sb))
+    if (boardsNeedClassicImg.length > 0) {
+      await runPipelineCountdown(30, '角色、场景、道具图片生成完毕，请浏览确认效果。倒计时结束后将开始生成分镜图（消耗较多 Token）。')
+      await checkPause()
 
-    // ════════════════════════════════════════════════════════
-    // 阶段三：分镜图生成（较高消耗）
-    // ════════════════════════════════════════════════════════
+      // ════════════════════════════════════════════════════════
+      // 阶段三：分镜图生成（较高消耗；仅经典模式）
+      // ════════════════════════════════════════════════════════
 
-    // 步骤 8：生成分镜图
-    {
-      await loadStoryboardMedia()
-      boards = store.storyboards || []
-      const boardsWithoutImg = boards.filter((sb) => !hasSbImage(sb))
-      const concurrency = pipelineConcurrency.value
-      setPipelineStep(8, `生成分镜图（${boardsWithoutImg.length} 个，并发 ${concurrency}）...`)
-      const { paused } = await runConcurrently(boardsWithoutImg, concurrency, async (sb) => {
-        await checkPause()
-        generatingSbImageIds.add(sb.id)
-        try {
-          const stepName = '分镜图 #' + (sb.storyboard_number ?? sb.id)
-          const ok = await pipelineWithRetry(stepName, async () => {
-            const useFirstLast = storyboardUseFirstLastFrame.value && !isSbUniversalMode(sb.id)
-            let prompt = sb.polished_prompt || sb.image_prompt || sb.description || ''
-            let frameTypeForCreate = undefined
-            if (useFirstLast) {
-              prompt = await ensureProfessionalFramePrompt(sb, 'first')
-              frameTypeForCreate = 'storyboard_first'
-            }
-            const res = await imagesAPI.create({
-              storyboard_id: sb.id,
-              drama_id: dramaIdVal,
-              prompt,
-              model: undefined,
-              style,
-              frame_type: frameTypeForCreate,
-              aspect_ratio: projectAspectRatio.value || '16:9',
+      // 步骤 8：生成分镜图
+      {
+        const concurrency = pipelineConcurrency.value
+        setPipelineStep(8, `生成分镜图（${boardsNeedClassicImg.length} 个，并发 ${concurrency}）...`)
+        const { paused } = await runConcurrently(boardsNeedClassicImg, concurrency, async (sb) => {
+          await checkPause()
+          generatingSbImageIds.add(sb.id)
+          try {
+            const stepName = '分镜图 #' + (sb.storyboard_number ?? sb.id)
+            const ok = await pipelineWithRetry(stepName, async () => {
+              const useFirstLast = storyboardUseFirstLastFrame.value && !isSbUniversalMode(sb.id)
+              let prompt = sb.polished_prompt || sb.image_prompt || sb.description || ''
+              let frameTypeForCreate = undefined
+              if (useFirstLast) {
+                prompt = await ensureProfessionalFramePrompt(sb, 'first')
+                frameTypeForCreate = 'storyboard_first'
+              }
+              const res = await imagesAPI.create({
+                storyboard_id: sb.id,
+                drama_id: dramaIdVal,
+                prompt,
+                model: undefined,
+                style,
+                frame_type: frameTypeForCreate,
+                aspect_ratio: projectAspectRatio.value || '16:9',
+              })
+              if (res?.task_id) {
+                const result = await pollTaskWithPause(res.task_id, () => loadSingleStoryboardMedia(sb.id))
+                if (result?.paused) return { paused: true }
+                if (result?.error) throw new Error(result.error)
+              } else await loadSingleStoryboardMedia(sb.id)
             })
-            if (res?.task_id) {
-              const result = await pollTaskWithPause(res.task_id, () => loadSingleStoryboardMedia(sb.id))
-              if (result?.paused) return { paused: true }
-              if (result?.error) throw new Error(result.error)
-            } else await loadSingleStoryboardMedia(sb.id)
-          })
-          if (ok && typeof ok === 'object' && ok.paused) return { paused: true }
-        } finally {
-          generatingSbImageIds.delete(sb.id)
-        }
-      }, { getLabel: (sb) => '分镜图 #' + (sb.storyboard_number ?? sb.id) })
-      if (paused) { await waitForResume() }
-    }
+            if (ok && typeof ok === 'object' && ok.paused) return { paused: true }
+          } finally {
+            generatingSbImageIds.delete(sb.id)
+          }
+        }, { getLabel: (sb) => '分镜图 #' + (sb.storyboard_number ?? sb.id) })
+        if (paused) { await waitForResume() }
+      }
 
-    // ════════════════════════════════════════════════════════
-    // ⏱ 倒计时 20 秒：请浏览分镜图，确认后开始生成分镜视频
-    // ════════════════════════════════════════════════════════
-    await runPipelineCountdown(20, '分镜图生成完毕，请浏览确认图片效果。倒计时结束后将开始生成分镜视频（消耗最多 Token）。')
-    await checkPause()
+      // ════════════════════════════════════════════════════════
+      // ⏱ 倒计时 20 秒：请浏览分镜图，确认后开始生成分镜视频
+      // ════════════════════════════════════════════════════════
+      await runPipelineCountdown(20, '分镜图生成完毕，请浏览确认图片效果。倒计时结束后将开始生成分镜视频（消耗最多 Token）。')
+      await checkPause()
+    } else {
+      setPipelineStep(8, '全能模式跳过分镜图，直接进入视频生成')
+      await runPipelineCountdown(15, '角色、场景、道具图片生成完毕。全能模式不生成分镜主图，倒计时结束后将开始生成分镜视频。')
+      await checkPause()
+    }
 
     // ════════════════════════════════════════════════════════
     // 阶段四：分镜视频 & 合集（最高消耗）
@@ -7748,7 +9437,7 @@ async function runOneClickPipeline(textOnly = false) {
               first_frame_url: vFirst,
               last_frame_url: vLast,
               reference_image_urls: refUrls,
-              style,
+              style: getSelectedStylePromptZh() || style,
               aspect_ratio: projectAspectRatio.value || '16:9',
               resolution: videoResolution.value || undefined,
               duration: getSbVideoDurationForApi(sb),
@@ -7983,10 +9672,12 @@ async function runRepairPipeline() {
       pipelineCurrentStep.value = '正在生成分镜...'
       try {
         const res = await dramaAPI.generateStoryboard(episodeId, {
+          style: getSelectedStylePromptZh() || style,
           aspect_ratio: projectAspectRatio.value || '16:9',
           storyboard_count: getStoryboardCountForApi(),
           video_duration: getVideoDurationForApi(),
           include_narration: !!storyboardIncludeNarration.value,
+          static_dialogue: !!storyboardStaticDialogue.value,
           universal_omni_storyboard: !!storyboardUniversalOmni.value,
         })
         const taskId = res?.task_id ?? (typeof res === 'string' ? res : null)
@@ -8015,10 +9706,10 @@ async function runRepairPipeline() {
       })
       await loadDrama()
     }
-    // 先拉取分镜图片/视频列表，再批量生成分镜图（并发）
+    // 先拉取分镜图片/视频列表；经典模式才批量生成分镜图（全能模式跳过）
     await loadStoryboardMedia()
-    const boardsWithoutImg = boards.filter((sb) => !hasSbImage(sb))
-    {
+    const boardsWithoutImg = boards.filter((sb) => !isSbUniversalMode(sb.id) && !hasSbImage(sb))
+    if (boardsWithoutImg.length > 0) {
       const concurrency = pipelineConcurrency.value
       pipelineCurrentStep.value = `正在生成分镜图（并发${concurrency}）...`
       const { paused } = await runConcurrently(boardsWithoutImg, concurrency, async (sb) => {
@@ -8050,6 +9741,8 @@ async function runRepairPipeline() {
         if (ok && typeof ok === 'object' && ok.paused) return { paused: true }
       }, { getLabel: (sb) => '分镜图 #' + (sb.storyboard_number ?? sb.id) })
       if (paused) { await waitForResume() }
+    } else if ((store.storyboards || []).some((sb) => isSbUniversalMode(sb.id))) {
+      pipelineCurrentStep.value = '全能模式跳过分镜图，继续生成视频...'
     }
     await loadStoryboardMedia()
     const boards2 = (store.storyboards || []).filter((sb) => {
@@ -8162,10 +9855,22 @@ function applyRouteToStore() {
 onMounted(async () => {
   loadPipelineConcurrency()
   applyRouteToStore()
+  loadIndexTtsPrefs()
+  await Promise.all([refreshIndexTtsHealth(), loadGsvCatalogVoices()])
 })
 
 watch(() => route.params.id, () => {
   applyRouteToStore()
+})
+
+watch(currentEpisodeId, () => {
+  loadIndexTtsPrefs()
+  loadCoveragePlates()
+})
+
+watch(storyboardStaticDialogue, (on) => {
+  if (on) loadCoveragePlates()
+  else coveragePlates.value = []
 })
 
 // 剧本分集切换时同步 URL query 参数（?episode=<episode_id>），使刷新/分享页面仍保持当前选中集
@@ -9527,6 +11232,7 @@ html.light .asset-cover-actions { border-top-color: rgba(139,92,246,0.1); }
 .extra-thumb:hover .thumb-preview-btn { opacity: 1; }
 .sb-img-thumb:hover .extra-thumb-remove,
 .sb-img-thumb:hover .thumb-preview-btn { opacity: 1; }
+.sb-video-thumb:hover .extra-thumb-remove { opacity: 1; }
 html.light .extra-images-strip { background: rgba(139,92,246,0.05); }
 .empty-tip {
   color: #5a5a66;
@@ -10550,6 +12256,270 @@ html.light .sb-video-placeholder {
 html.light .sb-narration-export-row :deep(.el-checkbox__label) {
   color: #374151;
 }
+.sb-coverage-hint-text {
+  font-size: 12px;
+  color: #94a3b8;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sb-coverage-gallery {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.35);
+}
+html.light .sb-coverage-gallery {
+  background: #f8fafc;
+  border-color: #e2e8f0;
+}
+.sb-coverage-gallery-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.sb-coverage-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #c4b5fd;
+  margin-right: 4px;
+}
+html.light .sb-coverage-progress {
+  color: #6d28d9;
+}
+.sb-coverage-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(167, 139, 250, 0.25);
+  border-top-color: #a78bfa;
+  border-radius: 50%;
+  animation: sb-coverage-spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+.sb-coverage-spinner--lg {
+  width: 28px;
+  height: 28px;
+  border-width: 3px;
+}
+@keyframes sb-coverage-spin {
+  to { transform: rotate(360deg); }
+}
+.sb-coverage-gallery-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e2e8f0;
+  margin-right: 4px;
+}
+html.light .sb-coverage-gallery-title {
+  color: #334155;
+}
+.sb-coverage-gallery-empty {
+  font-size: 12px;
+  color: #94a3b8;
+  padding: 8px 0;
+}
+.sb-coverage-gallery-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.sb-coverage-card {
+  width: 260px;
+  cursor: default;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(2, 6, 23, 0.4);
+  transition: border-color 0.15s ease, box-shadow 0.25s ease, transform 0.25s ease;
+}
+.sb-coverage-card:hover {
+  border-color: #a78bfa;
+}
+.sb-coverage-card.is-failed {
+  opacity: 0.85;
+  border-color: rgba(248, 113, 113, 0.5);
+}
+.sb-coverage-card.is-pending {
+  opacity: 0.85;
+}
+.sb-coverage-card.is-generating {
+  border-color: rgba(167, 139, 250, 0.65);
+  box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.25);
+}
+.sb-coverage-card.is-draft {
+  border-color: rgba(250, 204, 21, 0.45);
+}
+.sb-coverage-card.is-just-done {
+  animation: sb-coverage-pop 0.55s ease;
+  border-color: #34d399;
+}
+@keyframes sb-coverage-pop {
+  0% { transform: scale(0.96); box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.5); }
+  60% { transform: scale(1.02); box-shadow: 0 0 0 6px rgba(52, 211, 153, 0); }
+  100% { transform: scale(1); }
+}
+html.light .sb-coverage-card {
+  background: #fff;
+  border-color: #e2e8f0;
+}
+.sb-coverage-card-img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #0f172a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+.sb-coverage-card-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  cursor: pointer;
+}
+.sb-coverage-gen-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  color: #c4b5fd;
+  font-size: 12px;
+  background:
+    linear-gradient(110deg, rgba(15, 23, 42, 0.2) 25%, rgba(124, 58, 237, 0.18) 37%, rgba(15, 23, 42, 0.2) 63%);
+  background-size: 200% 100%;
+  animation: sb-coverage-shimmer 1.4s ease infinite;
+}
+@keyframes sb-coverage-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.sb-coverage-card-empty {
+  font-size: 12px;
+  color: #94a3b8;
+}
+.sb-coverage-card-label {
+  font-size: 12px;
+  padding: 6px 8px 2px;
+  color: #e2e8f0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+html.light .sb-coverage-card-label {
+  color: #334155;
+}
+.sb-coverage-ver-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.2);
+  color: #c4b5fd;
+}
+html.light .sb-coverage-ver-badge {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+.sb-coverage-card-prompt {
+  padding: 4px 8px 0;
+}
+.sb-coverage-card-prompt :deep(textarea) {
+  font-size: 11px;
+  line-height: 1.4;
+}
+.sb-coverage-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 4px 6px 8px;
+}
+.sb-coverage-history-head {
+  font-size: 13px;
+  margin-bottom: 12px;
+  color: #cbd5e1;
+}
+.sb-coverage-history-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  max-height: 60vh;
+  overflow: auto;
+}
+.sb-coverage-history-card {
+  width: 200px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 6px;
+  padding: 8px;
+  background: rgba(2, 6, 23, 0.35);
+}
+html.light .sb-coverage-history-card {
+  background: #fff;
+  border-color: #e2e8f0;
+}
+.sb-coverage-history-meta {
+  font-size: 11px;
+  color: #94a3b8;
+  margin: 6px 0 4px;
+}
+.sb-coverage-history-prompt {
+  font-size: 11px;
+  color: #94a3b8;
+  line-height: 1.35;
+  margin-bottom: 8px;
+  min-height: 2.7em;
+}
+.sb-coverage-history-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sb-coverage-template-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(124, 58, 237, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.35);
+}
+.sb-coverage-template-label {
+  font-size: 12px;
+  color: #c4b5fd;
+  flex-shrink: 0;
+}
+html.light .sb-coverage-template-label {
+  color: #6d28d9;
+}
+.sb-coverage-template-thumb {
+  width: 72px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 4px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.sb-coverage-template-name {
+  font-size: 12px;
+  color: #cbd5e1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+html.light .sb-coverage-template-name {
+  color: #475569;
+}
 .sb-export-srt-btn.el-button--primary.is-plain {
   --el-button-bg-color: rgba(124, 58, 237, 0.75);
   --el-button-border-color: #a78bfa;
@@ -10565,6 +12535,64 @@ html.light .sb-export-srt-btn.el-button--primary.is-plain {
   --el-button-hover-text-color: #fff;
   --el-button-hover-bg-color: #6d28d9;
   --el-button-hover-border-color: #5b21b6;
+}
+.sb-indextts-block {
+  width: 100%;
+  flex: 1 1 100%;
+  margin: 8px 0 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(167, 139, 250, 0.28);
+  border-radius: 10px;
+  background: rgba(124, 58, 237, 0.08);
+}
+html.light .sb-indextts-block {
+  border-color: rgba(109, 40, 217, 0.22);
+  background: rgba(124, 58, 237, 0.05);
+}
+.sb-indextts-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.sb-indextts-title-row strong {
+  font-size: 0.9rem;
+  color: #e9d5ff;
+}
+html.light .sb-indextts-title-row strong {
+  color: #5b21b6;
+}
+.sb-indextts-count {
+  font-size: 12px;
+  color: #a1a1aa;
+}
+.sb-indextts-count--warn {
+  color: #fbbf24;
+}
+.sb-indextts-emotion {
+  width: 100%;
+  margin-top: 6px;
+}
+.sb-indextts-config {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 4px 0 2px;
+}
+.sb-indextts-clone-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
 }
 .sb-narration-actions {
   display: flex;

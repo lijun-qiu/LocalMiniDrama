@@ -71,5 +71,16 @@ export const dramaAPI = {
   },
   importExample(filename) {
     return request.post('/dramas/import-example', { filename })
+  },
+  /** 画外音 / 旁白 Seedance 2.0 音色参考上传 */
+  narrationSd2VoiceUpload(dramaId, file) {
+    const form = new FormData()
+    form.append('file', file)
+    return request.post(`/dramas/${dramaId}/narration-sd2-voice-upload`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  },
+  narrationSd2VoiceRefresh(dramaId) {
+    return request.post(`/dramas/${dramaId}/narration-sd2-voice-refresh`, {})
   }
 }

@@ -9,9 +9,46 @@ const taskService = require('./taskService');
 const { loadConfig } = require('../config');
 const { postJSONWithTimeout } = require('./aiClient');
 const seedance2AssetGuards = require('../utils/seedance2AssetGuards');
+const { getApiKeyPool } = require('../utils/apiKeyPool');
 
 /** 图生 POST 使用 Node http(s)，默认 10 分钟，避免 undici fetch 大包体/慢链路下模糊失败 */
 const IMAGE_HTTP_TIMEOUT_MS = 600000;
+
+/** Agnes 生图：首次 1 次 + 可恢复错误再试 2 次，间隔 10s；重试时顺延 Key */
+const AGNES_IMAGE_MAX_ATTEMPTS = 3;
+const AGNES_IMAGE_RETRY_INTERVAL_MS = 10_000;
+
+function isAgnesImageRetryableHttpError(status, raw) {
+  const text = String(raw || '').toLowerCase();
+  if (status === 401 || status === 403 || status === 402) return false;
+  if (status === 400 || status === 422) return false;
+  if (
+    /invalid.*(api.?key|token|auth)|unauthorized|forbidden|insufficient|quota|balance|billing|payment|moderation|policy|content.?filter|safety|invalid.?request|invalid.?parameter/.test(
+      text
+    )
+  ) {
+    return false;
+  }
+  if (status === 429) return true;
+  if (
+    /queue is full|rate.?limit|too many requests|server.?busy|temporarily unavailable|service unavailable|try again later|retry later|overload|overloaded|memory overload/.test(
+      text
+    )
+  ) {
+    return true;
+  }
+  if (status === 503 && /unavailable|overload|busy|queue/.test(text)) return true;
+  return false;
+}
+
+function isAgnesImageRetryableNetworkError(err) {
+  const m = String(err?.message || err || '').toLowerCase();
+  return /econnreset|etimedout|socket hang up|fetch failed|network|timeout|aborted/.test(m);
+}
+
+function sleepMs(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 // 多参考图时注入到所有支持 negative_prompt 的模型，防止生成分割/拼贴布局；同时加入安全词以减少敏感拦截
 const ANTI_SPLIT_NEGATIVE_PROMPT = 'nsfw, nudity, naked, violence, blood, gore, sensitive content, split panels, side-by-side layout, collage, diptych, triptych, grid layout, multiple panels, comparison view, composite image, two images in one frame';
@@ -1300,17 +1337,39 @@ async function callGeminiImageApi(db, config, log, opts) {
   // 这与 Gemini 的 "文字描述紧接对应内容" 原则一致，避免模型混淆
   const parts = [];
   if (refImageParts.length > 0) {
-    parts.push({ text: 'The following are visual reference images. Use them ONLY to maintain character appearance and scene environment consistency. Do NOT reproduce their layout or format.' });
+    const reframeMode = String(opts.ref_mode || '').toLowerCase() === 'reframe';
+    const gridMode = String(opts.ref_mode || '').toLowerCase() === 'grid';
+    const povHint = /POV|0度正面|眼睛视角|完全不出现|无过肩/i.test(String(prompt || ''));
+    parts.push({
+      text: reframeMode
+        ? povHint
+          ? 'The following image(s) may include SCENE ROOM, MASTER WIDE, and/or identity refs. Generate ONE eye-level 0° frontal POV of a SINGLE subject across the desk. Partner COMPLETELY absent — no OTS/shoulder/occiput. Match scene room layout. Desk props MUST copy ONLY objects already on the master wide desk — invent nothing. Keep subject outfit. Do NOT output side-profile two-shot. Do NOT add extra people.'
+          : 'The following image is a MASTER WIDE plate. You must REFRAME it into a NEW camera angle exactly as instructed (typically shot/reverse-shot: move camera to the partner seat and shoot the subject across the desk so the subject faces THIS new camera). Keep the same identity, clothes, hair, and room. Do NOT output another frontal medium-wide establishing two-shot seating chart. Do NOT keep the master side-profile crop. Do NOT add extra people.'
+        : gridMode
+          ? 'The following are identity/room references only. You MUST output a seamless 2x2 multi-panel coverage grid as instructed. Same two characters and room in every panel. Do NOT add a third person.'
+          : 'The following are visual reference images. Use them ONLY to maintain character appearance and scene environment consistency. Do NOT reproduce their layout or format.',
+    });
     for (let i = 0; i < refImageParts.length; i++) {
       const { label, imagePart } = refImageParts[i];
       parts.push({ text: label ? `Reference ${i + 1}: ${label}` : `Reference ${i + 1}:` });
       parts.push(imagePart);
     }
     // 生成指令放在所有参考图之后，清晰分隔
-    parts.push({ text: `Generate ONE single cinematic storyboard frame (do NOT create a grid or multi-panel layout):\n\n${prompt || ''}` });
+    parts.push({
+      text: reframeMode
+        ? `Generate ONE reframed cinematic still from the master plate (do NOT create a grid or multi-panel layout):\n\n${prompt || ''}`
+        : gridMode
+          ? `Generate ONE seamless 2x2 coverage grid image (exactly 4 equal panels, no borders/labels):\n\n${prompt || ''}`
+          : `Generate ONE single cinematic storyboard frame (do NOT create a grid or multi-panel layout):\n\n${prompt || ''}`,
+    });
   } else {
     // 无参考图：直接用 prompt
-    parts.push({ text: prompt || '' });
+    const gridMode = String(opts.ref_mode || '').toLowerCase() === 'grid';
+    parts.push({
+      text: gridMode
+        ? `Generate ONE seamless 2x2 coverage grid image (exactly 4 equal panels, no borders/labels):\n\n${prompt || ''}`
+        : prompt || '',
+    });
   }
 
   log.info('[Gemini图生] 参考图处理完毕，准备请求 Gemini API', {
@@ -1457,8 +1516,11 @@ async function callImageApi(db, log, opts) {
   // 多参考图时统一生成 negative_prompt（供各子函数使用）
   const refCountForNeg = Array.isArray(opts.reference_image_urls) ? opts.reference_image_urls.filter(Boolean).length : 0;
   // Seedream/Volcengine 模型强制启用安全词负面提示，其他模型仅在多参考图时启用
+  // 定镜宫格（ref_mode=grid）禁止注入「no grid/panels」类 anti-split，否则与任务冲突
   const isVolcOrSeedream = (protocol === 'volcengine' || /seedream|doubao/i.test(model));
-  const autoNegativePrompt = (refCountForNeg > 1 || isVolcOrSeedream) ? ANTI_SPLIT_NEGATIVE_PROMPT : '';
+  const skipAntiSplit = String(opts.ref_mode || '').toLowerCase() === 'grid';
+  const autoNegativePrompt =
+    !skipAntiSplit && (refCountForNeg > 1 || isVolcOrSeedream) ? ANTI_SPLIT_NEGATIVE_PROMPT : '';
   const userNegFragment = (user_negative_prompt && String(user_negative_prompt).trim()) || '';
   const mergedNegativePrompt = mergeNegativePromptFragments(autoNegativePrompt, userNegFragment);
 
@@ -1497,6 +1559,7 @@ async function callImageApi(db, log, opts) {
       files_base_url: opts.files_base_url,
       storage_local_path: opts.storage_local_path,
       system_prompt: opts.system_prompt,
+      ref_mode: opts.ref_mode,
     });
   }
 
@@ -1527,12 +1590,12 @@ async function callImageApi(db, log, opts) {
     // doubao-seedream API 不使用 n，其他 OpenAI 兼容接口保留
     ...(!isSeedream ? { n: 1 } : {}),
     ...(effectiveSize ? { size: effectiveSize } : {}),
-    ...(quality ? { quality } : {}),
+    // Agnes 文生图队列会 400：quality is not supported by text image queue
+    ...(quality && !isAgnes ? { quality } : {}),
     // volcengine 原生或 doubao-seedream 模型均需关闭水印（默认为 true）
     ...((isVolc || isSeedream) ? { watermark: false } : {}),
-    // 多张参考图时加 negative_prompt，防止模型把参考图拼成左右分割的合图
-    // Doubao/Seedream 原生支持；通用 OpenAI-compat 接口大多也会接受该字段（不支持的会忽略）
-    ...(mergedNegativePrompt ? { negative_prompt: mergedNegativePrompt } : {}),
+    // 多张参考图 / 资产约束负面词：Doubao/Seedream 等支持；Agnes 图生队列对未知字段易 400
+    ...(mergedNegativePrompt && !isAgnes ? { negative_prompt: mergedNegativePrompt } : {}),
     // 参考图字段：volcengine doubao-seedream API 规范使用 image（数组），见官方文档
     ...(resolvedRefs.length > 0 && !isAgnes ? { image: resolvedRefs } : {}),
     // Agnes Image 2.x：参考图放在 extra_body.image
@@ -1547,41 +1610,102 @@ async function callImageApi(db, log, opts) {
     original_size: size !== effectiveSize ? size : undefined,
     is_agnes: isAgnes,
   });
-  const openaiCompatHeaders = {
-    'Content-Type': 'application/json',
-    Authorization: 'Bearer ' + (config.api_key || ''),
-  };
-  let raw;
-  let httpStatus;
-  try {
-    const out = await postJSONWithTimeout(url, openaiCompatHeaders, body, IMAGE_HTTP_TIMEOUT_MS);
-    httpStatus = out.statusCode;
-    raw = out.raw;
-  } catch (e) {
-    log.error('Image API network error', { image_gen_id, error: e.message, url: url.slice(0, 80) });
-    return { error: e.message && e.message.includes('timeout')
-      ? e.message
-      : ('图片生成网络请求失败: ' + e.message) };
-  }
-  if (httpStatus < 200 || httpStatus >= 300) {
-    log.error('Image API failed', { status: httpStatus, body: raw.slice(0, 300) });
-    let errMsg = '图片生成请求失败: ' + httpStatus;
+
+  const requestWithKey = async (apiKey, keyIndex, attempt) => {
+    const openaiCompatHeaders = {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer ' + apiKey,
+    };
+    let raw;
+    let httpStatus;
     try {
-      const errJson = JSON.parse(raw);
-      const msg = errJson.error?.message || errJson.message || errJson.error;
-      if (msg) errMsg += ' - ' + (typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 200));
-    } catch (_) {
-      if (raw && raw.length) errMsg += ' - ' + raw.slice(0, 200);
+      const out = await postJSONWithTimeout(url, openaiCompatHeaders, body, IMAGE_HTTP_TIMEOUT_MS);
+      httpStatus = out.statusCode;
+      raw = out.raw;
+    } catch (e) {
+      log.error('Image API network error', {
+        image_gen_id,
+        error: e.message,
+        url: url.slice(0, 80),
+        key_index: keyIndex,
+        attempt,
+      });
+      const errMsg = e.message && e.message.includes('timeout')
+        ? e.message
+        : ('图片生成网络请求失败: ' + e.message);
+      return {
+        error: errMsg,
+        retryable: isAgnes && isAgnesImageRetryableNetworkError(e),
+      };
     }
-    return { error: errMsg };
+    if (httpStatus < 200 || httpStatus >= 300) {
+      log.error('Image API failed', {
+        status: httpStatus,
+        body: raw.slice(0, 300),
+        key_index: keyIndex,
+        attempt,
+      });
+      let errMsg = '图片生成请求失败: ' + httpStatus;
+      try {
+        const errJson = JSON.parse(raw);
+        const msg = errJson.error?.message || errJson.message || errJson.error;
+        if (msg) errMsg += ' - ' + (typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 200));
+      } catch (_) {
+        if (raw && raw.length) errMsg += ' - ' + raw.slice(0, 200);
+      }
+      if (isAgnes && /queue is full/i.test(errMsg)) {
+        errMsg =
+          'Agnes 文生图队列已满（text image queue is full），不是 Key 限流。平台全局排队拥堵，将自动重试。原始：' +
+          errMsg;
+      }
+      return {
+        error: errMsg,
+        retryable: isAgnes && isAgnesImageRetryableHttpError(httpStatus, raw),
+      };
+    }
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      return { error: '图片响应解析失败: ' + e.message, retryable: false };
+    }
+    return { data, httpStatus, raw };
+  };
+
+  const pool = isAgnes ? getApiKeyPool(config.api_key, 1) : null;
+  let keyedResult = null;
+  let lastKeyIndex = null;
+  const maxAttempts = isAgnes ? AGNES_IMAGE_MAX_ATTEMPTS : 1;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // 首次 round-robin；重试顺延下一个 Key，避免连打同一入口
+    const preferIdx =
+      isAgnes && pool && lastKeyIndex != null ? lastKeyIndex + 1 : null;
+    keyedResult = pool
+      ? preferIdx != null
+        ? await pool.runPreferred(preferIdx, (apiKey, keyIndex) => {
+            lastKeyIndex = keyIndex;
+            return requestWithKey(apiKey, keyIndex, attempt);
+          })
+        : await pool.run((apiKey, keyIndex) => {
+            lastKeyIndex = keyIndex;
+            return requestWithKey(apiKey, keyIndex, attempt);
+          })
+      : await requestWithKey(config.api_key || '', 0, attempt);
+    if (!keyedResult.error) break;
+    if (!keyedResult.retryable || attempt >= maxAttempts) break;
+    log.warn('Image API retryable failure, waiting then retry', {
+      image_gen_id,
+      attempt,
+      next_attempt: attempt + 1,
+      delay_ms: AGNES_IMAGE_RETRY_INTERVAL_MS,
+      last_key_index: lastKeyIndex,
+      error: keyedResult.error,
+    });
+    await sleepMs(AGNES_IMAGE_RETRY_INTERVAL_MS);
   }
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch (e) {
-    log.warn('Image API response parse error', { image_gen_id, raw_preview: raw.slice(0, 200) });
-    return { error: '图片生成返回格式异常' };
-  }
+
+  if (keyedResult.error) return { error: keyedResult.error };
+  const { data } = keyedResult;
   // 兼容多种返回格式：OpenAI 风格 data[].url / b64_json，部分厂商 data[].image_url 或 data.output 等
   // Stable Diffusion WebUI（/sdapi/v1/txt2img|img2img）：顶层 images 为 PNG base64 字符串数组，无 data 数组
   const item = data.data && data.data[0];
@@ -1918,6 +2042,8 @@ module.exports = {
   refListHasCanonical,
   fixAgnesImageSize,
   isAgnesImageConfig,
+  isAgnesImageRetryableHttpError,
+  isAgnesImageRetryableNetworkError,
   /** 图床 URL 缓存（image_proxy_cache），供 SD2 认证等复用 */
   getProxyCache,
   getProxyCacheValidated,

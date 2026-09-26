@@ -274,26 +274,45 @@ async function runMergedEpisodePostProcess(db, log, opts) {
               return { ok: false, error: `旁白静音片段失败 #${i}` };
             }
           } else {
+            // 优先复用已生成的旁白配音；否则用 IndexTTS（默认宇少）合成
+            const existingRel = row?.narration_audio_local_path && String(row.narration_audio_local_path).trim();
+            const existingAbs = existingRel ? path.join(storageRoot, existingRel.replace(/\//g, path.sep)) : null;
             const segRaw = path.join(tempRoot, `narr_raw_${i}.mp3`);
-            let synth;
-            try {
-              synth = await ttsService.synthesize(db, log, {
-                text: narrText,
-                storyboard_id: null,
-                storage_base: storageRoot,
-              });
-            } catch (e) {
-              log.warn('merged post: narration TTS failed', { segment: i, error: e.message });
-              return { ok: false, error: `解说旁白 TTS 失败：${e.message}` };
-            }
-            const narrAbs = path.join(storageRoot, synth.local_path.replace(/\//g, path.sep));
-            if (!fs.existsSync(narrAbs)) {
-              return { ok: false, error: `旁白 TTS 文件不存在` };
-            }
-            try {
-              fs.copyFileSync(narrAbs, segRaw);
-            } catch (_) {
-              return { ok: false, error: '复制旁白 TTS 失败' };
+            if (existingAbs && fs.existsSync(existingAbs)) {
+              try {
+                fs.copyFileSync(existingAbs, segRaw);
+              } catch (_) {
+                return { ok: false, error: '复制已有旁白配音失败' };
+              }
+            } else {
+              let synth;
+              try {
+                const narrTtsOpts = {
+                  text: narrText,
+                  storyboard_id: null,
+                  storage_base: storageRoot,
+                  provider: 'indextts',
+                  voice_id: mergeOpts.indextts_voice || require('./ttsService').DEFAULT_INDEXTTS_VOICE,
+                  emotion_text: mergeOpts.indextts_emotion || '自然流畅的解说语气，情绪饱满',
+                };
+                if (mergeOpts.indextts_speed != null && mergeOpts.indextts_speed !== '') {
+                  const s = Number(mergeOpts.indextts_speed);
+                  if (Number.isFinite(s) && s > 0) narrTtsOpts.speed = s;
+                }
+                synth = await ttsService.synthesize(db, log, narrTtsOpts);
+              } catch (e) {
+                log.warn('merged post: narration TTS failed', { segment: i, error: e.message });
+                return { ok: false, error: `解说旁白 TTS 失败：${e.message}` };
+              }
+              const narrAbs = path.join(storageRoot, synth.local_path.replace(/\//g, path.sep));
+              if (!fs.existsSync(narrAbs)) {
+                return { ok: false, error: `旁白 TTS 文件不存在` };
+              }
+              try {
+                fs.copyFileSync(narrAbs, segRaw);
+              } catch (_) {
+                return { ok: false, error: '复制旁白 TTS 失败' };
+              }
             }
             if (!fitAudioToSlot(segRaw, slotSec, narrFit, log)) {
               return { ok: false, error: `旁白时长对齐失败 #${i}` };

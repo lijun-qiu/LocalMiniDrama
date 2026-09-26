@@ -280,54 +280,77 @@ function getStoryboardSystemPrompt(cfg) {
  * 全能片段描述统一格式说明（分镜批量生成 / 生成全能提示词 / 润色 共用）
  */
 function getUniversalOmniMultiBeatFormatSpec(cfg) {
-  const { DEFAULT_LINE3 } = require('./universalOmniMultiBeatFormat');
+  const { DEFAULT_SCENE_NOTE } = require('./universalOmniMultiBeatFormat');
   if (isEnglish(cfg)) {
     return `
-[UNIVERSAL_SEGMENT_TEXT — MULTI-BEAT BLOCK FORMAT ONLY]
-FORBIDDEN: SoulLens/SEEDANCE single-line rows (主体:/叙事动态:/空间:/[禁BGM]); FORBIDDEN @人物N — use @图片1, @图片2, … only.
+[UNIVERSAL_SEGMENT_TEXT — STRUCTURED BLOCK FORMAT]
+FORBIDDEN: SoulLens single-line; FORBIDDEN @人物N; FORBIDDEN 【台词】 section.
 
-Field "universal_segment_text" is a **multi-line string** (use \\n in JSON). Structure:
-Line 1: 画面风格和类型: 真人写实, 电影风格, 高清画质, <short style from project>
-Line 2: 生成一个由以下M个分镜组成的视频. (M integer 1–8)
-Line 3 (copy verbatim): ${DEFAULT_LINE3}
-Lines 4..(3+M): 分镜k： Tk秒: <cinematic Chinese prose for that slice; camera motion chain; light; emotion>
-Sum(T1..TM) MUST equal this shot's JSON "duration" seconds exactly.
+Output a multi-line Chinese block (use \\n in JSON):
 
-Reference tokens: @图片1 = scene/environment only; @图片2+ = characters in characters[] order; then props if any.
-Dialogue: @图片2 says:"verbatim line" or …嗓音…："line". No speech: end with 无对白。
-Narration: 旁白（画面无声）："verbatim narration"
-Each beat: rich motion picture prose (push in, pull back, rack focus), not a static snapshot caption.`;
+【风格锚点】
+<film look; MAY weave STYLE_HINT>
+
+【场景设定】
+<location + set dressing + light>. MUST include SCENE_NOTE_REQUIRED when provided. @图片1 = environment only.
+
+Then for beats k = 1..M (prefer M=1; sum of seconds = this shot's duration):
+【分镜k】（Tk秒）：
+<camera + framing + continuous blocking; bind faces with @图片N>
+DIALOGUE (hard, ArcReel form): Put verbatim speech ONLY as <角色名>说 {原文} inline at the speak moment (e.g. 约第2秒起 <林薇>说 {请坐}，随后点头). Same line as action is OK (ArcReel style). Do NOT write 口型同步说出「…」. Do NOT write mouth/lip cues. Do NOT output a 【台词】 block. Do NOT split silent→speak beats. NEVER assign speech to @图片1-as-scene.
+
+【环境音】
+Write low-level diegetic bed from atmosphere/sound_effect when available (e.g. 办公室空调低鸣与远处键盘声，人声清晰在前，无BGM). FORBIDDEN: BGM; inventing extra spoken lines. Empty bed only when truly silent space.
+
+Sum(T1..TM) MUST equal JSON "duration" exactly.`;
   }
   return `
-【universal_segment_text — 多子分镜段落格式（与「生成全能提示词」「润色」完全一致）】
-**禁止**使用已废弃的灵境/SoulLens **单行**格式（含「主体：」「叙事动态：」「空间：」「镜头：」段标、行末 [禁BGM][禁字幕]、@人物N 指代参考图）。
+【universal_segment_text — 结构化版式（与「生成全能提示词」「润色」完全一致）】
+**禁止**灵境/SoulLens 单行格式、@人物N、**禁止输出【台词】栏**。
 
-本字段为 **多行字符串**（JSON 中用 \\n 换行），结构固定：
-第1行：画面风格和类型: 真人写实, 电影风格, 高清画质, <可再加项目风格短语>
-第2行：生成一个由以下M个分镜组成的视频。（M 为 1–8 的整数，与下文分镜条数一致）
-第3行（必须逐字一致）：${DEFAULT_LINE3}
-第4行起：分镜1： T1秒: …、分镜2： T2秒: … … 分镜M： TM秒: …
-**硬性约束**：T1+T2+…+TM 必须严格等于本镜 JSON 的 duration（秒）；每行一条子分镜，禁止额外说明行。
+本字段为 **多行字符串**，结构固定：
 
-子分镜正文写法（电影化中文长句，参考产品范例）：
-- **参考图**：仅用 @图片1、@图片2…（阿拉伯数字）；@图片1 只写环境/光影/陈设；角色从 @图片2 起按 characters[] 顺序；有道具则继续 @图片3 …
-- **运镜**：每段含至少两步运镜（如 缓推、横移、跟拍、拉回、俯拍特写），与人物动作同步。
-- **对白**：有 dialogue 时必须写出原文，格式如 @图片2 的嗓音…："对白原文" 或 @图片2 说："对白原文"；无对白则句末写 **无对白。**
-- **解说**：有 narration 时写在合适子分镜：**旁白（画面无声）："解说原文"**
-- **禁止**：概括式台词（如「他说了一句重要的话」）、@人物N、markdown、SoulLens 段标签
+【风格锚点】
+电影质感，真人写实，8K高清，……（可融入项目 STYLE_HINT；勿堆英文 Style 尾巴）
 
-范例结构（勿照抄剧情，仅学排版）：
-画面风格和类型: 真人写实, 电影风格, 高清画质, 日本动漫画风
-生成一个由以下3个分镜组成的视频。
-${DEFAULT_LINE3}
-分镜1： 5秒: 镜头从 @图片1 … 无对白。
-分镜2： 5秒: … @图片2 …："台词原文"
-分镜3： 5秒: … 旁白（画面无声）："解说原文"`;
+【场景设定】
+地点、陈设、光线、时段。有场景参考图时须体现 SCENE_NOTE_REQUIRED（通常含 @图片1 仅作环境，禁宫格成片）。
+${DEFAULT_SCENE_NOTE}
+
+然后写子分镜块（**默认 M=1**：一条数据库分镜 = 一整段成片时长，只写【分镜1】（总秒数）；仅当本镜内部确有必须切开的阶段变化时才 M>1；各秒数之和 = 本镜 duration）：
+
+【分镜k】（Tk秒）：
+机位/景别/构图；用 @图片N 绑定脸与外形（@图片1=场景，角色从 @图片2 起）。
+**台词句式（硬性，对齐 ArcReel 渲染句式）**：
+- 本镜默认只输出 **一个**【分镜1】覆盖总时长；整段连续叙述，禁止「静默拍→说话拍」拆两段。
+- 有对白时：在开口瞬间写 **<角色名>说 {原文}**，可与动作写在同一行（ArcReel 官方即行内嵌套，不要强行拆成多行），例如「约第2秒起 <林薇>说 {请坐}，陈浩应声点头」。
+- **禁止**「口型同步说出『…』」、禁止单独写口型/开口/吐字/双唇开合等（说话句式已隐含口型）。
+- 画外音用 **画外音说 {原文}**。
+- 若分镜字段含非空「解说旁白 / narration」，必须在【分镜】内写成 **画外音说 {旁白原文}**，禁止只写在动作描述里、禁止省略。
+- 说话人须为具名角色；禁止场景 @图片1 说台词。
+- **不要写【台词】栏**（整栏删除；人声只来自花括号内原文）。
+
+【环境音】
+根据 atmosphere / sound_effect 写**低电平现场环境声与动作音效**，并注明「人声清晰在前，无BGM」。
+示例：办公室空调低鸣与远处键盘声，人声清晰在前，无BGM。
+禁止 BGM、禁止用环境声描写暗示台词；确无环境信息时才可写「安静室内，仅保留人声与极低底噪，无BGM」。
+
+范例（有对白、**单段整镜**，勿照抄剧情）：
+【风格锚点】
+电影质感，真人写实，8K高清，自然光，暖色调室内灯光。
+
+【场景设定】
+现代简约办公室…… ${DEFAULT_SCENE_NOTE}
+
+【分镜1】（5秒）：
+固定机位，中景，连续单镜头。@图片3 陈浩已入画并落座；@图片2 林薇端坐桌后翻阅简历，抬眼做请的手势，约第2秒起 <林薇>说 {请坐}，陈浩应声点头。全程连续，勿切镜。
+
+【环境音】
+办公室空调低鸣与纸页轻响，人声清晰在前，无BGM。
+
+若确需多分镜：在同一【风格锚点】【场景设定】之后依次追加【分镜2】【环境音】……但**禁止**仅为「先静默后说话」而拆拍；**禁止**插入【台词】栏。`;
 }
 
-/**
- * 分镜生成「全能分镜模式」：JSON 每镜带 creation_mode + universal_segment_text（多子分镜段落格式）
- */
 function getStoryboardUniversalOmniModeSuffix(cfg) {
   const spec = getUniversalOmniMultiBeatFormatSpec(cfg);
   if (isEnglish(cfg)) {
@@ -348,26 +371,105 @@ ${spec}`;
 ${spec}`;
 }
 
+/**
+ * 按单镜秒数估算口播上限（留约 0.5s 画面呼吸）。
+ * 中文旁白约 5.0 字/秒；英文约 2.8 词/秒。
+ * @returns {{ sec: number, maxChars: number, preferMin: number }}
+ */
+function estimateSpokenBudgetForClip(durationSec, isEn) {
+  const sec = Math.max(1, Math.round(Number(durationSec) || 5));
+  const speakSec = Math.max(1, sec - 0.5);
+  const maxChars = isEn
+    ? Math.max(10, Math.round(speakSec * 2.8))
+    : Math.max(16, Math.round(speakSec * 5.0));
+  const preferMin = Math.max(isEn ? 4 : 8, Math.round(maxChars * 0.3));
+  return { sec, maxChars, preferMin };
+}
+
+/** 项目「每段秒数」口播约束：时长锁定；超长拆镜；禁止删掉画外音/旁白 */
+function getStoryboardSpeechFitConstraint(cfg, shotDuration) {
+  const sec = Number(shotDuration);
+  if (!Number.isFinite(sec) || sec <= 0) return '';
+  const isEn = isEnglish(cfg);
+  const { maxChars, preferMin } = estimateSpokenBudgetForClip(sec, isEn);
+  if (isEn) {
+    return `
+【HIGHEST PRIORITY — CLIP LENGTH + KEEP ALL VO】
+- Every shot "duration" MUST be **${sec}** (±1s only for a truly short line).
+- Comfortable spoken length per shot: about **${preferMin}–${maxChars} words** of speech (dialogue and/or narration) for ${sec}s.
+- **NEVER omit, delete, or summarize away** script voice-over / narrator lines / 画外音. Long VO MUST be **continued across consecutive shots** until the full script VO is covered.
+- Do NOT hide VO only inside "action" without putting the spoken text into "narration" (or dialogue as voice-over). If a shot has both character dialogue and VO, prefer **two shots** (one dialogue, one VO) instead of dropping VO.
+- Do NOT lengthen duration to fit a long paragraph; split shots instead.`;
+  }
+  return `
+【最高优先级——单镜时长 + 画外音/旁白必须保留】
+- 每个镜头的 **duration 必须写 ${sec}**（仅极短台词可 ±1 秒；禁止因长旁白把单镜拉到 12/15）。
+- 单镜舒适口播量约 **${preferMin}～${maxChars} 字**（对白和/或旁白，按 ${sec} 秒语速）。
+- **严禁删掉、省略、概括掉剧本里的画外音/解说旁白**。长旁白、论坛长帖、大段独白必须**拆成连续多镜续说**，直到原文信息说完；禁止为凑字数把旁白整段丢掉。
+- 旁白必须写入字段 **narration**（或 dialogue 中明确的画外音），禁止只写在 action 里却不口述。
+- 若同一叙事节拍既有角色对白又有画外音：优先拆成「对白镜 + 旁白镜」两镜，**禁止为了压字数删掉画外音**。
+- 禁止「先写超长台词再指望视频拉长」；时长跟项目「${sec}秒/段」，台词靠拆镜适配。`;
+}
+
 /** 分镜生成勾选「解说旁白」时追加到用户提示词末尾 */
-function getStoryboardNarrationExtraInstructions(cfg) {
-  if (isEnglish(cfg)) {
+function getStoryboardNarrationExtraInstructions(cfg, shotDuration) {
+  const isEn = isEnglish(cfg);
+  const budget =
+    shotDuration != null && Number(shotDuration) > 0
+      ? estimateSpokenBudgetForClip(shotDuration, isEn)
+      : null;
+  const charHint = budget
+    ? isEn
+      ? `about ${budget.preferMin}–${budget.maxChars} words per shot, readable in ${budget.sec}s; continue leftover VO on the next shot — NEVER drop script VO`
+      : `每镜约 ${budget.preferMin}～${budget.maxChars} 字、须能在 ${budget.sec} 秒内读完；说不完的旁白续到下一镜——严禁丢掉剧本旁白`
+    : isEn
+      ? '1–3 short sentences, readable within this shot\'s duration; never omit script VO'
+      : '约 10～50 字，须在本镜 duration 秒内能读完；严禁省略剧本旁白';
+
+  if (isEn) {
     return `
 
 【VO / Narration mode — STRICT (user enabled full VO pipeline)】
-- Add string field "narration" to **each** shot. **Every "narration" MUST be a non-empty string** (at least one full sentence), readable within this shot's "duration".
+- Add string field "narration" to **each** shot. **Every "narration" MUST be a non-empty string** (at least one full sentence), ${charHint}.
 - **Shot with shot_number = 1 MUST** open with narrator lines: set time/place/mood or a hook — never leave empty because the shot is "establishing only".
 - **Shot 2** should also carry narration if it is still wide/establishing; do not leave both 1 and 2 empty.
 - Third-person / documentary narrator voice — **not** character dialogue (keep spoken lines in "dialogue" only). Do not copy dialogue text into "narration".
-- 1–3 short sentences per shot; forbid consecutive shots with empty "narration".`;
+- Cover the **full** script voice-over across the episode by chaining shots; empty narration to "save duration" is forbidden.
+- Forbid consecutive shots with empty "narration".`;
   }
   return `
 
 【解说旁白模式 — 硬性要求（用户已开启全片解说管线）】
-- 在 "storyboards" 数组的**每一个**镜头对象中必须有字符串字段 "narration"，且 **narration 一律不得为空字符串**（每镜至少一句完整解说，约 10～50 字，须在本镜 duration 秒内能读完）。
+- 在 "storyboards" 数组的**每一个**镜头对象中必须有字符串字段 "narration"，且 **narration 一律不得为空字符串**（每镜至少一句完整解说，${charHint}）。
 - **shot_number 为 1 的第一个镜头**：必须有**开场解说**（交代时间、空间、氛围或悬念钩子），禁止以「纯建立镜头、无对白所以无旁白」为由留空；大远景/远景用旁白描述环境与基调，把观众带进故事。
 - **第 2 个镜头**：若仍为远景/大远景/环境铺垫，同样必须写旁白；**禁止第 1、2 镜连续留空**。
 - narration 为画外第三人称或纪录片式解说，与角色对白 dialogue 严格区分；对白只写在 dialogue，不要把对白原文复制进 narration。
-- 每镜 1～3 句为宜；禁止连续多个镜头的 narration 为空。`;
+- 剧本旁白须**全片讲完**：超出口播量就拆多镜续写；**禁止为压时长把画外音删光**。
+- 禁止连续多个镜头的 narration 为空。`;
+}
+
+/** 分镜生成勾选「定镜对白」时追加到用户提示词末尾 */
+function getStoryboardStaticDialogueExtraInstructions(cfg) {
+  if (isEnglish(cfg)) {
+    return `
+
+【Static-dialogue / dialogue-driven mode — STRICT (user enabled) — OVERRIDES base rules】
+This mode **CANCELS** base rules about "dynamic camera ≥80%", "segment opens with wide establishing", and "one silent action = one shot".
+- **Every shot MUST have non-empty "dialogue"** with the next spoken line(s) from the script. Zero silent padding shots.
+- Do NOT invent: office panorama, morning atmosphere, prop-only inserts, silent walk-in / sit-down / put-down-cup beats, decorative end cards.
+- Start from the first spoken line (or merge "请坐" into the first dialogue shot). No multi-shot silent setup chain.
+- One speaker turn ≈ one shot; reverse-shot by cutting. movement = **static** for all dialogue shots.
+- Only include a non-dialogue shot if the script has a pure action beat with NO line at all (rare); otherwise dialogue is mandatory.`;
+  }
+  return `
+
+【定镜对白模式 — 硬性覆盖（用户已开启：对白驱动）——覆盖上方默认规则】
+本模式**作废**默认的「固定镜头不得超过20%」「段落开篇大远景建立」「无台词也要单独拆动作镜」等要求。
+- **每一镜必须有非空 dialogue**，按剧本对白顺序一句（或紧邻一问一答）一切；禁止无对白空镜。
+- **禁止发明铺垫**：办公室全景、清晨氛围、纯道具特写、无台词的入场/入座/放杯子/候场准备、片尾装饰空镜一律不要。
+- 从第一句开口（如「请坐」或第一问）直接开拍，不要先铺 2～4 个无台词建立镜。
+- 正反打用相邻分镜切镜；对白镜 movement 一律 **static**。
+- 仅当剧本该节拍完全没有台词、只有纯动作时，才允许无 dialogue（极少）；默认全部有台词。`;
 }
 
 function formatUserPrompt(cfg, key, ...args) {
@@ -447,13 +549,14 @@ function getStoryboardUserPromptSuffix(cfg, shotDuration) {
   const durationHint = shotDuration && Number.isFinite(Number(shotDuration)) && Number(shotDuration) > 0
     ? Number(shotDuration)
     : null;
+  const speechBudget = durationHint ? estimateSpokenBudgetForClip(durationHint, lang === 'en') : null;
   if (lang === 'en') {
     const durationInstruction = durationHint
-      ? `approximately ${durationHint}s per shot (project setting), adjust ±1s based on dialogue length and action complexity`
-      : 'estimate per shot from dialogue length, action complexity, and emotion';
+      ? `MUST be **${durationHint}** (project clip length). Split long speech across shots — NEVER delete script VO/narration to fit. Comfortable speech ~${speechBudget.preferMin}–${speechBudget.maxChars} words per shot.`
+      : 'estimate per shot from dialogue length, action complexity, and emotion — but keep speech readable within that duration; never omit VO';
     return `
 
-**dialogue field**: "Character: \"line\"". Multiple: "A: \"...\" B: \"...\"". Monologue: "(Monologue) content". No dialogue: "".
+**dialogue field**: "Character: \"line\"". Multiple: "A: \"...\" B: \"...\"". Monologue: "(Monologue) content". No dialogue: "". Keep lines readable within the shot duration; put narrator VO in narration when enabled.
 
 **scene_id**: Select the most matching background ID from the scene list above, or null if none suitable.
 
@@ -469,8 +572,8 @@ function getStoryboardUserPromptSuffix(cfg, shotDuration) {
     return '\n\n' + _sbUserOverride + _sbUserLocked;
   }
   const durationInstruction = durationHint
-    ? `每镜头约${durationHint}秒（项目配置），综合对话、动作、情绪可适当调整±1秒`
-    : '综合对话、动作、情绪估算每镜时长（秒）';
+    ? `必须写 **${durationHint}**（项目「每段秒数」）。超长台词拆多镜续写；**禁止为压时长删掉画外音/旁白**。单镜舒适口播约 ${speechBudget.preferMin}～${speechBudget.maxChars} 字`
+    : '综合对话、动作、情绪估算每镜时长（秒），且对白/旁白须能在该秒数内说完；严禁省略旁白';
   return `
 
 【分镜要素】每个分镜聚焦一个叙事节拍（可包含内部多切镜序列），描述要详尽具体：
@@ -479,7 +582,7 @@ function getStoryboardUserPromptSuffix(cfg, shotDuration) {
 3. **地点**：[场景完整描述+空间布局+环境细节]
 4. **镜头设计**：**景别(shot_type)**、**镜头角度(angle)**、**运镜方式(movement)**
 5. **人物行为**：**详细动作描述**
-6. **对话/独白**：提取该镜头中的完整对话或独白内容（如无对话则为空字符串）
+6. **对话/独白**：提取该镜头中的对话或独白（须能在本镜 duration 内说完；过长则拆到下一镜；剧本旁白勿删）
 7. **画面结果**：动作的即时后果+视觉细节+氛围变化
 8. **环境氛围**：光线质感+色调+声音环境+整体氛围
 9. **声音设计**：bgm_prompt 必须填空字符串""或"无背景音乐/禁BGM"；**不要为单个片段设计背景音乐**。sound_effect 只写现场环境声、动作音效、对白/旁白音色（如低沉、沙哑、颤抖、冷静、急促等）和口型同步要求
@@ -496,7 +599,7 @@ function getStoryboardUserPromptSuffix(cfg, shotDuration) {
 - 好示例（古代场景，带运镜空间）："主角坐画面左中榻上，是绝对视觉焦点；右下前景木质案几高约75cm，书卷平放于案面为正常尺寸，铜灯与茶具均为次要环境小物件，绝不可夸大；中景，三分法构图，核心平衡稳定。若 movement 为缓推，尾帧允许人物在画面中占比自然增加、背景稍被压缩；若为手持，允许轻微取景不完美偏移。"
 - **执行原则**：首帧按此锚点生成初始画面；尾帧必须保持核心站位、角色与道具的真实尺度与基本空间关系，仅根据 movement 和 result 进行自然的取景演化。违背核心锁定 = 失败；完全没有运镜演化空间也属于不合格结果。
 
-**dialogue字段说明**：角色名："台词内容"。无对话时填空字符串""。
+**dialogue字段说明**：角色名："台词内容"。无对话时填空字符串""。台词长度须适配本镜 duration。
 **scene_id**：从上方场景列表中选择最匹配的背景ID，如无合适背景则填null。
 **duration时长**：${durationInstruction}。
 **声音一致性**：所有镜头默认无BGM；若有对白/旁白，sound_effect 必须补充音色与情绪强度，并与动作节奏、环境声保持一致。
@@ -1351,47 +1454,35 @@ function getUniversalOmniSegmentPrompt() {
   const specZh = getUniversalOmniMultiBeatFormatSpec({ language: 'zh' });
   return `You write the main prompt for multi-reference video (e.g. Kling Omni-Video, Volcengine Seedance omnivideo) "片段描述" in Chinese.
 
-The USER message includes MULTI_BEAT_OUTPUT, TOTAL_CLIP_SECONDS, SHOT_PACING_AND_POSITION, EPISODE_SCRIPT, NEIGHBOR_* detail, IMAGE_SLOT_MAP, LINE3_REQUIRED, STYLE_HINT, and storyboard fields.
+The USER message includes MULTI_BEAT_OUTPUT, TOTAL_CLIP_SECONDS, SHOT_PACING_AND_POSITION, EPISODE_SCRIPT, NEIGHBOR_* detail, IMAGE_SLOT_MAP, SCENE_NOTE_REQUIRED, STYLE_HINT, and storyboard fields.
 
-FORBIDDEN output styles: SoulLens single-line (主体:/叙事动态:/[禁BGM]); @人物N as image tokens. Use ONLY the multi-beat block below — same as「全能分镜模式」batch storyboard output.
+FORBIDDEN: SoulLens single-line; @人物N; ending with ". Style: english...".
+STYLE_ANCHOR: 【风格锚点】只用 STYLE_HINT.STYLE_ZH（中文）；禁止抄 STYLE_EN / anime style 等英文进正文.
+Use ONLY the structured block below.
 ${specZh}
 
-This is **one** API clip whose wall-clock length is TOTAL_CLIP_SECONDS. Split into **M** internal beats (子分镜, M = 1–8 you choose). Each beat = one line「分镜k： Tk秒:」. Sum of all Tk = TOTAL_CLIP_SECONDS exactly.
+This is **one** API clip of TOTAL_CLIP_SECONDS. Prefer **M=1** (single 【分镜1】 spanning the full duration). Only use M>1 when the shot itself has clear stage changes that must be cut — NEVER split merely into silent→speak. Each beat has 【分镜k】（Tk秒）+【环境音】 only — **no 【台词】 section**. Sum of all Tk = TOTAL_CLIP_SECONDS exactly.
 
-Output structure (no lines before or after this block):
+Output order (nothing before/after):
+1) 【风格锚点】 + body
+2) 【场景设定】 + body (MUST weave SCENE_NOTE_REQUIRED verbatim as a sentence inside this section)
+3) For k=1..M: 【分镜k】（Tk秒）： … then 【环境音】 …
 
-Line 1 — exactly:
-画面风格和类型: <comma-separated tags; MUST include 真人写实, 电影风格, 高清画质; MAY add STYLE_HINT / DRAMA_GENRE phrase>
+DIALOGUE — CRITICAL (ArcReel rendered form):
+- Put EVERY verbatim line from DIALOGUE_VERBATIM / DIALOGUE INTO 【分镜】 as <角色名>说 {原文} inline with action (e.g. 约第2秒起 <林薇>说 {请坐}，随后点头). Do NOT force speech onto its own line.
+- Do NOT write 口型同步说出「…」; do NOT write mouth/lip cues; speech mark implies lip-sync.
+- Do NOT output 【台词】 at all.
+- Voice-over: 画外音说 {原文}.
+- If the user message includes NARRATION / 解说旁白 with non-empty text, you MUST place that exact VO as **画外音说 {旁白原文}** inside 【分镜】 (may continue across beats if long). NEVER drop narration; NEVER leave VO only implied in action prose.
+- @图片N MUST come from CHARACTER_IMAGE_BINDING for faces. NEVER assign speech to @图片1 when it is 场景.
+- Prefer M=1 continuous beat; do NOT invent silent→speak split.
+- Human speech audio comes ONLY from brace contents of <名>说 {…} / 画外音说 {…}.
 
-Line 2 — exactly (M must match count of 分镜k lines):
-生成一个由以下M个分镜组成的视频。
+Reference images:
+- @图片1 = scene/environment only when mapped as 场景; characters from @图片2+ per IMAGE_SLOT_MAP.
+- ASCII space after @图片N before Chinese/Latin.
 
-Line 3 — copy LINE3_REQUIRED from the USER message verbatim.
-
-Lines 4 through (3+M) — for each k, one full line:
-分镜k： Tk秒: <Rich cinematic Chinese prose for this slice only: camera motion chain (≥2 moves when Tk≥3s), @图片N bindings per IMAGE_SLOT_MAP, light, emotion. Dialogue: …说："verbatim" or …："verbatim". No speech: 无对白。 Narration: 旁白（画面无声）："verbatim". Avoid static snapshot captions.>
-
-DIALOGUE — CRITICAL (when USER message contains DIALOGUE_VERBATIM):
-- Every line listed under「必须逐字出现在输出中的台词」MUST appear in some子分镜 line inside 「」, character-for-character (only spacing around @图片N may vary).
-- NEVER replace dialogue with summaries like「他选择了一个亿」「说完台词」without the actual quoted words.
-- Distribute lines across beats by story order; longer Tk beats that contain speech must include the full quoted line(s), not paraphrase.
-- If DIALOGUE / DESCRIPTION【对话】/ VIDEO_PROMPT_对话段 / EPISODE_SCRIPT imply spoken lines, include them verbatim even when CURRENT_UNIVERSAL_SEGMENT omitted them.
-- Silent shots: state silence explicitly; do not invent dialogue.
-
-Reference images — CRITICAL (applies to every子分镜 line’s prose):
-- Use ONLY IMAGE_SLOT_MAP tokens @图片1, @图片2, … (Arabic digits).
-- Follow CHARACTER_IMAGE_BINDING. When @图片1 is 场景, never put character face/body/costume on @图片1; characters start at @图片2 as mapped.
-- Spacing: ASCII space after each @图片N before following Chinese/Latin.
-- No @姓名 as image token; no markdown.
-
-Pacing & M selection (professional):
-- Read SHOT_PACING_AND_POSITION, EPISODE_SCRIPT, NEIGHBOR_* , STORYBOARD FIELDS (movement, shot_type, dialogue density). Increase M for rapid reversals / climax / montage-like pressure; use M=1 for a single sustained long-take feel when the script implies it.
-- Never change the **total** seconds: T1+…+TM must equal TOTAL_CLIP_SECONDS.
-
-Scene reference layout — CRITICAL (when SCENE_REFERENCE_LAYOUT applies):
-- Reference may be multi-panel; do NOT make the final video mimic grids. Each子分镜 line’s prose should reinforce: one continuous full frame, no split-screen collage in the delivered clip.
-
-If CURRENT_UNIVERSAL_SEGMENT is non-empty, preserve narrative beats but rewrite to satisfy MULTI_BEAT_OUTPUT, duration sum, and IMAGE_SLOT_MAP.`;
+If CURRENT_UNIVERSAL_SEGMENT is old format (画面风格和类型 / 分镜k： T秒:), **rewrite** into this 【风格锚点】… structure keeping facts and total seconds.`;
 }
 
 /**
@@ -1400,14 +1491,13 @@ If CURRENT_UNIVERSAL_SEGMENT is non-empty, preserve narrative beats but rewrite 
 function getUniversalOmniPolishPrompt() {
   return `${getUniversalOmniSegmentPrompt()}
 
-ADDITIONAL_POLISH_MODE (short drama enhancement — still MUST obey MULTI_BEAT_OUTPUT, TOTAL_CLIP_SECONDS sum, IMAGE_SLOT_MAP, LINE3_REQUIRED above):
-- You receive FULL_EPISODE_SCRIPT plus NEIGHBOR blocks and structured fields. Use them only for **continuity** and **information completeness**; do NOT invent plot absent from SCRIPT + STORYBOARD FIELDS + CURRENT omni draft.
-- **Information parity**: every script-relevant fact must appear across the子分镜 lines (lines 4…3+M), without losing information when expanding; if the draft was an old SoulLens single-line, **rewrite** into this multi-beat block; keep the same facts and total seconds.
-- **Re-polish / anti-stagnation**: USER may click polish repeatedly on the same draft. Each response MUST deliver **substantially rephrased** Chinese on lines 1, 2 (if M changes), and all子分镜 body lines — same facts, same total seconds, same @图片 bindings, but **not** a copy-paste of CURRENT_OMNI_DRAFT except line 3 which must stay **character-identical** to LINE3_REQUIRED. If you would otherwise output nearly identical prose, deliberately vary verbs, clause order, and camera wording while preserving meaning.
-- **Short drama rhythm**: vertical-drama density — stakes, micro-expressions, blocking, camera motion; distribute across beats when M>1.
-- **Inner monologue & dialogue**: brief 心想 / 「」 only when supported by DIALOGUE / NARRATION / SCRIPT / draft. When DIALOGUE_VERBATIM is present, **every** listed line must remain verbatim in 「」 after polish; rephrase motion/camera text freely but **not** quoted dialogue.
-- **Neighbors**: align entry/exit with NEIGHBOR_* ; no redundant retelling of the previous shot.
-- Language: Chinese for子分镜 prose; lines 1–3 format as in base prompt; M must match line 2 and match the count of「分镜k」lines.`;
+ADDITIONAL_POLISH_MODE (still MUST obey MULTI_BEAT_OUTPUT, TOTAL_CLIP_SECONDS sum, IMAGE_SLOT_MAP, SCENE_NOTE_REQUIRED, structured 【风格锚点】/【场景设定】/【分镜】/【环境音】 — no 【台词】):
+- Use FULL_EPISODE_SCRIPT + NEIGHBOR only for continuity; do NOT invent plot.
+- Re-polish: substantially rephrase 【分镜】 and 【环境音】 wording; keep SCENE_NOTE_REQUIRED facts inside 【场景设定】.
+- Dialogue: every DIALOGUE_VERBATIM line inside 【分镜】 as <角色>说 {原文} inline (ArcReel); never output 【台词】; never leave speech on @图片1-as-scene; prefer M=1; strip 口型同步说出 / mouth cues / 仿佛说出了 metaphors.
+- 【环境音】: restore diegetic bed from atmosphere/sound_effect (人声清晰在前，无BGM); do NOT force silence; forbid BGM and invented spoken lines.
+- Neighbors: align entry/exit; no redundant retelling.
+- Language: Chinese. M must match the count of 【分镜k】 blocks.`;
 }
 
 /**
@@ -1596,6 +1686,9 @@ module.exports = {
   getStoryboardUniversalOmniModeSuffix,
   getStoryboardUserPromptSuffix,
   getStoryboardNarrationExtraInstructions,
+  getStoryboardSpeechFitConstraint,
+  estimateSpokenBudgetForClip,
+  getStoryboardStaticDialogueExtraInstructions,
   getStoryExpansionSystemPrompt,
   buildStoryExpansionUserPrompt,
   getRolePolishPrompt,

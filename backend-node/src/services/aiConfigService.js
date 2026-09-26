@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { normalizeMaterialHubToken } = require('./jimengMaterialHubService');
+const { parseApiKeys } = require('../utils/apiKeyPool');
 
 function normalizeApiKeyForService(serviceType, apiKey) {
   if (serviceType === 'jimeng2_character_auth' && apiKey != null) {
@@ -252,6 +253,9 @@ async function testConnection(opts) {
   const base = (opts.base_url || '').replace(/\/$/, '');
   if (!base) throw new Error('base_url 必填');
   if (!opts.api_key) throw new Error('api_key 必填');
+  // 多 Key（逗号/分号/换行）时只取第一个做连通性探测，避免 Bearer 整串导致 401 无效令牌
+  const apiKey = parseApiKeys(opts.api_key)[0] || String(opts.api_key || '').trim();
+  opts = { ...opts, api_key: apiKey };
   const models = Array.isArray(opts.model) ? opts.model : opts.model != null ? [opts.model] : [];
   const model = models[0] || '';
   if (!model && (opts.provider === 'gemini' || opts.provider === 'google')) throw new Error('model 必填');

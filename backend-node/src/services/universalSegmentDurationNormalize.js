@@ -1,8 +1,7 @@
 /**
- * 规范化全能片段里「分镜k： X秒:」时长：单条时对齐总时长；多条时按比例缩放使秒数之和等于 totalSec。
- * @param {string} text
- * @param {string} durationLabel 展示用总时长（与 totalSec 一致，如 "15" 或 "5.5"）
- * @param {number} totalSec 本条数据库分镜/API 片段总秒数
+ * 规范化全能片段里分镜时长：
+ * 支持新格式「【分镜k】（X秒）：」与旧格式「分镜k： X秒:」
+ * 单条时对齐总时长；多条时按比例缩放使秒数之和等于 totalSec。
  */
 function normalizeUniversalSegmentShotDurations(text, durationLabel, totalSec) {
   if (!text || typeof text !== 'string' || !durationLabel) return text;
@@ -10,16 +9,29 @@ function normalizeUniversalSegmentShotDurations(text, durationLabel, totalSec) {
   if (!Number.isFinite(total) || total <= 0) return text;
 
   const lines = text.split(/\r?\n/);
-  /** @type {{ i: number, k: number, sec: number, rest: string }[]} */
+  /** @type {{ i: number, k: number, sec: number, kind: 'bracket' | 'legacy' }[]} */
   const hits = [];
-  const headRe = /^\s*分镜(\d+)\s*[:：]\s*([\d.]+)\s*秒\s*[:：]\s*/i;
+  const bracketRe = /^\s*【分镜(\d+)】\s*[（(]\s*([\d.]+)\s*秒\s*[）)]\s*[：:]?\s*$/;
+  const legacyRe = /^\s*分镜(\d+)\s*[:：]\s*([\d.]+)\s*秒\s*[:：]\s*/i;
+
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(headRe);
-    if (!m) continue;
-    const k = Number(m[1]);
-    const sec = Number(m[2]);
-    const rest = lines[i].slice(m[0].length);
-    if (Number.isFinite(k) && k >= 1) hits.push({ i, k, sec: Number.isFinite(sec) && sec > 0 ? sec : 1, rest });
+    let m = lines[i].match(bracketRe);
+    if (m) {
+      const k = Number(m[1]);
+      const sec = Number(m[2]);
+      if (Number.isFinite(k) && k >= 1) {
+        hits.push({ i, k, sec: Number.isFinite(sec) && sec > 0 ? sec : 1, kind: 'bracket' });
+      }
+      continue;
+    }
+    m = lines[i].match(legacyRe);
+    if (m) {
+      const k = Number(m[1]);
+      const sec = Number(m[2]);
+      if (Number.isFinite(k) && k >= 1) {
+        hits.push({ i, k, sec: Number.isFinite(sec) && sec > 0 ? sec : 1, kind: 'legacy' });
+      }
+    }
   }
   if (hits.length === 0) return text;
 
@@ -36,8 +48,12 @@ function normalizeUniversalSegmentShotDurations(text, durationLabel, totalSec) {
   const fmt = (x) => (Number.isInteger(x) ? String(x) : String(Math.round(x * 10) / 10));
 
   if (uniq.length === 1 && uniq[0].k === 1) {
-    const { i } = uniq[0];
-    lines[i] = lines[i].replace(headRe, `分镜1： ${durationLabel}秒: `);
+    const { i, kind } = uniq[0];
+    if (kind === 'bracket') {
+      lines[i] = lines[i].replace(bracketRe, `【分镜1】（${durationLabel}秒）：`);
+    } else {
+      lines[i] = lines[i].replace(legacyRe, `分镜1： ${durationLabel}秒: `);
+    }
     return lines.join('\n');
   }
 
@@ -64,9 +80,13 @@ function normalizeUniversalSegmentShotDurations(text, durationLabel, totalSec) {
   }
 
   for (let j = 0; j < uniq.length; j++) {
-    const { i, k } = uniq[j];
+    const { i, k, kind } = uniq[j];
     const lab = fmt(newSecs[j]);
-    lines[i] = lines[i].replace(headRe, `分镜${k}： ${lab}秒: `);
+    if (kind === 'bracket') {
+      lines[i] = lines[i].replace(bracketRe, `【分镜${k}】（${lab}秒）：`);
+    } else {
+      lines[i] = lines[i].replace(legacyRe, `分镜${k}： ${lab}秒: `);
+    }
   }
   return lines.join('\n');
 }

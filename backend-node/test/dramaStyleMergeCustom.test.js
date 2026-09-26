@@ -35,3 +35,23 @@ test('resolvedStreamStyleFromDrama skips bare custom', () => {
     'ink neon',
   );
 });
+
+test('resolvedStreamStyleFromDrama preferZh picks Chinese over English param', () => {
+  const drama = {
+    style: 'anime',
+    metadata: {
+      style_prompt_zh: '日本动漫画风',
+      style_prompt_en: 'anime style, Japanese animation, clean cel shading',
+    },
+  };
+  assert.equal(
+    resolvedStreamStyleFromDrama('anime style, Japanese animation, clean cel shading', drama, {
+      preferZh: true,
+    }),
+    '日本动漫画风',
+  );
+  assert.match(
+    resolvedStreamStyleFromDrama('', drama, { preferZh: false }),
+    /anime style/i,
+  );
+});

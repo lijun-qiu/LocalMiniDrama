@@ -164,8 +164,20 @@ function getImageProxyUploadSettings() {
  */
 async function uploadToImageProxy(imageBuffer, mimeType, log, tag) {
   const { uploadUrl, timeoutMs, maxAttempts } = getImageProxyUploadSettings();
-  const extMap = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
-  const ext = extMap[mimeType] || 'jpg';
+  const extMap = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'audio/mpeg': 'mp3',
+    'audio/mp3': 'mp3',
+    'audio/wav': 'wav',
+    'audio/x-wav': 'wav',
+    'audio/mp4': 'm4a',
+    'audio/m4a': 'm4a',
+    'audio/ogg': 'ogg',
+  };
+  const ext = extMap[mimeType] || (String(mimeType || '').startsWith('audio/') ? 'mp3' : 'jpg');
   const filename = `ref_${Date.now()}.${ext}`;
   log.info('[图床上传] ▶ 开始', {
     tag,
@@ -239,7 +251,16 @@ async function uploadLocalImageToProxy(storagePath, localPathOrUrl, log, tag) {
       return null;
     }
     const ext = path.extname(filePath).toLowerCase();
-    const mimeMap = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
+    const mimeMap = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+      '.mp3': 'audio/mpeg',
+      '.wav': 'audio/wav',
+      '.m4a': 'audio/mp4',
+      '.ogg': 'audio/ogg',
+    };
     mimeType = mimeMap[ext] || 'image/jpeg';
     const buf = fs.readFileSync(filePath);
     return await uploadToImageProxy(buf, mimeType, log, tag);

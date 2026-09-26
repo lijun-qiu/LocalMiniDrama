@@ -60,11 +60,17 @@ export function findStoryboardInDrama(drama, storyboardId) {
   return null
 }
 
-export function getDramaGenerationOptions(drama) {
+export function getDramaGenerationOptions(drama, options = {}) {
   const meta = parseDramaMetadata(drama?.metadata)
+  // 视频/对白场景优先中文画风，避免 Agnes 等模型因英文 style 语言错乱
+  const preferZhStyle = !!options.preferZhStyle
+  const style = preferZhStyle
+    ? (meta.style_prompt_zh || meta.style_prompt_en || drama?.style || '')
+    : (meta.style_prompt_en || meta.style_prompt_zh || drama?.style || '')
   return {
     aspectRatio: meta.aspect_ratio || '16:9',
-    style: meta.style_prompt_en || meta.style_prompt_zh || drama?.style || '',
+    style,
+    styleZh: meta.style_prompt_zh || meta.style_prompt_en || drama?.style || '',
     videoResolution: meta.video_resolution || '480p',
   }
 }

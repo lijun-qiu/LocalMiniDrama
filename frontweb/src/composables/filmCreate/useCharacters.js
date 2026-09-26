@@ -161,12 +161,14 @@ export function useCharacters(deps) {
       appearance: char.appearance || '',
       personality: char.personality || '',
       description: char.description || '',
+      voice_style: char.voice_style || '',
       polished_prompt: char.polished_prompt || '',
       image_url: char.image_url || '',
       local_path: char.local_path || '',
       ref_image: char.ref_image || '',
       identity_anchors: char.identity_anchors || '',
       stages: char.stages ? (typeof char.stages === 'string' ? char.stages : JSON.stringify(char.stages, null, 2)) : '',
+      seedance2_voice_asset: char.seedance2_voice_asset || null,
     }
     showEditCharacter.value = true
     if (!char.polished_prompt && char.id && (char.appearance || char.description)) {
@@ -220,6 +222,7 @@ export function useCharacters(deps) {
           appearance: form.appearance || undefined,
           personality: form.personality || undefined,
           description: form.description || undefined,
+          voice_style: form.voice_style != null ? form.voice_style : undefined,
           polished_prompt: form.polished_prompt || undefined,
           stages: form.stages ? form.stages.trim() || undefined : undefined
         })
@@ -699,10 +702,11 @@ export function useCharacters(deps) {
 
   function sd2VoiceActionLabel(char) {
     const status = String(char?.seedance2_voice_asset?.status || '').toLowerCase()
-    if (status === 'active') return '音色参考'
+    if (status === 'active') return '台词音色'
     if (status === 'processing') return '刷新音色'
-    if (status === 'failed') return '重新上传'
-    return '上传音色'
+    if (status === 'failed') return '重新上传音色'
+    if (status === 'stale') return '刷新音色'
+    return '上传台词音色'
   }
 
   async function onSd2VoicePrimaryAction(char) {
@@ -750,9 +754,16 @@ export function useCharacters(deps) {
       sd2VoiceUploadingId.value = char.id
       try {
         const res = await characterAPI.sd2VoiceUpload(char.id, file)
-        ElMessage.success('Seedance 2.0 音色参考已上传')
+        ElMessage.success('台词音色参考已上传')
         // 强制重新加载整个剧本数据，确保 seedance2_voice_asset 被正确解析并更新到 store
         await loadDrama()
+        if (editCharacterForm.value?.id === char.id) {
+          const refreshed = (store.drama?.characters || []).find((c) => c.id === char.id)
+          if (refreshed) {
+            editCharacterForm.value.seedance2_voice_asset = refreshed.seedance2_voice_asset || null
+            if (refreshed.voice_style != null) editCharacterForm.value.voice_style = refreshed.voice_style
+          }
+        }
       } catch (e) {
         ElMessage.error(e?.message || '音色上传失败')
       } finally {

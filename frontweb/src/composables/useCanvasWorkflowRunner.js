@@ -64,7 +64,8 @@ export async function runVideoStep(drama, sb, genOpts) {
     image_url: absoluteFirst || undefined,
     first_frame_url: absoluteFirst || undefined,
     last_frame_url: absoluteLast,
-    style: genOpts.style || undefined,
+    // 视频用中文画风，避免英文 style 注入导致口播语言错乱
+    style: genOpts.styleZh || genOpts.style || undefined,
     aspect_ratio: genOpts.aspectRatio,
     resolution: genOpts.videoResolution || undefined,
     duration: sb.duration || undefined,
@@ -105,6 +106,12 @@ export async function runStoryboardPipeline(drama, storyboardId, pipeline, hooks
     hooks.onStepStart?.({ storyboardId, step, sb })
     try {
       if (step === 'image') {
+        // 全能模式生视频走场景/角色/道具参考图，不生成经典分镜主图
+        if (sb.creation_mode === 'universal') {
+          results.push({ step, skipped: true, reason: 'universal_omni' })
+          hooks.onStepComplete?.({ storyboardId, step, sb, skipped: true })
+          continue
+        }
         await runImageStep(drama, sb, genOpts)
         if (hooks.reloadStoryboard) {
           sb = (await hooks.reloadStoryboard(storyboardId)) || sb

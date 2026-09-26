@@ -323,6 +323,7 @@ function updateCharacter(db, log, characterId, req) {
   if (req.polished_prompt != null) { updates.push('polished_prompt = ?'); params.push(req.polished_prompt); }
   if (req.stages != null) { updates.push('stages = ?'); params.push(typeof req.stages === 'string' ? req.stages : JSON.stringify(req.stages)); }
   if (req.negative_prompt !== undefined) { updates.push('negative_prompt = ?'); params.push(req.negative_prompt); }
+  if (req.voice_style != null) { updates.push('voice_style = ?'); params.push(req.voice_style); }
   if (updates.length === 0) return { ok: true };
   if (req.image_url != null || req.local_path != null) {
     seedance2AssetGuards.markStaleOnCharacterMainImageDrift(db, log, charRow, {

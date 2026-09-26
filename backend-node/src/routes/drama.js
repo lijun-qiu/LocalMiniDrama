@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const dramaService = require('../services/dramaService');
 const propService = require('../services/propService');
 const response = require('../response');
@@ -269,12 +271,100 @@ function generateStoryboard(db, log) {
         video_duration: body.video_duration,
         aspect_ratio: body.aspect_ratio,
         include_narration: body.include_narration,
+        static_dialogue: body.static_dialogue,
         universal_omni_storyboard: body.universal_omni_storyboard,
       });
       response.success(res, resData);
     } catch (err) {
       log.error('Generate storyboard failed', { error: err.message });
       response.internalError(res, err.message || '生成分镜失败');
+    }
+  };
+}
+
+/** 画外音 / 旁白 Seedance 2.0 音色参考上传（剧级，与角色台词音色同结构） */
+function narrationSd2VoiceUpload(db, cfg, log) {
+  return async (req, res) => {
+    try {
+      const dramaId = Number(req.params.id);
+      const dramaRow = db
+        .prepare('SELECT id FROM dramas WHERE id = ? AND deleted_at IS NULL')
+        .get(dramaId);
+      if (!dramaRow) return response.notFound(res, '剧本不存在');
+      if (!req.file) return response.badRequest(res, '请上传音频文件');
+
+      const allowedExt = ['.mp3', '.wav', '.m4a', '.ogg'];
+      const ext = path.extname(req.file.originalname || '').toLowerCase();
+      if (!allowedExt.includes(ext)) {
+        return response.badRequest(res, '仅支持 mp3/wav/m4a/ogg 格式');
+      }
+
+      const storageLocalPath = cfg?.storage?.local_path;
+      const storageRoot = storageLocalPath
+        ? path.isAbsolute(storageLocalPath)
+          ? storageLocalPath
+          : path.join(process.cwd(), storageLocalPath)
+        : path.join(process.cwd(), 'data', 'storage');
+
+      const relDir = `drama_${dramaId}/narration/voice`;
+      const absDir = path.join(storageRoot, relDir);
+      if (!fs.existsSync(absDir)) fs.mkdirSync(absDir, { recursive: true });
+
+      const safeName = `narration_voice_${Date.now()}${ext}`;
+      const absPath = path.join(absDir, safeName);
+      fs.writeFileSync(absPath, req.file.buffer);
+
+      const publicUrl = `/static/${relDir}/${safeName}`;
+      const now = new Date().toISOString();
+      const payload = {
+        status: 'active',
+        url: publicUrl,
+        local_path: `${relDir}/${safeName}`,
+        certified_at: now,
+        duration: null,
+        format: ext.replace('.', ''),
+      };
+
+      db.prepare(
+        'UPDATE dramas SET narration_seedance2_voice_asset = ?, updated_at = ? WHERE id = ?'
+      ).run(JSON.stringify(payload), now, dramaId);
+
+      response.success(res, {
+        message: '画外音音色参考已保存',
+        narration_seedance2_voice_asset: payload,
+      });
+    } catch (err) {
+      log.error('drama narration-sd2-voice-upload', { error: err.message });
+      response.internalError(res, err.message);
+    }
+  };
+}
+
+function narrationSd2VoiceRefresh(db, log) {
+  return async (req, res) => {
+    try {
+      const dramaId = Number(req.params.id);
+      const row = db
+        .prepare(
+          'SELECT narration_seedance2_voice_asset FROM dramas WHERE id = ? AND deleted_at IS NULL'
+        )
+        .get(dramaId);
+      if (!row) return response.notFound(res, '剧本不存在');
+      let asset = null;
+      if (row.narration_seedance2_voice_asset) {
+        try {
+          asset = JSON.parse(row.narration_seedance2_voice_asset);
+        } catch (_) {
+          asset = null;
+        }
+      }
+      response.success(res, {
+        message: '状态已刷新',
+        narration_seedance2_voice_asset: asset,
+      });
+    } catch (err) {
+      log.error('drama narration-sd2-voice-refresh', { error: err.message });
+      response.internalError(res, err.message);
     }
   };
 }
@@ -301,5 +391,7 @@ module.exports = function dramaRoutes(db, cfg, log) {
     importDrama: importDrama(db, cfg, log),
     listExamples: listExamples(log),
     importExample: importExample(db, cfg, log),
+    narrationSd2VoiceUpload: narrationSd2VoiceUpload(db, cfg, log),
+    narrationSd2VoiceRefresh: narrationSd2VoiceRefresh(db, log),
   };
 };

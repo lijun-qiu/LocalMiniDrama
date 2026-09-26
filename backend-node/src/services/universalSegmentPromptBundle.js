@@ -305,12 +305,15 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
 
   const genreHint = (dramaRow?.genre && String(dramaRow.genre).trim()) || '';
   const dramaTitle = (dramaRow?.title && String(dramaRow.title).trim()) || '';
+  // 中文全能分镜：【风格锚点】只用 STYLE_ZH，禁止把 STYLE_EN 抄进正文（否则口播语言错乱）
   const styleHintBlock = [
     `STYLE_HINT:`,
     chunk('DRAMA_TITLE', dramaTitle),
     chunk('DRAMA_GENRE', genreHint),
     chunk('STYLE_ZH', styleZh),
-    chunk('STYLE_EN', styleEn),
+    styleZh
+      ? 'STYLE_ANCHOR_RULE: 【风格锚点】只写中文画风，整段只用 STYLE_ZH；禁止把 STYLE_EN / anime style 等英文抄进【风格锚点】或【分镜】。'
+      : chunk('STYLE_EN', styleEn),
   ]
     .filter(Boolean)
     .join('\n');
@@ -344,7 +347,7 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     ? [
         'SCENE_REFERENCE_LAYOUT（场景参考图可能是多宫格/多视角拼图，仅作内容与空间参考，成片禁止模仿拼图）:',
         '- 场景槽位（通常为 @图片1）常见为四宫格、九宫格或带分割线的多视角场景图：只提取家具、装修、色调、空间关系与光影，不要在提示中引导模型生成「分屏、宫格、多画面并列、复刻参考图网格」。',
-        '- 每一个「分镜k： Tk秒:」所在行的正文里都应点明：单镜头连续画幅、无成片宫格分屏；参考拼图仅用于理解空间与光线。',
+        '- 每一个【分镜k】画面描写里都应点明：单镜头连续画幅、无成片宫格分屏；参考拼图仅用于理解空间与光线。',
       ].join('\n')
     : '';
 
@@ -381,21 +384,21 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     shotPacingBlock = [
       'SHOT_PACING_AND_POSITION:',
       `TOTAL_CLIP_SECONDS: ${durationLabel}（本条数据库分镜 = 一次成片 API 的整段时长；下文 M 个子分镜仅为同一时间轴内节拍拆分）`,
-      `M_HEURISTIC_ONLY: 约 ${mHeuristic}（不得照抄为最终 M；须结合剧本高潮/对白密度/转场/机位与 movement 等自决 1～8 的整数 M）`,
+      `M_HEURISTIC_ONLY: 优先 M=1（整段 ${durationLabel} 秒写进【分镜1】）；仅当 ACTION 含必须切开的阶段变化时才提高到 2～8（不得为「先静默后说话」而拆）`,
       `SHOT_ORDER: ${ix >= 0 ? ix + 1 : '?'} / ${totalShots}`,
       `SHOT_POSITION_TAG: ${posTag}`,
       chunk('SEGMENT_TITLE_PREV', prevSeg || null),
       chunk('SEGMENT_TITLE_CURRENT', currSeg || null),
       chunk('SEGMENT_TITLE_NEXT', nextSeg || null),
       segChange
-        ? 'BOUNDARY_HINT: 段落标题相对上一镜已变化 → 转场/新叙事块概率高 → 可提高 M 或前几秒侧重空间/情绪铺垫再入冲突。'
-        : 'BOUNDARY_HINT: 同段落延续 → M 可保守；若 ACTION 内对白长、机位少，也可 M=1 但在单行内写满时间流动。',
+        ? 'BOUNDARY_HINT: 段落标题相对上一镜已变化 → 可在【分镜1】前几秒侧重空间入场，但仍保持 M=1 连续叙述；台词写回同一【分镜】时间轴。'
+        : 'BOUNDARY_HINT: 同段落延续 → 默认 M=1；在单段【分镜1】内写满时间流动与台词时机。',
     ].join('\n');
   } catch (_) {
     shotPacingBlock = [
       'SHOT_PACING_AND_POSITION:',
       `TOTAL_CLIP_SECONDS: ${durationLabel}`,
-      `M_HEURISTIC_ONLY: 约 ${mHeuristic}`,
+      `M_HEURISTIC_ONLY: 优先 M=1（整段写进【分镜1】）`,
     ].join('\n');
   }
 
@@ -433,15 +436,15 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
   } catch (_) {}
 
   const multiBeatContract = [
-    'MULTI_BEAT_OUTPUT（一条成片 API 内的多节拍文案）:',
-    '- 总行数 = 3 + M。M 为你选择的子分镜条数（时间轴节拍），整数 1～8。',
-    '- 第1行：「画面风格和类型:」…',
-    `- 第2行：必须为「生成一个由以下M个分镜组成的视频。」（将 M 替换为你的整数；与下文实际「分镜1…分镜M」条数一致）。`,
-    '- 第3行：必须逐字等于 LINE3_REQUIRED（见下）。',
-    '- 第4行到第(3+M)行：依次为「分镜1： T1秒:」「分镜2： T2秒:」…「分镜M： TM秒:」；每行冒号后先写秒数再写该子时段内的动态影像与运镜描写。',
-    `- 约束：T1+T2+…+TM 必须严格等于 TOTAL_CLIP_SECONDS（数值与 ${durationLabel} 一致）；每个 Tk>0；子分镜序号连续无跳号。`,
-    '- 若 M=1：即仅一行「分镜1： TOTAL秒:」写满整段；若 M>1：每行只覆盖本子时段，前后行衔接成连续时间线，避免剧情跳跃或重复前一行已完成的动作。',
-    '- 禁止额外说明行、markdown、英文小标题；禁止把「子分镜」写成多次独立成片 API。',
+    'MULTI_BEAT_OUTPUT（一条成片 API 内的结构化文案）:',
+    '- 先写【风格锚点】，再写【场景设定】（须把 SCENE_NOTE_REQUIRED 整句融入场景段）。',
+    '- 再写子分镜：默认 M=1，只写【分镜1】（TOTAL_CLIP_SECONDS秒）→【环境音】；仅当本镜内部确有必须切开的阶段变化时才 M>1。',
+    `- 约束：T1+…+TM 必须严格等于 TOTAL_CLIP_SECONDS（${durationLabel}）；每个 Tk>0；分镜序号连续。`,
+    '- 【分镜】写完整连续画面；有对白时在开口瞬间写「<角色名>说 {原文}」（ArcReel，可与动作同行）；禁止「口型同步说出『…』」与额外口型描写；禁止「静默拍→说话拍」仅为对白拆两段。',
+    '- **禁止输出【台词】栏**；人声只来自 <名>说 {…} / 画外音说 {…} 花括号内原文。',
+    '- 脸与外形用 CHARACTER_IMAGE_BINDING 的 @图片N；禁止让场景 @图片1 说台词。',
+    '- 【环境音】按 ATMOSPHERE / SOUND_EFFECT 写低电平现场声（人声清晰在前，无BGM）；勿强制静音；禁止BGM与掷地有声等台词隐喻。',
+    '- 禁止灵境单行、markdown、文末 ". Style: english..." 尾巴。',
   ].join('\n');
 
   const userPrompt = [
@@ -450,7 +453,7 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     multiBeatContract,
     shotPacingBlock,
     neighborDetailBlock || null,
-    'LINE3_REQUIRED（第3行必须与下面整句完全一致，含标点）:',
+    'SCENE_NOTE_REQUIRED（必须写入【场景设定】正文，可作独立句，含标点）:',
     line3Required,
     `EPISODE_SCRIPT:\n${episodeScript || '(本集剧本为空；仅凭分镜与邻镜推断节奏，勿编造大段新剧情)'}`,
     chunk('EPISODE_TABLE_TITLE', episodeTableTitle),
@@ -477,6 +480,9 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     sbId,
     episodeId: Number(sb.episode_id) || 0,
     storyboardNumber: Number(sb.storyboard_number) || 0,
+    characterSlots: slots
+      .filter((s) => s.kind === '角色')
+      .map((s) => ({ name: s.summary, tag: s.tag })),
   };
 }
 

@@ -87,7 +87,7 @@ function createStoryboard(db, log, req) {
 function updateStoryboard(db, log, id, req) {
   const row = db.prepare('SELECT id FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(Number(id));
   if (!row) return null;
-  const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'local_path', 'main_panel_idx', 'video_url', 'audio_local_path', 'narration_audio_local_path', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_local_path'];
+  const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'local_path', 'main_panel_idx', 'video_url', 'audio_local_path', 'narration_audio_local_path', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_local_path', 'coverage_plate_id'];
   const updates = [];
   const params = [];
   // 前端可能传 character_ids，与 characters 统一：存为 JSON 字符串
@@ -121,9 +121,31 @@ function updateStoryboard(db, log, id, req) {
       log.warn('syncStoryboardCharacterLinks failed', { id, message: e.message });
     }
   }
-  // 道具关联：写入 storyboard_props 表
+  // 道具关联：写入 storyboard_props 表（仅允许本剧道具，防止跨剧串绑）
   if (req.prop_ids !== undefined) {
-    const propIds = Array.isArray(req.prop_ids) ? req.prop_ids : [];
+    let propIds = Array.isArray(req.prop_ids) ? req.prop_ids.map(Number).filter(Number.isFinite) : [];
+    try {
+      const row = db.prepare(
+        `SELECT e.drama_id FROM storyboards s
+         JOIN episodes e ON e.id = s.episode_id
+         WHERE s.id = ? AND s.deleted_at IS NULL`
+      ).get(Number(id));
+      if (row?.drama_id != null) {
+        const allow = new Set(
+          db.prepare('SELECT id FROM props WHERE drama_id = ? AND deleted_at IS NULL')
+            .all(row.drama_id)
+            .map((r) => Number(r.id))
+            .filter(Number.isFinite)
+        );
+        const dropped = propIds.filter((pid) => !allow.has(pid));
+        propIds = propIds.filter((pid) => allow.has(pid));
+        if (dropped.length) {
+          log.warn('Storyboard update dropped cross-drama prop_ids', { id, dropped, kept: propIds });
+        }
+      }
+    } catch (e) {
+      log.warn('Storyboard prop_ids allowlist check failed', { id, message: e.message });
+    }
     db.prepare('DELETE FROM storyboard_props WHERE storyboard_id = ?').run(Number(id));
     const ins = db.prepare('INSERT OR IGNORE INTO storyboard_props (storyboard_id, prop_id) VALUES (?, ?)');
     for (const pid of propIds) ins.run(Number(id), Number(pid));
@@ -183,6 +205,7 @@ function getStoryboardById(db, id) {
     creation_mode: r.creation_mode === 'universal' ? 'universal' : 'classic',
     universal_segment_text: r.universal_segment_text ?? null,
     layout_description: r.layout_description ?? null,
+    coverage_plate_id: r.coverage_plate_id ?? null,
     first_frame_image_id: r.first_frame_image_id ?? null,
     last_frame_image_id: r.last_frame_image_id ?? null,
     last_frame_image_url: r.last_frame_image_url ?? null,

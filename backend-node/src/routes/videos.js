@@ -2,8 +2,47 @@ const response = require('../response');
 const videoService = require('../services/videoService');
 const taskService = require('../services/taskService');
 const { normalizeAspectRatioForApi } = require('../services/videoClient');
+const {
+  isLatinHeavyStyle,
+  sanitizeChineseOmniStyleAnchor,
+} = require('../services/universalOmniMultiBeatFormat');
 
 function routes(db, log) {
+  function loadClassicFieldsForStoryboard(storyboardId) {
+    const id = Number(storyboardId);
+    if (!Number.isFinite(id) || id <= 0) return null;
+    try {
+      return (
+        db
+          .prepare(
+            `SELECT action, dialogue, narration, result, atmosphere, location, time, title,
+                    movement, shot_type, angle, sound_effect, video_prompt, creation_mode
+             FROM storyboards WHERE id = ? AND deleted_at IS NULL`
+          )
+          .get(id) || null
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function writeBackArcReelPrompt(storyboardId, prompt, source) {
+    const id = Number(storyboardId);
+    if (!Number.isFinite(id) || id <= 0 || !prompt) return;
+    const now = new Date().toISOString();
+    if (source === 'classic') {
+      db.prepare(
+        `UPDATE storyboards SET video_prompt = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`
+      ).run(prompt, now, id);
+      return;
+    }
+    if (source === 'omni') {
+      db.prepare(
+        `UPDATE storyboards SET universal_segment_text = ?, creation_mode = 'universal', updated_at = ? WHERE id = ? AND deleted_at IS NULL`
+      ).run(prompt, now, id);
+    }
+  }
+
   return {
     list: (req, res) => {
       try {
@@ -25,12 +64,83 @@ function routes(db, log) {
         const provider = body.provider || 'chatfire';
         let prompt = body.prompt || '';
         const style = (body.style || '').toString().trim();
+        const isZhOmniPrompt = /【风格锚点】/.test(prompt);
+        let isArcReelStructured = false;
+        // 全能 / 经典：入库前转为 ArcReel 结构化，避免未手点「改为结构化」就提交
+        try {
+          const {
+            ensureArcReelStructuredForVideoSubmit,
+            isArcReelStructuredPrompt,
+            looksLikeClassicVideoPrompt,
+          } = require('../services/dramaVideoPromptYaml');
+          const characters = dramaId
+            ? db
+                .prepare(
+                  `SELECT name, voice_style FROM characters WHERE drama_id = ? AND deleted_at IS NULL`
+                )
+                .all(dramaId)
+            : [];
+          const nameToTag = new Map();
+          if (storyboardId) {
+            try {
+              const { buildUniversalSegmentUserPromptBundle } = require('../services/universalSegmentPromptBundle');
+              const built = buildUniversalSegmentUserPromptBundle(db, storyboardId, {}, {});
+              if (built.ok && Array.isArray(built.characterSlots)) {
+                for (const s of built.characterSlots) {
+                  if (s?.name && s?.tag) nameToTag.set(String(s.name), String(s.tag));
+                }
+              }
+            } catch (_) {}
+          }
+          const classicRow = storyboardId ? loadClassicFieldsForStoryboard(storyboardId) : null;
+          // 全能模式也要带上 narration/dialogue，否则 ArcReel 只有 Action、缺 Speaker: 画外音
+          const classicFields =
+            classicRow ||
+            (looksLikeClassicVideoPrompt(prompt) ? { video_prompt: prompt } : null);
+          const ensured = ensureArcReelStructuredForVideoSubmit(prompt, {
+            characters,
+            nameToTag,
+            classicFields,
+          });
+          if (ensured.structured && ensured.prompt) {
+            prompt = ensured.prompt;
+            isArcReelStructured = true;
+            if ((ensured.converted || !ensured.passthrough) && storyboardId) {
+              const writeAs =
+                classicRow?.creation_mode === 'universal' || ensured.source === 'omni'
+                  ? 'omni'
+                  : 'classic';
+              writeBackArcReelPrompt(storyboardId, prompt, writeAs);
+            }
+            log.info('[视频] create 已确保 ArcReel 结构化', {
+              storyboard_id: storyboardId,
+              converted: ensured.converted,
+              source: ensured.source || null,
+              has_negative_tail: prompt.includes('禁止出现：BGM、文字字幕、水印。'),
+            });
+          } else {
+            isArcReelStructured = isArcReelStructuredPrompt(prompt);
+          }
+        } catch (_) {
+          isArcReelStructured = false;
+        }
         if (style) {
           const baseLower = String(prompt || '').toLowerCase();
           const styleLower = style.toLowerCase();
-          if (!baseLower.includes(styleLower)) {
-            prompt = prompt ? `${prompt}. Style: ${style}` : `Style: ${style}`;
+          const skipLatinIntoZhOmni = isZhOmniPrompt && isLatinHeavyStyle(style);
+          if (!isArcReelStructured && !skipLatinIntoZhOmni && !baseLower.includes(styleLower)) {
+            if (isZhOmniPrompt) {
+              prompt = prompt.replace(
+                /(【风格锚点】\s*\n)([^\n【]*)/,
+                (_, head, bodyLine) => `${head}${String(bodyLine || '').trim()}，${style}`
+              );
+            } else {
+              prompt = prompt ? `${prompt}. Style: ${style}` : `Style: ${style}`;
+            }
           }
+        }
+        if (isZhOmniPrompt && !isArcReelStructured) {
+          prompt = sanitizeChineseOmniStyleAnchor(prompt);
         }
         const model = body.model ?? null;
         const duration = body.duration ?? null;

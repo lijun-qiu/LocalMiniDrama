@@ -53,7 +53,7 @@ export function useCanvasEpisodeGenerate(deps) {
 
   function buildStoryboardApiOptions() {
     const meta = parseDramaMetadata(drama.value?.metadata)
-    const gen = getDramaGenerationOptions(drama.value)
+    const gen = getDramaGenerationOptions(drama.value, { preferZhStyle: true })
     const ep = getEpisode()
     const scriptLen = (ep?.script_content || '').trim().length
     let videoDuration
@@ -63,10 +63,11 @@ export function useCanvasEpisodeGenerate(deps) {
       videoDuration = Math.max(10, Math.round(10 + (scriptLen / 600) * 60))
     }
     return {
-      style: gen.style || undefined,
+      style: gen.styleZh || gen.style || undefined,
       aspect_ratio: gen.aspectRatio,
       video_duration: videoDuration,
       include_narration: !!meta.storyboard_include_narration,
+      static_dialogue: !!meta.storyboard_static_dialogue,
       universal_omni_storyboard: !!meta.storyboard_universal_omni,
     }
   }

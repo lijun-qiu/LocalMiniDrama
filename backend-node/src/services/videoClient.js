@@ -17,6 +17,13 @@ const {
   unsafeDecodeKlingJwtPayload,
   jwtPartLengths,
 } = require('./klingJwt');
+const {
+  getApiKeyPool,
+  encodeAgnesTaskId,
+  resolveAgnesPollAuth,
+  parseApiKeys,
+  AGNES_VIDEO_MIN_INTERVAL_MS,
+} = require('../utils/apiKeyPool');
 
 /**
  * ?? provider ??????????api_protocol ??????????
@@ -617,35 +624,49 @@ async function callVolcengineOmniVideoApi(config, log, opts) {
     if (body.content.length > 1) body.task_type = 'i2v';
   }
 
-  // Seedance 2.0 音色参考：本路径仅 volcengine_omni 调用；有 URL 即注入（网关别名如 mingiz-sd2 也要生效）
-  if (opts.voice_reference_url) {
-    let voiceUrl = String(opts.voice_reference_url).trim();
-    if (voiceUrl) {
-      // 复用图片的本地文件转 base64 逻辑
-      if (/localhost|127\.0\.0\.1/i.test(voiceUrl) && storage_local_path && (files_base_url || '').match(/localhost|127\.0\.0\.1/i)) {
-        const baseUrl = (files_base_url || '').replace(/\/$/, '');
-        const afterStatic = voiceUrl.split('/static/')[1] || (baseUrl ? voiceUrl.replace(baseUrl + '/', '').replace(baseUrl, '') : null);
-        const relPath = afterStatic ? afterStatic.replace(/^\//, '') : null;
-        if (relPath) {
-          const filePath = path.join(storage_local_path, relPath);
-          try {
-            if (fs.existsSync(filePath)) {
-              const buf = fs.readFileSync(filePath);
-              const ext = path.extname(filePath).toLowerCase();
-              const mime =
-                { '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg' }[ext] || 'audio/mpeg';
-              voiceUrl = 'data:' + mime + ';base64,' + buf.toString('base64');
-            }
-          } catch (_) {}
-        }
-      }
-      body.content.push({
-        type: 'audio_url',
-        audio_url: { url: voiceUrl },
-        role: 'reference_audio',
-      });
-      log.info('[VolcOmni] 已注入 Seedance 2.0 音色参考音频', { video_gen_id, voice_ref: String(opts.voice_reference_url).slice(0, 80) });
+  // Seedance 2.0 音色参考：支持多段，顺序与文案 @音频N / 【主体与音色】一致
+  const voiceUrls = [];
+  if (Array.isArray(opts.voice_reference_urls)) {
+    for (const u of opts.voice_reference_urls) {
+      const t = String(u || '').trim();
+      if (t) voiceUrls.push(t);
     }
+  }
+  if (!voiceUrls.length && opts.voice_reference_url) {
+    const t = String(opts.voice_reference_url).trim();
+    if (t) voiceUrls.push(t);
+  }
+  for (let vi = 0; vi < voiceUrls.length; vi++) {
+    let voiceUrl = voiceUrls[vi];
+    if (/localhost|127\.0\.0\.1/i.test(voiceUrl) && storage_local_path && (files_base_url || '').match(/localhost|127\.0\.0\.1/i)) {
+      const baseUrl = (files_base_url || '').replace(/\/$/, '');
+      const afterStatic = voiceUrl.split('/static/')[1] || (baseUrl ? voiceUrl.replace(baseUrl + '/', '').replace(baseUrl, '') : null);
+      const relPath = afterStatic ? afterStatic.replace(/^\//, '') : null;
+      if (relPath) {
+        const filePath = path.join(storage_local_path, relPath);
+        try {
+          if (fs.existsSync(filePath)) {
+            const buf = fs.readFileSync(filePath);
+            const ext = path.extname(filePath).toLowerCase();
+            const mime =
+              { '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg' }[ext] || 'audio/mpeg';
+            voiceUrl = 'data:' + mime + ';base64,' + buf.toString('base64');
+          }
+        } catch (_) {}
+      }
+    }
+    body.content.push({
+      type: 'audio_url',
+      audio_url: { url: voiceUrl },
+      role: 'reference_audio',
+    });
+  }
+  if (voiceUrls.length) {
+    log.info('[VolcOmni] 已注入 Seedance 2.0 音色参考音频', {
+      video_gen_id,
+      count: voiceUrls.length,
+      voice_refs: voiceUrls.map((u) => String(u).slice(0, 80)),
+    });
   }
 
   // ===== 全能模式（Seedance 2.0 / Omni）最终请求结构体日志 =====
@@ -2455,6 +2476,114 @@ function agnesSnapNumFrames(durationSec, frameRate = 24) {
  * - 全能多图参考：extra_body.image 数组，且禁止 mode: keyframes
  * - 经典首尾帧：extra_body.mode = keyframes + 恰好两张图
  */
+function isAgnesVideoModelName(name) {
+  return /agnes-video/i.test(String(name || ''));
+}
+
+function isAgnesVideo25FlashModel(name) {
+  return /agnes-video-v?2\.5-flash/i.test(String(name || ''));
+}
+
+function isAgnesVideo25Model(name) {
+  if (isAgnesVideo25FlashModel(name)) return false;
+  return /agnes-video-v?2\.5/i.test(String(name || ''));
+}
+
+function isAgnesVideo25FamilyModel(name) {
+  return isAgnesVideo25FlashModel(name) || isAgnesVideo25Model(name);
+}
+
+function normalizeAgnesVideoModel(model) {
+  const m = String(model || '').trim();
+  if (!m) return 'agnes-video-2.5-flash';
+  if (isAgnesVideo25FlashModel(m)) return 'agnes-video-2.5-flash';
+  if (isAgnesVideo25Model(m)) return 'agnes-video-2.5';
+  if (/agnes-video-v?2\.0/i.test(m)) return 'agnes-video-v2.0';
+  return m;
+}
+
+/** Agnes Video 2.5：seconds 官方范围 "4"～"12" */
+function agnes25ClampSeconds(duration) {
+  const n = Math.round(Number(duration) || 5);
+  return String(Math.min(12, Math.max(4, n)));
+}
+
+const AGNES25_ASPECT_RATIOS = new Set(['21:9', '16:9', '4:3', '1:1', '3:4', '9:16']);
+
+function normalizeAgnes25AspectRatio(ratio) {
+  const r = normalizeAspectRatioForApi(ratio) || '16:9';
+  return AGNES25_ASPECT_RATIOS.has(r) ? r : '16:9';
+}
+
+/** 把提示词里的 @图片N / @音频N 改成 Agnes 2.5 的 <Picture N> / <Audio N> */
+function rewriteAgnes25ReferenceTags(prompt) {
+  return String(prompt || '')
+    .replace(/@图片\s*(\d+)/g, '<Picture $1>')
+    .replace(/@Image\s*(\d+)/gi, '<Picture $1>')
+    .replace(/@音频\s*(\d+)/g, '<Audio $1>')
+    .replace(/@Audio\s*(\d+)/gi, '<Audio $1>');
+}
+
+/**
+ * Agnes Video 2.5 请求体：不接受 V2.0 的 width/height/num_frames。
+ * mode: text | keyframe | reference（reference 可带 images / audios）
+ */
+function buildAgnes25VideoBody({
+  model,
+  prompt,
+  duration,
+  aspect_ratio,
+  useOmniReference,
+  resolvedRefs,
+  resolvedAudios,
+  firstResolved,
+  lastResolved,
+  seed,
+}) {
+  const resolvedModel = normalizeAgnesVideoModel(model);
+  const isFlash = isAgnesVideo25FlashModel(resolvedModel);
+  const maxImages = isFlash ? 5 : 10;
+  const maxAudios = isFlash ? 3 : 5;
+  const refs = Array.isArray(resolvedRefs) ? resolvedRefs.filter(Boolean) : [];
+  const audios = Array.isArray(resolvedAudios)
+    ? resolvedAudios.filter(Boolean).slice(0, maxAudios)
+    : [];
+  const body = {
+    model: resolvedModel,
+    prompt: rewriteAgnes25ReferenceTags(prompt || ''),
+    seconds: agnes25ClampSeconds(duration),
+    size: '720P',
+    aspect_ratio: normalizeAgnes25AspectRatio(aspect_ratio),
+  };
+  if (seed != null && Number.isFinite(Number(seed))) {
+    body.seed = Number(seed);
+  }
+
+  const hasImages = refs.length > 0;
+  const hasAudios = audios.length > 0;
+  // reference：有图或有音频即可；keyframe 模式官方禁止带 audios，故有音色时优先走 reference
+  if ((useOmniReference && hasImages) || (hasAudios && (hasImages || useOmniReference || (!firstResolved && !lastResolved)))) {
+    body.mode = 'reference';
+    if (hasImages) body.images = refs.slice(0, maxImages);
+    else if (firstResolved) body.images = [firstResolved];
+    if (hasAudios) body.audios = audios;
+    return { body, strategy: isFlash ? 'v25_flash_reference' : 'v25_reference' };
+  }
+  if (firstResolved || lastResolved) {
+    body.mode = 'keyframe';
+    if (firstResolved) body.first_frame = firstResolved;
+    if (lastResolved && lastResolved !== firstResolved) body.last_frame = lastResolved;
+    return { body, strategy: isFlash ? 'v25_flash_keyframe' : 'v25_keyframe' };
+  }
+  if (hasAudios) {
+    body.mode = 'reference';
+    body.audios = audios;
+    return { body, strategy: isFlash ? 'v25_flash_reference' : 'v25_reference' };
+  }
+  body.mode = 'text';
+  return { body, strategy: isFlash ? 'v25_flash_text' : 'v25_text' };
+}
+
 function buildAgnesVideoImagePayload({ useOmniReference, resolvedRefs, firstResolved, lastResolved }) {
   const refs = Array.isArray(resolvedRefs) ? resolvedRefs.filter(Boolean) : [];
   if (useOmniReference && refs.length >= 2) {
@@ -2484,6 +2613,110 @@ function buildAgnesVideoImagePayload({ useOmniReference, resolvedRefs, firstReso
   return { strategy: 'text_only' };
 }
 
+/** Agnes 提交：明确不可重试的业务错误码（重试也不会成功） */
+const AGNES_SUBMIT_NON_RETRYABLE_CODES = new Set([
+  'invalid_api_key',
+  'unauthorized',
+  'authentication_error',
+  'insufficient_quota',
+  'insufficient_balance',
+  'quota_exceeded',
+  'billing_not_active',
+  'content_policy_violation',
+  'moderation_blocked',
+  'safety_violation',
+  'invalid_request',
+  'bad_request',
+  'invalid_parameter',
+  'invalid_image_url',
+  'image_download_failed',
+  'prompt_too_long',
+  'context_length_exceeded',
+]);
+
+function parseAgnesSubmitErrorPayload(raw) {
+  if (!raw) return null;
+  try {
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch (_) {
+    return null;
+  }
+}
+
+function getAgnesSubmitErrorCode(payload) {
+  if (!payload || typeof payload !== 'object') return '';
+  const c = payload.code ?? payload.error?.code ?? payload.error?.type;
+  return String(c || '').toLowerCase();
+}
+
+function getAgnesSubmitErrorMessage(payload, raw) {
+  if (payload && typeof payload === 'object') {
+    const m = payload.message ?? payload.error?.message ?? payload.error;
+    if (typeof m === 'string') return m;
+    if (m && typeof m === 'object' && m.message) return String(m.message);
+  }
+  return String(raw || '').slice(0, 300);
+}
+
+/**
+ * Agnes 视频 POST 提交失败是否值得换 Key / 稍后重试。
+ * 401 无效令牌等鉴权错误不可重试；队列满 / 429 可重试。
+ */
+function isAgnesRetryableSubmitError(status, raw) {
+  const payload = parseAgnesSubmitErrorPayload(raw);
+  const code = getAgnesSubmitErrorCode(payload);
+  const msg = getAgnesSubmitErrorMessage(payload, raw).toLowerCase();
+  const combined = `${code} ${msg} ${String(raw || '').toLowerCase()}`;
+
+  if (status === 401 || status === 403 || status === 402) return false;
+  if (status === 400 || status === 422) return false;
+  if (AGNES_SUBMIT_NON_RETRYABLE_CODES.has(code)) return false;
+  if (
+    /invalid.*(api.?key|token|auth)|unauthorized|forbidden|insufficient|quota|balance|billing|payment|moderation|policy|content.?filter|safety|invalid.?request|invalid.?parameter|prompt.?too.?long|num_frames|frame.?count|image.*(invalid|unreachable|download)|unsupported.?model|无效的\s*令牌|无效的\s*token/.test(
+      combined
+    )
+  ) {
+    return false;
+  }
+
+  if (status === 429) return true;
+  if (code === 'video_queue_full' || code === 'rate_limit_exceeded' || code === 'too_many_requests') {
+    return true;
+  }
+  if (
+    /video_queue_full|queue is full|rate.?limit|too many requests|server.?busy|temporarily unavailable|service unavailable|try again later|overload|overloaded|memory overload/.test(
+      combined
+    )
+  ) {
+    return true;
+  }
+  if (status === 503 && /unavailable|overload|busy|queue/.test(combined)) return true;
+
+  return false;
+}
+
+function isAgnesRetryableNetworkError(err) {
+  const m = String(err?.message || err || '').toLowerCase();
+  return /econnreset|etimedout|socket hang up|fetch failed|network|timeout|aborted/.test(m);
+}
+
+function buildAgnesSubmitFailure(status, raw, fallbackPrefix) {
+  const payload = parseAgnesSubmitErrorPayload(raw);
+  const code = getAgnesSubmitErrorCode(payload);
+  let errMsg = `${fallbackPrefix || 'Agnes 视频请求失败'}: ${status}`;
+  const detail = getAgnesSubmitErrorMessage(payload, raw);
+  if (detail) errMsg += ' - ' + detail;
+  if (code === 'video_queue_full' || /queue is full/i.test(detail)) {
+    errMsg =
+      'Agnes 视频队列已满（video_queue_full），不是单 Key 故障。平台全局排队拥堵，将自动重试。原始：' +
+      errMsg;
+  }
+  return {
+    error: errMsg,
+    retryable: isAgnesRetryableSubmitError(status, raw),
+  };
+}
+
 async function callAgnesVideoApi(db, config, log, opts) {
   const {
     prompt,
@@ -2497,6 +2730,7 @@ async function callAgnesVideoApi(db, config, log, opts) {
     files_base_url,
     storage_local_path,
     video_gen_id,
+    preferred_key_index,
   } = opts;
 
   const base = (config.base_url || 'https://apihub.agnes-ai.com/v1').replace(/\/$/, '');
@@ -2504,18 +2738,8 @@ async function callAgnesVideoApi(db, config, log, opts) {
   if (!ep.startsWith('/')) ep = '/' + ep;
   const url = base + ep;
 
-  const frameRate = 24;
-  const dims = agnesDimensionsFromAspectRatio(aspect_ratio || '16:9');
-  const numFrames = agnesSnapNumFrames(duration, frameRate);
-
-  const body = {
-    model: model || 'agnes-video-v2.0',
-    prompt: prompt || '',
-    width: dims.width,
-    height: dims.height,
-    num_frames: numFrames,
-    frame_rate: frameRate,
-  };
+  const resolvedModel = normalizeAgnesVideoModel(model);
+  const useV25Family = isAgnesVideo25FamilyModel(resolvedModel);
 
   const rawRefList = Array.isArray(reference_urls) ? reference_urls.filter(Boolean) : [];
   const resolvedRefs = [];
@@ -2557,21 +2781,93 @@ async function callAgnesVideoApi(db, config, log, opts) {
     };
   }
 
-  const imagePayload = buildAgnesVideoImagePayload({
-    useOmniReference,
-    resolvedRefs,
-    firstResolved,
-    lastResolved,
-  });
-  if (imagePayload.image != null) {
-    body.image = imagePayload.image;
-  }
-  if (imagePayload.extra_body) {
-    body.extra_body = imagePayload.extra_body;
+  let body;
+  let imageStrategy;
+  if (useV25Family) {
+    const rawVoiceList = [];
+    if (Array.isArray(opts.voice_reference_urls)) {
+      for (const u of opts.voice_reference_urls) {
+        const t = String(u || '').trim();
+        if (t) rawVoiceList.push(t);
+      }
+    }
+    if (!rawVoiceList.length && opts.voice_reference_url) {
+      const t = String(opts.voice_reference_url).trim();
+      if (t) rawVoiceList.push(t);
+    }
+    const maxAudios = isAgnesVideo25FlashModel(resolvedModel) ? 3 : 5;
+    const resolvedAudios = [];
+    for (let i = 0; i < Math.min(rawVoiceList.length, maxAudios); i++) {
+      const a = await resolveImageInputForAgnesAsync(
+        db,
+        rawVoiceList[i],
+        files_base_url,
+        storage_local_path,
+        log,
+        video_gen_id,
+        `audio_${i}`
+      );
+      if (a) resolvedAudios.push(a);
+    }
+    if (rawVoiceList.length && resolvedAudios.length === 0) {
+      log.warn('[Agnes] 音色参考无法转为公网 URL，将不带 audios 继续提交', {
+        video_gen_id,
+        raw_count: rawVoiceList.length,
+      });
+    }
+
+    const built = buildAgnes25VideoBody({
+      model: resolvedModel,
+      prompt: prompt || '',
+      duration,
+      aspect_ratio,
+      useOmniReference,
+      resolvedRefs,
+      resolvedAudios,
+      firstResolved,
+      lastResolved,
+      seed: opts.seed,
+    });
+    body = built.body;
+    imageStrategy = built.strategy;
+    if (resolvedAudios.length) {
+      log.info('[Agnes] 已绑定角色音色 audios', {
+        video_gen_id,
+        model: resolvedModel,
+        audio_count: resolvedAudios.length,
+        audio_heads: resolvedAudios.map((u) => String(u).slice(0, 64)),
+      });
+    }
+  } else {
+    const frameRate = 24;
+    const dims = agnesDimensionsFromAspectRatio(aspect_ratio || '16:9');
+    const numFrames = agnesSnapNumFrames(duration, frameRate);
+    body = {
+      model: resolvedModel || 'agnes-video-v2.0',
+      prompt: prompt || '',
+      width: dims.width,
+      height: dims.height,
+      num_frames: numFrames,
+      frame_rate: frameRate,
+    };
+    const imagePayload = buildAgnesVideoImagePayload({
+      useOmniReference,
+      resolvedRefs,
+      firstResolved,
+      lastResolved,
+    });
+    imageStrategy = imagePayload.strategy;
+    if (imagePayload.image != null) {
+      body.image = imagePayload.image;
+    }
+    if (imagePayload.extra_body) {
+      body.extra_body = imagePayload.extra_body;
+    }
   }
 
   log.info('[Agnes] 参考图输入（解析前）', {
     video_gen_id,
+    model: body.model,
     use_omni_reference: useOmniReference,
     raw_ref_count: rawRefList.length,
     raw_refs: rawRefList.map((u, i) => ({ index: i, url: String(u) })),
@@ -2580,71 +2876,152 @@ async function callAgnesVideoApi(db, config, log, opts) {
   });
   log.info('[Agnes] 参考图解析结果', {
     video_gen_id,
+    model: body.model,
     resolved_ref_count: resolvedRefs.length,
     resolved_refs: resolvedRefs.map((u, i) => ({ index: i, url: u })),
     first_resolved: firstResolved,
     last_resolved: lastResolved,
-    image_strategy: imagePayload.strategy,
+    image_strategy: imageStrategy,
   });
 
   logVideoPostRequest(log, 'Agnes', url, body, video_gen_id, {
     model: body.model,
+    mode: body.mode || body.extra_body?.mode || null,
     width: body.width,
     height: body.height,
     num_frames: body.num_frames,
     frame_rate: body.frame_rate,
+    seconds: body.seconds,
+    size: body.size,
     duration_sec: duration,
-    aspect_ratio: aspect_ratio || '16:9',
-    image_strategy: imagePayload.strategy,
+    aspect_ratio: body.aspect_ratio || aspect_ratio || '16:9',
+    image_strategy: imageStrategy,
     extra_body_mode: body.extra_body?.mode || null,
     omni_reference: useOmniReference,
     prompt_len: (body.prompt || '').length,
   });
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: 'Bearer ' + (config.api_key || ''),
-    },
-    body: JSON.stringify(body),
-  });
-  const raw = await res.text();
-  log.info('[Agnes] raw response', { status: res.status, raw: raw.slice(0, 1000), video_gen_id });
+  const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  if (!res.ok) {
-    let errMsg = 'Agnes 视频请求失败: ' + res.status;
+  // Agnes 视频：每 Key 每分钟最多 1 次 POST（手动/流水线提交均受此上游限流）
+  const pool = getApiKeyPool(config.api_key, 1, AGNES_VIDEO_MIN_INTERVAL_MS);
+  const submitWithKey = async (apiKey, keyIndex, attempt) => {
+    let res;
+    let raw;
     try {
-      const errJson = JSON.parse(raw);
-      const msg = errJson.error?.message || errJson.message || errJson.error;
-      if (msg) errMsg += ' - ' + (typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 200));
-    } catch (_) {
-      if (raw) errMsg += ' - ' + raw.slice(0, 200);
+      res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + apiKey,
+        },
+        body: JSON.stringify(body),
+      });
+      raw = await res.text();
+    } catch (netErr) {
+      log.warn('[Agnes] 提交网络异常', {
+        video_gen_id,
+        key_index: keyIndex,
+        attempt,
+        error: netErr.message,
+      });
+      return {
+        error: 'Agnes 网络错误: ' + netErr.message,
+        retryable: isAgnesRetryableNetworkError(netErr),
+      };
     }
-    return { error: errMsg };
-  }
+    log.info('[Agnes] raw response', {
+      status: res.status,
+      raw: raw.slice(0, 1000),
+      video_gen_id,
+      key_index: keyIndex,
+      attempt,
+    });
 
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch (e) {
-    return { error: 'Agnes 响应解析失败: ' + e.message + ' | raw: ' + raw.slice(0, 200) };
-  }
+    if (!res.ok) {
+      return buildAgnesSubmitFailure(res.status, raw, 'Agnes 视频请求失败');
+    }
 
-  const directUrl = extractAgnesVideoUrl(data);
-  if (directUrl) {
-    log.info('[Agnes] 直接返回 video_url', { video_url: directUrl, video_gen_id });
-    return { video_url: directUrl };
-  }
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (e) {
+      return { error: 'Agnes 响应解析失败: ' + e.message + ' | raw: ' + raw.slice(0, 200), retryable: false };
+    }
 
-  const taskId = data.id || data.task_id || data.data?.id || data.data?.task_id;
-  if (taskId) {
-    log.info('[Agnes] 返回 task_id', { task_id: taskId, status: data.status, video_gen_id });
-    return { task_id: String(taskId), status: data.status || 'processing' };
-  }
+    const directUrl = extractAgnesVideoUrl(data);
+    if (directUrl) {
+      log.info('[Agnes] 直接返回 video_url', { video_url: directUrl, video_gen_id, key_index: keyIndex, attempt });
+      return { video_url: directUrl };
+    }
 
-  log.error('[Agnes] 无 task_id 或 video_url', { data: JSON.stringify(data).slice(0, 500), video_gen_id });
-  return { error: 'Agnes 未返回 task_id 或 video_url: ' + JSON.stringify(data).slice(0, 300) };
+    const upstreamTaskId = data.id || data.task_id || data.data?.id || data.data?.task_id;
+    const bodyStatus = String(data.status || '').toLowerCase();
+    if (!upstreamTaskId) {
+      if (bodyStatus === 'failed' || bodyStatus === 'error' || data.error || getAgnesSubmitErrorCode(data)) {
+        return buildAgnesSubmitFailure(res.status || 200, raw, 'Agnes 任务被拒绝');
+      }
+      log.error('[Agnes] 无 task_id 或 video_url', { data: JSON.stringify(data).slice(0, 500), video_gen_id });
+      return {
+        error: 'Agnes 未返回 task_id 或 video_url: ' + JSON.stringify(data).slice(0, 300),
+        retryable: false,
+      };
+    }
+
+    const task_id = encodeAgnesTaskId(keyIndex, String(upstreamTaskId));
+    log.info('[Agnes] 返回 task_id', {
+      task_id,
+      upstream_task_id: String(upstreamTaskId),
+      status: data.status,
+      video_gen_id,
+      key_index: keyIndex,
+      attempt,
+    });
+    return { task_id, status: data.status || 'processing' };
+  };
+
+  // 仅提交失败且上游标记可重试时才重试（成功拿到 task_id / video_url 立即返回）
+  const maxAttempts = 3; // 首次 1 次 + 报错后最多再试 2 次
+  const retryIntervalMs = 60_000;
+  let lastFail = null;
+  const basePrefer =
+    preferred_key_index != null && Number.isFinite(Number(preferred_key_index))
+      ? Number(preferred_key_index)
+      : null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // 串行/显式轮询：每次重试顺延一个 Key，避免同 Key 卡在 1 分钟冷却
+    const preferIdx = basePrefer != null ? basePrefer + (attempt - 1) : null;
+    const result = pool
+      ? preferIdx != null
+        ? await pool.runPreferred(preferIdx, (apiKey, keyIndex) => submitWithKey(apiKey, keyIndex, attempt))
+        : await pool.run((apiKey, keyIndex) => submitWithKey(apiKey, keyIndex, attempt))
+      : await submitWithKey(
+          // 无池时仍拆分首个 Key，避免把逗号串整段塞进 Bearer
+          (parseApiKeys(config.api_key)[0] || config.api_key || ''),
+          0,
+          attempt
+        );
+    if (!result.error) return result;
+    lastFail = result;
+    if (!result.retryable) {
+      log.info('[Agnes] 提交失败且不可重试，不再消耗调用次数', {
+        video_gen_id,
+        attempt,
+        error: result.error,
+      });
+      break;
+    }
+    if (attempt >= maxAttempts) break;
+    log.warn('[Agnes] 提交可重试失败，等待后重试', {
+      video_gen_id,
+      attempt,
+      next_attempt: attempt + 1,
+      delay_ms: retryIntervalMs,
+      error: result.error,
+    });
+    await sleepMs(retryIntervalMs);
+  }
+  return { error: lastFail?.error || 'Agnes 视频请求失败' };
 }
 
 /**
@@ -3363,23 +3740,149 @@ function rewriteOneImageUrlForSd2(original, lookup) {
 
 /**
  * 收集剧中所有 active 状态的 Seedance 2.0 角色音色参考
- * @returns {Map<number, string>} charId -> publicUrl
+ * @returns {Map<number, { url: string, name: string, voiceStyle: string }>} charId -> meta
  */
 function collectActiveCharacterVoiceRefs(db, dramaId) {
   const map = new Map();
   if (!db || !dramaId) return map;
   try {
     const rows = db.prepare(
-      'SELECT id, seedance2_voice_asset FROM characters WHERE drama_id = ? AND deleted_at IS NULL'
+      'SELECT id, name, voice_style, seedance2_voice_asset FROM characters WHERE drama_id = ? AND deleted_at IS NULL'
     ).all(Number(dramaId));
     for (const row of rows) {
       const asset = parseJsonColumnForVideo(row.seedance2_voice_asset);
       if (!asset || String(asset.status || '').toLowerCase() !== 'active') continue;
       const url = String(asset.url || '').trim();
-      if (url) map.set(Number(row.id), url);
+      if (!url) continue;
+      map.set(Number(row.id), {
+        url,
+        name: String(row.name || '').trim(),
+        voiceStyle: String(row.voice_style || '').trim(),
+      });
     }
   } catch (_) {}
   return map;
+}
+
+/** 剧级画外音 / 旁白 Seedance 音色（active） */
+function collectActiveNarrationVoiceRef(db, dramaId) {
+  if (!db || !dramaId) return null;
+  try {
+    const row = db
+      .prepare(
+        'SELECT narration_seedance2_voice_asset FROM dramas WHERE id = ? AND deleted_at IS NULL'
+      )
+      .get(Number(dramaId));
+    const asset = parseJsonColumnForVideo(row?.narration_seedance2_voice_asset);
+    if (!asset || String(asset.status || '').toLowerCase() !== 'active') return null;
+    const url = String(asset.url || '').trim();
+    if (!url) return null;
+    return { url, name: '画外音', voiceStyle: '' };
+  } catch (_) {
+    return null;
+  }
+}
+
+/** 文案或分镜 narration 字段是否含画外音/旁白 */
+function promptHasNarrationVoiceover(promptText, sbNarration) {
+  if (String(sbNarration || '').trim()) return true;
+  const t = String(promptText || '');
+  if (!t.trim()) return false;
+  return (
+    /画外音(?:说)?\s*\{/.test(t) ||
+    /Speaker:\s*画外音\b/i.test(t) ||
+    /解说旁白\s*[：:]/.test(t) ||
+    /^\s*Narration\s*[：:]/im.test(t)
+  );
+}
+
+/**
+ * 按文案说话人顺序（其次分镜角色列表）解析本镜要注入的音色绑定；
+ * 若含画外音且剧已上传旁白音色，追加 name=画外音 绑定。
+ * @returns {Array<{ name: string, charId: number, url: string, voiceStyle: string, audioIndex: number }>}
+ */
+function resolveVoiceBindingsForStoryboard(db, dramaId, storyboardId, promptText) {
+  const voiceMap = collectActiveCharacterVoiceRefs(db, dramaId);
+  const narrationVoice = collectActiveNarrationVoiceRef(db, dramaId);
+
+  const byName = new Map();
+  for (const [id, meta] of voiceMap.entries()) {
+    if (meta.name) byName.set(meta.name, { charId: id, ...meta });
+  }
+
+  const {
+    extractSpeechSpeakerNames,
+  } = require('./universalOmniMultiBeatFormat');
+  let yamlSpeakers = [];
+  try {
+    const { isArcReelStructuredPrompt, extractSpeakersFromArcReelYaml } = require('./dramaVideoPromptYaml');
+    if (isArcReelStructuredPrompt(promptText)) {
+      yamlSpeakers = extractSpeakersFromArcReelYaml(promptText);
+    }
+  } catch (_) {}
+
+  const ordered = [];
+  const seenIds = new Set();
+  const pushMeta = (meta, charId) => {
+    if (!meta?.url || seenIds.has(charId)) return;
+    seenIds.add(charId);
+    ordered.push({
+      name: meta.name || `角色${charId}`,
+      charId,
+      url: meta.url,
+      voiceStyle: meta.voiceStyle || '',
+      audioIndex: ordered.length + 1,
+    });
+  };
+
+  let sbNarration = '';
+  const speakerNames = yamlSpeakers.length ? yamlSpeakers : extractSpeechSpeakerNames(promptText);
+  for (const name of speakerNames) {
+    const hit = byName.get(name);
+    if (hit) pushMeta(hit, hit.charId);
+  }
+
+  if (storyboardId) {
+    try {
+      const sbRow = db
+        .prepare('SELECT characters, narration FROM storyboards WHERE id = ?')
+        .get(Number(storyboardId));
+      if (sbRow) {
+        sbNarration = sbRow.narration || '';
+        if (sbRow.characters) {
+          const charList =
+            typeof sbRow.characters === 'string' ? JSON.parse(sbRow.characters) : sbRow.characters;
+          const ids = Array.isArray(charList)
+            ? charList.map((c) => Number(c?.id || c)).filter(Boolean)
+            : [];
+          for (const cid of ids) {
+            if (voiceMap.has(cid)) pushMeta(voiceMap.get(cid), cid);
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 仍无线索：按角色表顺序取全部 active（保底；仅角色，不含画外音）
+  if (!ordered.length && voiceMap.size) {
+    for (const [cid, meta] of voiceMap.entries()) {
+      pushMeta(meta, cid);
+    }
+  }
+
+  if (promptHasNarrationVoiceover(promptText, sbNarration) && narrationVoice) {
+    if (!ordered.some((b) => b.name === '画外音')) {
+      ordered.push({
+        name: '画外音',
+        charId: 0,
+        url: narrationVoice.url,
+        voiceStyle: narrationVoice.voiceStyle || '',
+        audioIndex: ordered.length + 1,
+      });
+    }
+  }
+
+  return ordered;
 }
 
 function applySeedance2CertifiedAssetUrlsToVideoOpts(db, log, opts) {
@@ -3666,7 +4169,7 @@ async function callMinimaxH3VideoApi(config, log, opts) {
  * @returns {Promise<{ task_id?: string, video_url?: string, error?: string }>}
  */
 async function callVideoApi(db, log, opts) {
-  const {
+  let {
     prompt,
     model: preferredModel,
     duration,
@@ -3695,46 +4198,183 @@ async function callVideoApi(db, log, opts) {
     opts = applySeedance2CertifiedAssetUrlsToVideoOpts(db, log, opts);
   }
 
-  // Seedance 2.0 自动注入角色音色参考（模型为 SD2 家族，或协议为 volcengine_omni；未显式指定 voice_reference_url 时）
-  const isSeedance2 =
-    isSeedance2FamilyModel(model) || protocol === 'volcengine_omni';
-  if (isSeedance2 && db && opts.drama_id && !opts.voice_reference_url) {
-    const voiceMap = collectActiveCharacterVoiceRefs(db, opts.drama_id);
-    if (voiceMap.size > 0) {
-      // 优先使用分镜显式指定的角色（如果有），否则取第一个
-      let chosen = null;
-      if (opts.storyboard_id) {
+  // ArcReel drama YAML：全能 / 经典未转换则自动转；就绪则原样；跳过全能硬约束
+  let arcReelStructured = false;
+  try {
+    const {
+      ensureArcReelStructuredForVideoSubmit,
+      looksLikeClassicVideoPrompt,
+    } = require('./dramaVideoPromptYaml');
+    const characters = [];
+    if (db && opts.drama_id) {
+      try {
+        const rows = db
+          .prepare(
+            `SELECT name, voice_style FROM characters WHERE drama_id = ? AND deleted_at IS NULL`
+          )
+          .all(Number(opts.drama_id));
+        for (const r of rows || []) characters.push(r);
+      } catch (_) {}
+    }
+    const nameToTag = new Map();
+    if (db && opts.storyboard_id) {
+      try {
+        const { buildUniversalSegmentUserPromptBundle } = require('./universalSegmentPromptBundle');
+        const built = buildUniversalSegmentUserPromptBundle(db, Number(opts.storyboard_id), {}, {});
+        if (built.ok && Array.isArray(built.characterSlots)) {
+          for (const s of built.characterSlots) {
+            if (s?.name && s?.tag) nameToTag.set(String(s.name), String(s.tag));
+          }
+        }
+      } catch (_) {}
+    }
+    let classicFields = null;
+    if (db && opts.storyboard_id) {
+      try {
+        const row = db
+          .prepare(
+            `SELECT action, dialogue, narration, result, atmosphere, location, time, title,
+                    movement, shot_type, angle, sound_effect, video_prompt, creation_mode
+             FROM storyboards WHERE id = ? AND deleted_at IS NULL`
+          )
+          .get(Number(opts.storyboard_id));
+        // 全能模式同样注入 narration → Dialogue 画外音
+        if (row) classicFields = row;
+      } catch (_) {}
+    }
+    if (!classicFields && looksLikeClassicVideoPrompt(prompt)) {
+      classicFields = { video_prompt: prompt };
+    }
+    const ensured = ensureArcReelStructuredForVideoSubmit(prompt, {
+      characters,
+      nameToTag,
+      classicFields,
+    });
+    arcReelStructured = !!ensured.structured;
+    if (ensured.prompt && ensured.prompt !== prompt) {
+      const before = prompt;
+      prompt = ensured.prompt;
+      opts.prompt = prompt;
+      if (log?.info) {
+        log.info(
+          ensured.converted
+            ? '[视频][台词] 提交前已自动转为 ArcReel drama YAML'
+            : '[视频][台词] ArcReel YAML 已修补（旧 Spoken/【音轨】→ Dialogue）',
+          {
+            video_gen_id,
+            prompt_chars_before: before.length,
+            prompt_chars_after: prompt.length,
+            converted: ensured.converted,
+            source: ensured.source || null,
+            passthrough: !!ensured.passthrough,
+          }
+        );
+      }
+      if (ensured.converted && db && opts.storyboard_id) {
         try {
-          const sbRow = db.prepare('SELECT characters FROM storyboards WHERE id = ?').get(opts.storyboard_id);
-          if (sbRow && sbRow.characters) {
-            const charList = typeof sbRow.characters === 'string' ? JSON.parse(sbRow.characters) : sbRow.characters;
-            const ids = Array.isArray(charList) ? charList.map(c => Number(c?.id || c)).filter(Boolean) : [];
-            for (const cid of ids) {
-              if (voiceMap.has(cid)) { chosen = voiceMap.get(cid); break; }
-            }
+          const nowIso = new Date().toISOString();
+          const sbId = Number(opts.storyboard_id);
+          if (ensured.source === 'classic') {
+            db.prepare(
+              `UPDATE storyboards SET video_prompt = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL`
+            ).run(prompt, nowIso, sbId);
+          } else if (ensured.source === 'omni') {
+            db.prepare(
+              `UPDATE storyboards SET universal_segment_text = ?, creation_mode = 'universal', updated_at = ? WHERE id = ? AND deleted_at IS NULL`
+            ).run(prompt, nowIso, sbId);
           }
         } catch (_) {}
       }
-      if (!chosen) {
-        // 取 Map 中的第一个
-        chosen = voiceMap.values().next().value;
+    } else if (arcReelStructured) {
+      if (ensured.passthrough && log?.info) {
+        log.info('[视频][台词] ArcReel drama YAML 已就绪，原样提交', { video_gen_id });
       }
-      if (chosen) {
-        opts.voice_reference_url = chosen;
-        log.info('[视频][SD2][全能] 自动为 Seedance 2.0 注入角色音色参考（来自角色 seedance2_voice_asset）', {
+    }
+  } catch (e) {
+    log?.warn?.('[视频][台词] ArcReel 结构化处理跳过', { video_gen_id, error: e.message });
+  }
+
+  if (!arcReelStructured && prompt && /\{/.test(prompt)) {
+    try {
+      const {
+        renderUniversalSegmentUtterancesForSubmit,
+        appendUniversalAudioVoiceConstraint,
+      } = require('./universalOmniMultiBeatFormat');
+      const before = prompt;
+      prompt = renderUniversalSegmentUtterancesForSubmit(prompt);
+      prompt = appendUniversalAudioVoiceConstraint(prompt);
+      opts.prompt = prompt;
+      if (before !== prompt && log?.info) {
+        log.info('[视频][台词] 已按 utterance 解析层重渲染说{}', {
           video_gen_id,
-          storyboard_id: opts.storyboard_id,
-          voice_ref_url: String(chosen).slice(0, 100)
+          prompt_chars_before: before.length,
+          prompt_chars_after: prompt.length,
         });
+      }
+    } catch (e) {
+      log?.warn?.('[视频][台词] utterance 重渲染跳过', { video_gen_id, error: e.message });
+    }
+  } else if (arcReelStructured && log?.info) {
+    log.info('[视频][台词] ArcReel drama 路径，跳过全能硬约束追加', { video_gen_id });
+  }
+
+  // Seedance 2.0 / Agnes Video 2.5(+Flash)：按说话人注入多段音色 + 文案【主体与音色】/@音频N
+  const isSeedance2 =
+    isSeedance2FamilyModel(model) || protocol === 'volcengine_omni';
+  const isAgnes25Voice =
+    protocol === 'agnes' && isAgnesVideo25FamilyModel(model);
+  if ((isSeedance2 || isAgnes25Voice) && db && opts.drama_id) {
+    const hasExplicit =
+      opts.voice_reference_url ||
+      (Array.isArray(opts.voice_reference_urls) && opts.voice_reference_urls.length);
+    if (!hasExplicit) {
+      const bindings = resolveVoiceBindingsForStoryboard(
+        db,
+        opts.drama_id,
+        opts.storyboard_id,
+        prompt
+      );
+      // Agnes Flash 官方 audios ≤ 3
+      const capped =
+        isAgnes25Voice && isAgnesVideo25FlashModel(model) ? bindings.slice(0, 3) : bindings;
+      if (capped.length) {
+        // 重新编号 audioIndex（截断后）
+        capped.forEach((b, i) => {
+          b.audioIndex = i + 1;
+        });
+        opts.voice_reference_urls = capped.map((b) => b.url);
+        opts.voice_reference_url = capped[0].url;
+        if (arcReelStructured) {
+          const { injectAudioRefsIntoArcReelYaml } = require('./dramaVideoPromptYaml');
+          prompt = injectAudioRefsIntoArcReelYaml(prompt, capped);
+          opts.prompt = prompt;
+          log.info('[视频][音色] ArcReel YAML 注入 @音频N 到 Voice_Profiles', {
+            video_gen_id,
+            protocol,
+            model,
+            storyboard_id: opts.storyboard_id,
+            speakers: capped.map((b) => ({ name: b.name, audio: b.audioIndex })),
+          });
+        } else {
+          const { injectVoiceDeclarationIntoPrompt } = require('./universalOmniMultiBeatFormat');
+          prompt = injectVoiceDeclarationIntoPrompt(prompt, capped);
+          opts.prompt = prompt;
+          log.info('[视频][音色] 注入多段角色音色参考 + 【主体与音色】声明', {
+            video_gen_id,
+            protocol,
+            model,
+            storyboard_id: opts.storyboard_id,
+            speakers: capped.map((b) => ({ name: b.name, audio: b.audioIndex })),
+          });
+        }
       } else {
-        log.info('[视频][SD2][全能] 检测到活跃音色参考但未匹配到当前分镜角色', {
+        log.info('[视频][音色] 模型支持音色参考但本剧暂无 active 音色', {
           video_gen_id,
-          storyboard_id: opts.storyboard_id,
-          available_voice_char_ids: Array.from(voiceMap.keys())
+          protocol,
+          model,
+          drama_id: opts.drama_id,
         });
       }
-    } else {
-      log.info('[视频][SD2][全能] Seedance 2.0 模型但本剧暂无 active 音色参考', { video_gen_id, drama_id: opts.drama_id });
     }
   }
   log.info('[视频] 路由协议', {
@@ -3861,8 +4501,8 @@ async function callVideoApi(db, log, opts) {
       files_base_url: opts.files_base_url,
       storage_local_path: opts.storage_local_path,
       video_gen_id: opts.video_gen_id,
-      // 关键：把 callVideoApi 里自动注入的 Seedance 2.0 音色参考音频透传下去
       voice_reference_url: opts.voice_reference_url,
+      voice_reference_urls: opts.voice_reference_urls,
     });
   }
 
@@ -3890,7 +4530,7 @@ async function callVideoApi(db, log, opts) {
     });
   }
 
-  // Agnes Video V2.0 (api_protocol = 'agnes')
+  // Agnes Video V2.0 / 2.5 (api_protocol = 'agnes')
   if (protocol === 'agnes') {
     return callAgnesVideoApi(db, config, log, {
       prompt,
@@ -3904,6 +4544,10 @@ async function callVideoApi(db, log, opts) {
       files_base_url: opts.files_base_url,
       storage_local_path: opts.storage_local_path,
       video_gen_id: opts.video_gen_id,
+      voice_reference_url: opts.voice_reference_url,
+      voice_reference_urls: opts.voice_reference_urls,
+      preferred_key_index: opts.preferred_key_index,
+      seed: opts.seed,
     });
   }
 
@@ -4103,11 +4747,22 @@ async function pollVideoTask(db, log, videoGenId, taskId, config, maxAttempts = 
     return { error: 'Jimeng AI API 为同步返回视频地址，不应进入轮询' };
   }
   let pollTaskId = taskId;
+  let agnesPollAuth = null;
+  if (isAgnes) {
+    agnesPollAuth = resolveAgnesPollAuth(config.api_key, taskId);
+    pollTaskId = agnesPollAuth.taskId;
+  }
   /** Agnes：completed 后 remixed_from_video_id / metadata.url 偶发迟到，对齐 new-api 继续多查几轮 */
   let agnesCompletedWithoutUrl = 0;
   const AGNES_COMPLETED_URL_GRACE = 12;
   const queryUrl = () => buildQueryUrl(config, pollTaskId);
-  log.info('[poll] 开始', { video_gen_id: videoGenId, task_id: pollTaskId, protocol, poll_url: queryUrl() });
+  log.info('[poll] 开始', {
+    video_gen_id: videoGenId,
+    task_id: pollTaskId,
+    protocol,
+    poll_url: queryUrl(),
+    agnes_key_index: isAgnes ? agnesPollAuth?.keyIndex : undefined,
+  });
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     await new Promise((r) => setTimeout(r, intervalMs));
     try {
@@ -4155,6 +4810,9 @@ async function pollVideoTask(db, log, videoGenId, taskId, config, maxAttempts = 
         if (!qep.startsWith('/')) qep = '/' + qep;
         url = viduBase + qep;
         headers = { Authorization: (isOfficialVidu ? 'Token ' : 'Bearer ') + (config.api_key || '') };
+      } else if (isAgnes) {
+        url = queryUrl();
+        headers = { Authorization: 'Bearer ' + (agnesPollAuth?.apiKey || parseApiKeys(config.api_key)[0] || config.api_key || '') };
       } else {
         url = queryUrl();
         headers = { Authorization: 'Bearer ' + (config.api_key || '') };
@@ -4465,6 +5123,14 @@ module.exports = {
   buildAgnesPollUrl,
   getAgnesApiRoot,
   buildAgnesVideoImagePayload,
+  buildAgnes25VideoBody,
+  isAgnesVideo25FamilyModel,
+  isAgnesVideo25FlashModel,
+  isAgnesVideo25Model,
+  isAgnesVideoModelName,
+  normalizeAgnesVideoModel,
+  isAgnesRetryableSubmitError,
+  isAgnesRetryableNetworkError,
   formatVideoPostBodyForLog,
   isSeedance2FamilyModel,
   normalizeVolcengineDuration,
@@ -4474,4 +5140,7 @@ module.exports = {
   extractMinimaxH3VideoUrl,
   normalizeMinimaxH3Duration,
   normalizeMinimaxH3Resolution,
+  collectActiveNarrationVoiceRef,
+  promptHasNarrationVoiceover,
+  resolveVoiceBindingsForStoryboard,
 };

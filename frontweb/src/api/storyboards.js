@@ -96,6 +96,14 @@ export const storyboardsAPI = {
   generateUniversalSegmentPrompt(id, body = {}) {
     return request.post(`/storyboards/${id}/universal-segment-prompt`, body)
   },
+  /** 全能片段 → ArcReel drama YAML（Voice_Profiles / Action / Dialogue） */
+  convertUniversalSegmentToArcReelYaml(id, body = {}) {
+    return request.post(`/storyboards/${id}/universal-segment-to-arcreel-yaml`, body)
+  },
+  /** 经典分镜字段 → ArcReel drama YAML，写回 video_prompt */
+  convertClassicToArcReelYaml(id, body = {}) {
+    return request.post(`/storyboards/${id}/classic-to-arcreel-yaml`, body)
+  },
   /** 全能模式生成：NDJSON 流式，可选 body.duration、body.force_without_reference_images */
   generateUniversalSegmentPromptStream(id, body, onDelta) {
     return postUniversalSegmentNdjsonStream(
@@ -139,5 +147,45 @@ export const storyboardsAPI = {
   /** 按对白/旁白拆成多条分镜（每条仅一人说话或仅画外旁白） */
   splitByAudio(id) {
     return request.post(`/storyboards/${id}/split-by-audio`, {})
+  },
+  /** 定镜对白：规划场景固定机位母版 */
+  planCoveragePlates(episodeId) {
+    return request.get(`/episodes/${episodeId}/coverage-plates/plan`)
+  },
+  /** 仅生成提示词草稿（不生图） */
+  draftCoveragePlates(episodeId, body = {}) {
+    return request.post(`/episodes/${episodeId}/coverage-plates/drafts`, body)
+  },
+  /** 对草稿批量生图；可选 assign / plate_ids / strategy */
+  generateCoveragePlates(episodeId, body = {}) {
+    return request.post(`/episodes/${episodeId}/coverage-plates/generate`, body)
+  },
+  listCoveragePlates(episodeId) {
+    return request.get(`/episodes/${episodeId}/coverage-plates`)
+  },
+  assignCoveragePlates(episodeId, body = {}) {
+    return request.post(`/episodes/${episodeId}/coverage-plates/assign`, body)
+  },
+  updateCoveragePlate(id, body = {}) {
+    return request.put(`/coverage-plates/${id}`, body)
+  },
+  deleteCoveragePlate(id) {
+    return request.delete(`/coverage-plates/${id}`)
+  },
+  regenerateCoveragePlate(id, body = {}) {
+    return request.post(`/coverage-plates/${id}/regenerate`, body)
+  },
+  listCoveragePlateVersions(id) {
+    return request.get(`/coverage-plates/${id}/versions`)
+  },
+  restoreCoveragePlateVersion(id, versionId) {
+    return request.post(`/coverage-plates/${id}/versions/restore`, { version_id: versionId })
+  },
+  deleteCoveragePlateVersion(id, versionId) {
+    return request.delete(`/coverage-plates/${id}/versions/${versionId}`)
+  },
+  /** 绑定已上传图片为模板当前图（先调 uploadAPI.uploadImage） */
+  uploadCoveragePlateImage(id, body = {}) {
+    return request.post(`/coverage-plates/${id}/upload-image`, body)
   },
 }

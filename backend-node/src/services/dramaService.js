@@ -255,7 +255,7 @@ function updateDrama(db, log, dramaId, req) {
 
 function generateStoryboard(db, log, episodeId, options) {
   const episodeStoryboardService = require('./episodeStoryboardService');
-  const { model, style, storyboard_count, video_duration, aspect_ratio, include_narration, universal_omni_storyboard } = options || {};
+  const { model, style, storyboard_count, video_duration, aspect_ratio, include_narration, static_dialogue, universal_omni_storyboard } = options || {};
   // 转换可能为字符串的数字
   const count = storyboard_count ? Number(storyboard_count) : undefined;
   const duration = video_duration ? Number(video_duration) : undefined;
@@ -269,7 +269,8 @@ function generateStoryboard(db, log, episodeId, options) {
     duration,
     aspect_ratio,
     include_narration,
-    universal_omni_storyboard
+    universal_omni_storyboard,
+    static_dialogue
   );
 }
 
@@ -312,6 +313,7 @@ function rowToDrama(r) {
     thumbnail: r.thumbnail,
     tags: r.tags,
     metadata: metadata || {},
+    narration_seedance2_voice_asset: parseJsonColumn(r.narration_seedance2_voice_asset),
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -377,6 +379,7 @@ function rowToStoryboard(r) {
       segment_title: r.segment_title ?? null,
       creation_mode: r.creation_mode === 'universal' ? 'universal' : 'classic',
       universal_segment_text: r.universal_segment_text ?? null,
+      coverage_plate_id: r.coverage_plate_id ?? null,
       first_frame_image_id: r.first_frame_image_id ?? null,
       last_frame_image_id: r.last_frame_image_id ?? null,
       last_frame_image_url: sanitizeImageUrl(r.last_frame_image_url),

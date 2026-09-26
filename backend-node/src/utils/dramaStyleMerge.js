@@ -78,20 +78,36 @@ function mergeCfgStyleWithDrama(cfg, dramaRow) {
 }
 
 /**
- * 分镜流式保存等：显式请求参数优先，否则用剧集 metadata/legacy，最后兜底 realistic
+ * 分镜流式保存等：显式请求参数优先，否则用剧集 metadata/legacy，最后兜底 realistic。
+ * opts.preferZh：中文全能分镜/对白场景优先中文画风，避免英文 style 写入【风格锚点】。
  */
-function resolvedStreamStyleFromDrama(styleParam, dramaRow) {
+function resolvedStreamStyleFromDrama(styleParam, dramaRow, opts = {}) {
+  const preferZh = !!opts.preferZh;
+  const { zh, en, legacy } = styleFieldsFromDramaRow(dramaRow);
+  const pickMeta = () => {
+    if (preferZh) return zh || en || '';
+    return en || zh || '';
+  };
+  const pickPreset = (key) => {
+    const p = resolveStylePreset(key);
+    if (!p) return key;
+    return preferZh ? p.zh || p.en : p.en || p.zh;
+  };
+
   const s = (styleParam && String(styleParam).trim()) || '';
   if (s && s !== 'custom') {
+    // 前端若传来大段英文画风，而剧集已有中文画风：分镜生成改用中文
+    if (preferZh && zh) {
+      const latin = (s.match(/[A-Za-z]/g) || []).length;
+      const cjk = (s.match(/[\u4e00-\u9fff]/g) || []).length;
+      if (latin >= 12 && latin > cjk) return zh;
+    }
     const p = resolveStylePreset(s);
-    return p ? (p.en || p.zh) : s;
+    return p ? pickPreset(s) : s;
   }
-  const { zh, en, legacy } = styleFieldsFromDramaRow(dramaRow);
-  if (en || zh) return en || zh;
-  if (legacy && legacy !== 'custom') {
-    const p = resolveStylePreset(legacy);
-    return p ? (p.en || p.zh) : legacy;
-  }
+  const fromMeta = pickMeta();
+  if (fromMeta) return fromMeta;
+  if (legacy && legacy !== 'custom') return pickPreset(legacy);
   return 'realistic';
 }
 

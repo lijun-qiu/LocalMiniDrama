@@ -109,6 +109,7 @@ function ensureAllColumns(database) {
     { name: 'total_duration', type: 'INTEGER DEFAULT 0' },
     { name: 'status',         type: 'TEXT DEFAULT \'draft\'' },
     { name: 'metadata',       type: 'TEXT' },
+    { name: 'narration_seedance2_voice_asset', type: 'TEXT' }, // JSON: 画外音/旁白 Seedance 音色参考
     { name: 'created_at',     type: 'TEXT' },
     { name: 'updated_at',     type: 'TEXT' },
     { name: 'deleted_at',     type: 'TEXT' },
@@ -145,7 +146,10 @@ function ensureAllColumns(database) {
     { name: 'narration',         type: 'TEXT' },
     { name: 'action',            type: 'TEXT' },
     { name: 'atmosphere',        type: 'TEXT' },
+    { name: 'sound_effect',      type: 'TEXT' },               // 现场环境声 / 动作音效
+    { name: 'bgm_prompt',        type: 'TEXT' },               // 配乐提示（经典拼装用；成片默认无 BGM）
     { name: 'image_prompt',      type: 'TEXT' },
+    { name: 'coverage_plate_id', type: 'INTEGER' },            // 定镜对白：绑定的固定机位母版 id
     { name: 'video_prompt',      type: 'TEXT' },
     { name: 'characters',        type: 'TEXT' },
     { name: 'shot_type',         type: 'TEXT' },
@@ -181,6 +185,78 @@ function ensureAllColumns(database) {
     { name: 'created_at',        type: 'TEXT' },
     { name: 'updated_at',        type: 'TEXT' },
     { name: 'deleted_at',        type: 'TEXT' },
+  ]);
+
+  // --- coverage_plates（定镜对白：场景级固定机位母版） ---
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS coverage_plates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      drama_id INTEGER NOT NULL DEFAULT 0,
+      episode_id INTEGER NOT NULL DEFAULT 0,
+      scene_key TEXT NOT NULL DEFAULT '',
+      scene_id INTEGER,
+      location TEXT,
+      plate_type TEXT NOT NULL DEFAULT 'two_shot',
+      speaker_name TEXT,
+      layout_description TEXT,
+      prompt TEXT,
+      image_gen_id INTEGER,
+      image_url TEXT,
+      local_path TEXT,
+      status TEXT DEFAULT 'pending',
+      error_msg TEXT,
+      created_at TEXT,
+      updated_at TEXT,
+      deleted_at TEXT
+    )`);
+  } catch (_) {}
+  ensureColumns(database, 'coverage_plates', [
+    { name: 'drama_id', type: 'INTEGER NOT NULL DEFAULT 0' },
+    { name: 'episode_id', type: 'INTEGER NOT NULL DEFAULT 0' },
+    { name: 'scene_key', type: 'TEXT NOT NULL DEFAULT \'\'' },
+    { name: 'scene_id', type: 'INTEGER' },
+    { name: 'location', type: 'TEXT' },
+    { name: 'plate_type', type: 'TEXT NOT NULL DEFAULT \'two_shot\'' },
+    { name: 'speaker_name', type: 'TEXT' },
+    { name: 'zone_key', type: 'TEXT' }, // wide|left|center|right
+    { name: 'members_json', type: 'TEXT' }, // JSON 成员名列表（分区/全景）
+    { name: 'layout_description', type: 'TEXT' },
+    { name: 'prompt', type: 'TEXT' },
+    { name: 'character_ids', type: 'TEXT' }, // JSON 数组，再生图用
+    { name: 'image_gen_id', type: 'INTEGER' },
+    { name: 'image_url', type: 'TEXT' },
+    { name: 'local_path', type: 'TEXT' },
+    { name: 'status', type: 'TEXT DEFAULT \'pending\'' },
+    { name: 'error_msg', type: 'TEXT' },
+    { name: 'created_at', type: 'TEXT' },
+    { name: 'updated_at', type: 'TEXT' },
+    { name: 'deleted_at', type: 'TEXT' },
+    { name: 'lineage_key', type: 'TEXT' }, // 槽位键：同场景同类型历史归并
+  ]);
+
+  // --- coverage_plate_versions（模板图历史版本） ---
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS coverage_plate_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      plate_id INTEGER NOT NULL DEFAULT 0,
+      episode_id INTEGER NOT NULL DEFAULT 0,
+      lineage_key TEXT NOT NULL DEFAULT '',
+      prompt TEXT,
+      image_url TEXT,
+      local_path TEXT,
+      image_gen_id INTEGER,
+      created_at TEXT
+    )`);
+  } catch (_) {}
+  ensureColumns(database, 'coverage_plate_versions', [
+    { name: 'plate_id', type: 'INTEGER NOT NULL DEFAULT 0' },
+    { name: 'episode_id', type: 'INTEGER NOT NULL DEFAULT 0' },
+    { name: 'lineage_key', type: 'TEXT NOT NULL DEFAULT \'\'' },
+    { name: 'prompt', type: 'TEXT' },
+    { name: 'image_url', type: 'TEXT' },
+    { name: 'local_path', type: 'TEXT' },
+    { name: 'image_gen_id', type: 'INTEGER' },
+    { name: 'created_at', type: 'TEXT' },
   ]);
 
   // --- characters ---

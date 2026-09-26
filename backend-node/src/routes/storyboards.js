@@ -9,6 +9,14 @@ const promptI18n = require('../services/promptI18n');
 const angleService = require('../services/angleService');
 const { buildUniversalSegmentUserPromptBundle } = require('../services/universalSegmentPromptBundle');
 const { normalizeUniversalSegmentShotDurations } = require('../services/universalSegmentDurationNormalize');
+const {
+  sanitizeUniversalSegmentDialogueConflicts,
+  sanitizeChineseOmniStyleAnchor,
+} = require('../services/universalOmniMultiBeatFormat');
+const {
+  convertUniversalSegmentToArcReelYaml,
+  convertClassicStoryboardToArcReelYaml,
+} = require('../services/dramaVideoPromptYaml');
 
 /** 润色接口：邻镜结构化摘要（含全能片段与其它提示词字段） */
 function formatNeighborShotPolishContext(row) {
@@ -235,6 +243,16 @@ function normalizeUniversalSegmentAtImageSpacing(text) {
     /@图片(\d+)(?=[\u4e00-\u9fffA-Za-z「『【（])/gu,
     '@图片$1 '
   );
+}
+
+/** 生成/润色完成后统一后处理（落库前清掉【风格锚点】英文尾巴，保证重新生成分镜即干净） */
+function finalizeUniversalSegmentText(text, durationLabel, durationSec, characterSlots) {
+  let out = String(text || '').trim();
+  out = normalizeUniversalSegmentShotDurations(out, durationLabel, durationSec);
+  out = sanitizeUniversalSegmentDialogueConflicts(out, { characterSlots });
+  out = sanitizeChineseOmniStyleAnchor(out);
+  out = normalizeUniversalSegmentAtImageSpacing(out);
+  return out;
 }
 
 function routes(db, log) {
@@ -559,7 +577,7 @@ function routes(db, log) {
           if (built.code === 'not_found') return response.notFound(res, built.message);
           return response.badRequest(res, built.message);
         }
-        const { userPrompt, durationLabel, durationSec } = built;
+        const { userPrompt, durationLabel, durationSec, characterSlots } = built;
         const out = await aiClient.generateText(
           db,
           log,
@@ -571,9 +589,7 @@ function routes(db, log) {
         if (!out || String(out).trim().length < 20) {
           return response.badRequest(res, 'AI 返回内容过短，请检查文本模型配置');
         }
-        let text = String(out).trim();
-        text = normalizeUniversalSegmentShotDurations(text, durationLabel, durationSec);
-        text = normalizeUniversalSegmentAtImageSpacing(text);
+        let text = finalizeUniversalSegmentText(out, durationLabel, durationSec, characterSlots);
         const nowIso = new Date().toISOString();
         db.prepare('UPDATE storyboards SET universal_segment_text = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
           text,
@@ -588,6 +604,165 @@ function routes(db, log) {
       }
     },
 
+    /**
+     * 将全能片段文案机械转为 ArcReel drama YAML（Voice_Profiles / Action / Dialogue…）并写回
+     * body.text 可选：不传则用库内 universal_segment_text
+     */
+    convertUniversalSegmentToArcReelYaml: async (req, res) => {
+      try {
+        const sbId = Number(req.params.id);
+        const sb = db
+          .prepare(
+            `SELECT s.id, s.episode_id, s.universal_segment_text, s.narration, s.dialogue, s.video_prompt
+             FROM storyboards s WHERE s.id = ? AND s.deleted_at IS NULL`
+          )
+          .get(sbId);
+        if (!sb) return response.notFound(res, '分镜不存在');
+
+        const bodyText =
+          req.body && req.body.text != null ? String(req.body.text) : '';
+        const source = (bodyText.trim() || String(sb.universal_segment_text || '')).trim();
+        if (!source) return response.badRequest(res, '请先填写或生成片段描述');
+
+        const ep = db
+          .prepare('SELECT drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL')
+          .get(sb.episode_id);
+        const dramaId = ep?.drama_id;
+        const characters = dramaId
+          ? db
+              .prepare(
+                `SELECT name, voice_style FROM characters
+                 WHERE drama_id = ? AND deleted_at IS NULL`
+              )
+              .all(dramaId)
+          : [];
+
+        const nameToTag = new Map();
+        try {
+          const built = buildUniversalSegmentUserPromptBundle(db, sbId, {}, {});
+          if (built.ok && Array.isArray(built.characterSlots)) {
+            for (const s of built.characterSlots) {
+              if (s?.name && s?.tag) nameToTag.set(String(s.name), String(s.tag));
+            }
+          }
+        } catch (_) {}
+
+        const body = req.body || {};
+        const classicFields = {
+          narration: body.narration != null ? body.narration : sb.narration,
+          dialogue: body.dialogue != null ? body.dialogue : sb.dialogue,
+          video_prompt: sb.video_prompt,
+        };
+        const {
+          ensureArcReelYamlHasClassicSpeech,
+          isArcReelStructuredPrompt,
+        } = require('../services/dramaVideoPromptYaml');
+
+        let yamlText;
+        if (isArcReelStructuredPrompt(source)) {
+          // 已是 ArcReel 但可能缺 Dialogue 画外音：用 narration 补齐
+          const patched = ensureArcReelYamlHasClassicSpeech(source, classicFields, {
+            characters,
+            nameToTag,
+          });
+          yamlText = patched.text;
+        } else {
+          yamlText = convertUniversalSegmentToArcReelYaml(source, {
+            characters,
+            nameToTag,
+            classicFields,
+          });
+        }
+        const nowIso = new Date().toISOString();
+        db.prepare(
+          'UPDATE storyboards SET universal_segment_text = ?, creation_mode = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL'
+        ).run(yamlText, 'universal', nowIso, sbId);
+
+        log.info('[分镜] convertUniversalSegmentToArcReelYaml 完成', {
+          id: sbId,
+          len: yamlText.length,
+          dialogue_lines: (yamlText.match(/^\s*Line:/gm) || []).length,
+          has_vo: /Speaker:\s*画外音/.test(yamlText),
+        });
+        response.success(res, { universal_segment_text: yamlText });
+      } catch (err) {
+        log.error('storyboards convertUniversalSegmentToArcReelYaml', { error: err.message });
+        if (/无法从片段描述/.test(err.message || '')) return response.badRequest(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
+    /**
+     * 经典分镜字段 / video_prompt → ArcReel drama YAML，写回 video_prompt（保持 classic）
+     * body 可选覆盖：action / dialogue / narration / video_prompt 等
+     */
+    convertClassicToArcReelYaml: async (req, res) => {
+      try {
+        const sbId = Number(req.params.id);
+        const sb = db
+          .prepare(
+            `SELECT s.id, s.episode_id, s.action, s.dialogue, s.narration, s.result, s.atmosphere,
+                    s.location, s.time, s.title, s.movement, s.shot_type, s.angle, s.sound_effect,
+                    s.video_prompt, s.creation_mode
+             FROM storyboards s WHERE s.id = ? AND s.deleted_at IS NULL`
+          )
+          .get(sbId);
+        if (!sb) return response.notFound(res, '分镜不存在');
+
+        const body = req.body || {};
+        const fields = {
+          action: body.action != null ? body.action : sb.action,
+          dialogue: body.dialogue != null ? body.dialogue : sb.dialogue,
+          narration: body.narration != null ? body.narration : sb.narration,
+          result: body.result != null ? body.result : sb.result,
+          atmosphere: body.atmosphere != null ? body.atmosphere : sb.atmosphere,
+          location: body.location != null ? body.location : sb.location,
+          time: body.time != null ? body.time : sb.time,
+          title: body.title != null ? body.title : sb.title,
+          movement: body.movement != null ? body.movement : sb.movement,
+          shot_type: body.shot_type != null ? body.shot_type : sb.shot_type,
+          angle: body.angle != null ? body.angle : sb.angle,
+          sound_effect: body.sound_effect != null ? body.sound_effect : sb.sound_effect,
+          video_prompt:
+            body.video_prompt != null
+              ? body.video_prompt
+              : body.text != null
+                ? body.text
+                : sb.video_prompt,
+        };
+
+        const ep = db
+          .prepare('SELECT drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL')
+          .get(sb.episode_id);
+        const dramaId = ep?.drama_id;
+        const characters = dramaId
+          ? db
+              .prepare(
+                `SELECT name, voice_style FROM characters
+                 WHERE drama_id = ? AND deleted_at IS NULL`
+              )
+              .all(dramaId)
+          : [];
+
+        const yamlText = convertClassicStoryboardToArcReelYaml(fields, { characters });
+        const nowIso = new Date().toISOString();
+        db.prepare(
+          `UPDATE storyboards SET video_prompt = ?, creation_mode = 'classic', updated_at = ? WHERE id = ? AND deleted_at IS NULL`
+        ).run(yamlText, nowIso, sbId);
+
+        log.info('[分镜] convertClassicToArcReelYaml 完成', {
+          id: sbId,
+          len: yamlText.length,
+          dialogue_lines: (yamlText.match(/^\s*Line:/gm) || []).length,
+        });
+        response.success(res, { video_prompt: yamlText, creation_mode: 'classic' });
+      } catch (err) {
+        log.error('storyboards convertClassicToArcReelYaml', { error: err.message });
+        if (/无法从经典分镜/.test(err.message || '')) return response.badRequest(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
     /** 全能模式：与 generateUniversalSegmentPrompt 相同逻辑，NDJSON 流式（delta + done） */
     generateUniversalSegmentStream: async (req, res) => {
       const sbId = Number(req.params.id);
@@ -596,7 +771,7 @@ function routes(db, log) {
         if (built.code === 'not_found') return response.notFound(res, built.message);
         return response.badRequest(res, built.message);
       }
-      const { userPrompt, durationLabel, durationSec } = built;
+      const { userPrompt, durationLabel, durationSec, characterSlots } = built;
 
       res.status(200);
       res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
@@ -634,9 +809,7 @@ function routes(db, log) {
         writeNd({ type: 'error', message: 'AI 返回内容过短，请检查文本模型配置' });
         return res.end();
       }
-      let text = String(finalRaw).trim();
-      text = normalizeUniversalSegmentShotDurations(text, durationLabel, durationSec);
-      text = normalizeUniversalSegmentAtImageSpacing(text);
+      let text = finalizeUniversalSegmentText(finalRaw, durationLabel, durationSec, characterSlots);
       const nowIso = new Date().toISOString();
       db.prepare('UPDATE storyboards SET universal_segment_text = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
         text,
@@ -669,7 +842,7 @@ function routes(db, log) {
         if (built.code === 'not_found') return response.notFound(res, built.message);
         return response.badRequest(res, built.message);
       }
-      const { userPrompt: baseUser, durationLabel, durationSec, episodeId, storyboardNumber } = built;
+      const { userPrompt: baseUser, durationLabel, durationSec, episodeId, storyboardNumber, characterSlots } = built;
 
       let scriptText = '';
       try {
@@ -702,8 +875,8 @@ function routes(db, log) {
       const polishUserPrompt = [
         'TASK: POLISH_UNIVERSAL_OMNI_SEGMENT',
         `POLISH_PASS_STAMP: ${polishPassStamp}`,
-        'POLISH_REFRESH（多次点击「润色」时强制）: 在严格遵守 MULTI_BEAT_OUTPUT、子分镜秒数之和=TOTAL_CLIP_SECONDS、IMAGE_SLOT_MAP、不编造剧本外情节的前提下，**本轮输出须与 CURRENT_OMNI_DRAFT 在中文表述上有明显差异**（换动词/语序、合并或拆分从句、加强或收紧运镜与情绪描写均可；**第3行仍须与 LINE3_REQUIRED 完全一致**）。除第3行外，**禁止**与草稿逐字相同或仅标点差异；若 M 与秒数分配不变，子分镜正文也须重写措辞。',
-        'DIALOGUE_RETENTION（硬性，与 system 全能润色一致）: BASE_OMNI_CONTRACT 内 STORYBOARD FIELDS 的 DIALOGUE、NARRATION、VIDEO_PROMPT 及 CURRENT_OMNI_DRAFT 中一切对白/旁白/引号句，成稿各「分镜k」行须**逐条以「」或明确旁白写出**，保留笑点、数字、剧名、奖项名等关键信息；禁止用「两人对话」「念词带过」等概括替代具体台词。总秒数与各 Tk 不变前提下提高信息密度：台词与反应优先，少写无推进的纯氛围叠句。',
+        'POLISH_REFRESH（多次点击「润色」时强制）: 在严格遵守 MULTI_BEAT_OUTPUT、子分镜秒数之和=TOTAL_CLIP_SECONDS、IMAGE_SLOT_MAP、【风格锚点】/【场景设定】/【分镜】/【环境音】版式（**无【台词】栏**）、不编造剧本外情节的前提下，**本轮输出须与 CURRENT_OMNI_DRAFT 在中文表述上有明显差异**（重写【分镜】与【环境音】措辞；【分镜】内引号台词原文须保留；SCENE_NOTE_REQUIRED 须仍出现在【场景设定】）。禁止与草稿逐字相同或仅标点差异。',
+        'DIALOGUE_RETENTION（硬性）: 台词用 <角色>说 {原文} 写在【分镜】开口瞬间（可与动作同行，ArcReel）；**禁止输出【台词】栏**；【分镜】除说话句式外禁止口型/开口/双唇类描述。禁止场景 @图片1 说台词。默认 M=1，禁止「静默拍→说话拍」。成片人声仅来自花括号内原文。',
         'You are refining the CURRENT omni multi-beat prompt for a short drama vertical-video shot.',
         `FULL_EPISODE_SCRIPT（本集完整剧本，用于信息对齐与连戏；不得引入剧本未写的情节）:\n${scriptText || '(本集剧本正文为空，请仅依据下方 STORYBOARD FIELDS 与邻镜信息)'}`,
         '',
@@ -756,9 +929,7 @@ function routes(db, log) {
         writeNd({ type: 'error', message: 'AI 返回内容过短，请检查文本模型配置' });
         return res.end();
       }
-      let text = String(finalRaw).trim();
-      text = normalizeUniversalSegmentShotDurations(text, durationLabel, durationSec);
-      text = normalizeUniversalSegmentAtImageSpacing(text);
+      let text = finalizeUniversalSegmentText(finalRaw, durationLabel, durationSec, characterSlots);
       const nowIso = new Date().toISOString();
       db.prepare('UPDATE storyboards SET universal_segment_text = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
         text,
@@ -1107,6 +1278,217 @@ function routes(db, log) {
         response.success(res, { total: rows.length, updated });
       } catch (err) {
         log.error('storyboards batchInferParams', { error: err.message });
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：规划场景级固定机位母版（不同框/单人），不生图 */
+    planCoveragePlates: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const plan = coveragePlateService.planCoveragePlatesForEpisode(db, req.params.episode_id);
+        response.success(res, plan);
+      } catch (err) {
+        log.error('planCoveragePlates', { error: err.message });
+        if (err.code === 'not_found') return response.notFound(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：仅生成/重建提示词草稿（不生图） */
+    draftCoveragePlates: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const replace = req.body?.replace !== false && req.body?.replace !== 0;
+        const out = coveragePlateService.materializeCoveragePlateDrafts(db, req.params.episode_id, {
+          replace,
+        });
+        response.success(res, out);
+      } catch (err) {
+        log.error('draftCoveragePlates', { error: err.message });
+        if (err.code === 'not_found') return response.notFound(res, err.message);
+        if (err.code === 'bad_request') return response.badRequest(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：对已有草稿批量生图；无草稿时兼容一键草稿+生图。assign 默认 false；strategy 默认 by_speaker */
+    generateCoveragePlates: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const assign = req.body?.assign === true || req.body?.assign === 1;
+        const strategy = req.body?.strategy === 'prefer_two_shot' ? 'prefer_two_shot' : 'by_speaker';
+        const plateIds = Array.isArray(req.body?.plate_ids) ? req.body.plate_ids : null;
+        const onlyMissing = req.body?.only_missing !== false && req.body?.only_missing !== 0;
+        const concurrency =
+          req.body?.concurrency != null && req.body?.concurrency !== ''
+            ? Number(req.body.concurrency)
+            : 7;
+        const existing = coveragePlateService.listCoveragePlates(db, req.params.episode_id);
+        if (!existing.length && !plateIds) {
+          const out = coveragePlateService.startCoveragePlateGeneration(db, log, req.params.episode_id, {
+            assign,
+            strategy,
+            concurrency,
+          });
+          return response.success(res, out);
+        }
+        const out = coveragePlateService.startCoveragePlateImageGeneration(db, log, req.params.episode_id, {
+          assign,
+          strategy,
+          plate_ids: plateIds,
+          only_missing: onlyMissing,
+          concurrency,
+        });
+        response.success(res, out);
+      } catch (err) {
+        log.error('generateCoveragePlates', { error: err.message });
+        if (err.code === 'not_found') return response.notFound(res, err.message);
+        if (err.code === 'bad_request') return response.badRequest(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：列出本集已生成的固定机位母版 */
+    listCoveragePlates: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const items = coveragePlateService.listCoveragePlates(db, req.params.episode_id);
+        response.success(res, { items, total: items.length });
+      } catch (err) {
+        log.error('listCoveragePlates', { error: err.message });
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：更新单张母版提示词 */
+    updateCoveragePlate: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const item = coveragePlateService.updateCoveragePlate(db, req.params.id, {
+          prompt: req.body?.prompt,
+          layout_description: req.body?.layout_description,
+        });
+        response.success(res, item);
+      } catch (err) {
+        log.error('updateCoveragePlate', { error: err.message });
+        if (err.code === 'not_found') return response.notFound(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：删除单张母版 */
+    deleteCoveragePlate: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const out = coveragePlateService.softDeleteCoveragePlate(db, req.params.id);
+        response.success(res, out);
+      } catch (err) {
+        log.error('deleteCoveragePlate', { error: err.message });
+        if (err.code === 'not_found') return response.notFound(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：重新生成单张模板图（异步任务） */
+    regenerateCoveragePlate: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const plate = coveragePlateService.getCoveragePlate(db, req.params.id);
+        if (!plate) return response.notFound(res, '母版不存在');
+        const assign = req.body?.assign === true || req.body?.assign === 1;
+        const strategy = req.body?.strategy === 'prefer_two_shot' ? 'prefer_two_shot' : 'by_speaker';
+        const out = coveragePlateService.startCoveragePlateImageGeneration(db, log, plate.episode_id, {
+          plate_ids: [plate.id],
+          only_missing: false,
+          assign,
+          strategy,
+        });
+        response.success(res, out);
+      } catch (err) {
+        log.error('regenerateCoveragePlate', { error: err.message });
+        if (err.code === 'not_found') return response.notFound(res, err.message);
+        if (err.code === 'bad_request') return response.badRequest(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：模板图历史版本列表 */
+    listCoveragePlateVersions: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const out = coveragePlateService.listPlateVersions(db, req.params.id);
+        response.success(res, out);
+      } catch (err) {
+        log.error('listCoveragePlateVersions', { error: err.message });
+        if (err.code === 'not_found') return response.notFound(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：恢复某一历史版本为当前图 */
+    restoreCoveragePlateVersion: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const versionId = req.body?.version_id ?? req.params.version_id;
+        const item = coveragePlateService.restorePlateVersion(db, req.params.id, versionId);
+        response.success(res, item);
+      } catch (err) {
+        log.error('restoreCoveragePlateVersion', { error: err.message });
+        if (err.code === 'not_found') return response.notFound(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：删除某一历史版本 */
+    deleteCoveragePlateVersion: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const versionId = req.params.version_id ?? req.body?.version_id;
+        const out = coveragePlateService.deletePlateVersion(db, req.params.id, versionId);
+        response.success(res, out);
+      } catch (err) {
+        log.error('deleteCoveragePlateVersion', { error: err.message });
+        if (err.code === 'not_found') return response.notFound(res, err.message);
+        if (err.code === 'bad_request') return response.badRequest(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：用已上传图片替换模板图（旧图进历史） */
+    uploadCoveragePlateImage: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const item = coveragePlateService.applyUploadedImageToCoveragePlate(db, req.params.id, {
+          image_url: req.body?.image_url,
+          local_path: req.body?.local_path,
+        });
+        response.success(res, item);
+      } catch (err) {
+        log.error('uploadCoveragePlateImage', { error: err.message });
+        if (err.code === 'not_found') return response.notFound(res, err.message);
+        if (err.code === 'bad_request') return response.badRequest(res, err.message);
+        response.internalError(res, err.message);
+      }
+    },
+
+    /** 定镜对白：将已有母版分配到分镜首帧；strategy 默认 by_speaker */
+    assignCoveragePlates: (req, res) => {
+      try {
+        const coveragePlateService = require('../services/coveragePlateService');
+        const strategy = req.body?.strategy === 'prefer_two_shot' ? 'prefer_two_shot' : 'by_speaker';
+        const forcePlateId =
+          req.body?.force_plate_id != null && req.body?.force_plate_id !== ''
+            ? Number(req.body.force_plate_id)
+            : null;
+        const result = coveragePlateService.assignCoveragePlatesToStoryboards(db, log, req.params.episode_id, {
+          force_static: req.body?.force_static !== false,
+          strategy,
+          force_plate_id: Number.isFinite(forcePlateId) && forcePlateId > 0 ? forcePlateId : null,
+        });
+        response.success(res, result);
+      } catch (err) {
+        log.error('assignCoveragePlates', { error: err.message });
         response.internalError(res, err.message);
       }
     },

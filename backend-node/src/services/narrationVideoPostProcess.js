@@ -259,6 +259,8 @@ async function runNarrationSubtitlePostProcess(db, log, opts) {
             text,
             storyboard_id: null,
             storage_base: storageRoot,
+            provider: 'indextts',
+            voice_id: require('./ttsService').DEFAULT_INDEXTTS_VOICE,
           });
         } catch (e) {
           log.warn('narration post: TTS failed', { segment: i, error: e.message });

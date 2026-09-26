@@ -785,8 +785,13 @@ async function processImageGeneration(db, log, imageGenId) {
       }
     }
 
+    // 定镜对白母版：只用创建时显式传入的 reference_images（单人板绝不能再并入分镜双人参考）
+    const isCoveragePlateFrame = String(row.frame_type || '')
+      .toLowerCase()
+      .startsWith('coverage');
+
     // 尾帧可能已注入首帧站位锁参考，仍需合并当前勾选的角色/场景/道具参考图
-    if (row.storyboard_id) {
+    if (row.storyboard_id && !isCoveragePlateFrame) {
       const sb = db.prepare('SELECT scene_id, characters, angle_s, shot_type FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(row.storyboard_id);
       if (sb) {
         const refs = [];
@@ -1378,6 +1383,19 @@ async function processImageGeneration(db, log, imageGenId) {
       system_prompt: apiSystemPrompt,
       negative_prompt: row.negative_prompt || undefined,
       frame_identity_lock: isFrameIdentityLock,
+      // 定镜过肩/正脸近景/POV：单图 reframing；定镜宫格：允许 2×2
+      ref_mode: (() => {
+        const ft = String(row.frame_type || '').toLowerCase();
+        if (
+          ft.startsWith('coverage_ots') ||
+          ft.startsWith('coverage_mcu') ||
+          ft.startsWith('coverage_pov')
+        ) {
+          return 'reframe';
+        }
+        if (ft === 'coverage_grid' || ft.startsWith('coverage_grid')) return 'grid';
+        return undefined;
+      })(),
     });
     log.info('[图生] Step4 图生 API 返回', { id: imageGenId, api_ms: Date.now() - tApi, has_error: !!result.error, elapsed: elapsed() });
 
@@ -1405,8 +1423,14 @@ async function processImageGeneration(db, log, imageGenId) {
       const storagePath = path.isAbsolute(cfg.storage?.local_path)
         ? cfg.storage.local_path
         : path.join(process.cwd(), cfg.storage?.local_path || './data/storage');
-      const category =
-        row.scene_id != null ? 'scenes' : row.character_id != null ? 'characters' : 'images';
+      const isCoveragePlate = String(row.frame_type || '').toLowerCase().startsWith('coverage');
+      const category = isCoveragePlate
+        ? 'images'
+        : row.scene_id != null
+          ? 'scenes'
+          : row.character_id != null
+            ? 'characters'
+            : 'images';
       const projectSubdir = storageLayout.getProjectStorageSubdir(db, row.drama_id);
       localPath = await uploadService.downloadImageToLocal(
         storagePath,
@@ -1454,8 +1478,13 @@ async function processImageGeneration(db, log, imageGenId) {
       });
     }
     
-    if (row.scene_id != null && row.storyboard_id == null) {
+    if (
+      row.scene_id != null &&
+      row.storyboard_id == null &&
+      !String(row.frame_type || '').toLowerCase().startsWith('coverage')
+    ) {
       // 旧图追加到 extra_images，与上传逻辑保持一致
+      // 定镜对白母版（coverage_*）禁止写回 scenes 主图/extra_images
       const oldScene = db.prepare('SELECT local_path, image_url, extra_images FROM scenes WHERE id = ?').get(row.scene_id);
       const oldPath = oldScene?.local_path || oldScene?.image_url || '';
       let sceneExtras = [];
@@ -1476,6 +1505,11 @@ async function processImageGeneration(db, log, imageGenId) {
           throw e;
         }
       }
+    } else if (
+      row.scene_id != null &&
+      String(row.frame_type || '').toLowerCase().startsWith('coverage')
+    ) {
+      log.info('[图生] coverage 母版跳过写回场景主图', { id: imageGenId, scene_id: row.scene_id });
     }
     log.info('[图生] ✓ 完成', { id: imageGenId, local_path: localPath, total_elapsed: elapsed() });
 
@@ -1501,6 +1535,11 @@ async function processImageGeneration(db, log, imageGenId) {
     }
 
     if (row.storyboard_id && effectiveFrameTypeForBind !== 'quad_grid' && effectiveFrameTypeForBind !== 'nine_grid') {
+      const ftBind = String(effectiveFrameTypeForBind || row.frame_type || '').toLowerCase();
+      // 定镜对白母版：挂 seed 分镜仅借参考图，禁止自动绑到该分镜首帧（由 coverage 分配阶段统一绑定）
+      if (ftBind.startsWith('coverage')) {
+        log.info('[图生] coverage 母版跳过自动首帧绑定', { id: imageGenId, frame_type: ftBind });
+      } else {
       try {
         const { bindStoryboardFrameImage } = require('./storyboardFrameBinding');
         bindStoryboardFrameImage(
@@ -1513,6 +1552,7 @@ async function processImageGeneration(db, log, imageGenId) {
         );
       } catch (bindErr) {
         log.warn('[图生] 分镜首尾帧绑定失败', { id: imageGenId, error: bindErr.message });
+      }
       }
     }
 

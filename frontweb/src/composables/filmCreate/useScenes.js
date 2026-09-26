@@ -1,4 +1,4 @@
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, unref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { sceneAPI } from '@/api/scenes'
 import { sceneLibraryAPI } from '@/api/sceneLibrary'
@@ -316,11 +316,13 @@ export function useScenes(deps) {
     generatingSceneIds.add(scene.id)
     genStore.markRunning(meta)
     try {
+      // unref：模板/调用方可能传入 Ref，直接 !!ref 恒为 true，会误开四宫格
+      const useQuad = !!unref(useQuadGrid)
       const res = await sceneAPI.generateImage({
         scene_id: scene.id,
         model: undefined,
         style: getSelectedStyle(),
-        use_quad_grid: !!useQuadGrid
+        use_quad_grid: useQuad
       })
       const taskId = res?.image_generation?.task_id ?? res?.task_id
       if (taskId) {

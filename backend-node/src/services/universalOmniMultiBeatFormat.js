@@ -46,12 +46,13 @@ function sanitizeChineseOmniStyleAnchor(prompt) {
 const SPEECH_METAPHOR_RE =
   /仿佛说出了[^，。；、！？\n]{0,48}|仿佛在[讲说]着?[^，。；、！？\n]{0,24}|说出了[^，。；、！？\n]{0,36}|(?:^|[，、；\s])说出(?![「"』{])[^，。；、！？\n]{0,24}|喃喃(?:自语)?|低声细语|低语|自言自语|掷地有声/g;
 
-/** 口型/开口描写（非说话句式行时删除；ArcReel 句式本身已隐含口型） */
+/** 口型/开口描写（非说话句式行时删除；ArcReel 句式本身已隐含口型；勿误伤「不开口」硬约束） */
 const MOUTH_CUE_RE =
-  /口型(?:开合|同步|说话|与下列【台词】同步|仅与下列【台词】同步)?|开口(?:说话|讲话)?|吐字|在说话|正在说|双唇(?:开合|闭合)|嘴唇开合|嘴唇微张|张嘴|勿额外开口|口型同步说出/g;
+  /口型(?:开合|同步|说话|与下列【台词】同步|仅与下列【台词】同步)?|(?<!不)开口(?:说话|讲话)?|吐字|在说话|正在说|双唇(?:开合|闭合)|嘴唇开合|嘴唇微张|张嘴|勿额外开口|口型同步说出/g;
 
 /** ArcReel 说话句式 */
 const SPEECH_MARK_RE = /<(?<name>[^\s>]{1,24})>说\s*\{(?<text>[^}]{1,200})\}/g;
+const INNER_MONOLOGUE_MARK_RE = /<(?<name>[^\s>]{1,24})>内心独白\s*\{(?<text>[^}]{1,200})\}/g;
 const VO_SPEECH_MARK_RE = /画外音说\s*\{(?<text>[^}]{1,200})\}/g;
 const AT_SPEECH_BRACE_RE = /@图片(?<n>\d+)\s*说\s*\{(?<text>[^}]{1,200})\}/g;
 
@@ -69,6 +70,7 @@ function cleanupScrubbedClause(s) {
 function lineHasSpokenDialogueMark(line) {
   const s = String(line || '');
   if (/<[^\s>]{1,24}>说\s*\{[^}]{1,200}\}/.test(s)) return true;
+  if (/<[^\s>]{1,24}>内心独白\s*\{[^}]{1,200}\}/.test(s)) return true;
   if (/画外音说\s*\{[^}]{1,200}\}/.test(s)) return true;
   if (/@图片\d+\s*说\s*\{[^}]{1,200}\}/.test(s)) return true;
   if (/[「"『][^」"'』]{1,120}[」"'』]/.test(s)) return true;
@@ -205,14 +207,37 @@ function beatLineHasSpokenDialogue(line) {
 }
 
 /**
- * 解析 dialogue 字段「角色名：台词」→ { name, spoken }
+ * 解析 dialogue 字段「角色名：台词」→ { name, spoken, innerMonologue }
+ * 支持「阿杰（心里话）：…」→ name=阿杰 + innerMonologue
  */
 function splitDialogueField(dialogue) {
   const raw = trim(dialogue);
-  if (!raw) return { name: '', spoken: '' };
-  const m = raw.match(/^([^：:]{1,16})[：:]\s*(.+)$/s);
-  if (m) return { name: trim(m[1]), spoken: trim(m[2]).replace(/^["「『]|["」』]$/g, '') };
-  return { name: '', spoken: raw.replace(/^["「『]|["」』]$/g, '') };
+  if (!raw) return { name: '', spoken: '', innerMonologue: false };
+  let m = raw.match(
+    /^([^：:（(]{1,24})[（(]\s*(?:心里话|内心独白|心声)\s*[）)]\s*[：:]\s*(.+)$/s
+  );
+  if (m) {
+    return {
+      name: trim(m[1]),
+      spoken: trim(m[2]).replace(/^["「『]|["」』]$/g, ''),
+      innerMonologue: true,
+    };
+  }
+  m = raw.match(/^([^：:]{1,16})[：:]\s*(.+)$/s);
+  if (m) {
+    let name = trim(m[1]);
+    let innerMonologue = false;
+    if (/%内心独白$/.test(name)) {
+      name = name.replace(/%内心独白$/, '');
+      innerMonologue = true;
+    }
+    return {
+      name,
+      spoken: trim(m[2]).replace(/^["「『]|["」』]$/g, ''),
+      innerMonologue,
+    };
+  }
+  return { name: '', spoken: raw.replace(/^["「『]|["」』]$/g, ''), innerMonologue: false };
 }
 
 /**
@@ -291,9 +316,12 @@ function extractSpeechSpeakerNames(text) {
   const names = [];
   const seen = new Set();
   for (const u of deriveUtterances(text)) {
-    if (u.kind !== 'dialogue') continue;
-    const name = trim(u.speaker);
-    if (!name || name.startsWith('@图片') || seen.has(name)) continue;
+    if (u.kind !== 'dialogue' && u.kind !== 'inner_monologue') continue;
+    let name = trim(u.speaker);
+    if (!name || name.startsWith('@图片')) continue;
+    // Voice binding / 角色表按基名匹配
+    name = name.replace(/%内心独白$/, '');
+    if (seen.has(name)) continue;
     seen.add(name);
     names.push(name);
   }
@@ -302,10 +330,11 @@ function extractSpeechSpeakerNames(text) {
 
 /**
  * 把一行拆成「画面描述片段」与「发声记号」（对齐 ArcReel split_speech_line）。
- * 认：<名>说 {…} / 画外音说 {…} / @图片N 说 {…} / @[名]{…} / 裸 {…}（画外音）
+ * 认：<名>说 {…} / <名>内心独白 {…} / 画外音说 {…} / @图片N 说 {…} / @[名]{…} / @[名%内心独白]{…} / 裸 {…}（画外音）
  * 花括号内才是 utterance；括号外一律当画面描述，不升格为台词。
+ * 禁止把「内心独白」收成画外音。
  *
- * @returns {Array<string|{ type:'speech', speaker:string, imageN:number|null, text:string, raw:string }>}
+ * @returns {Array<string|{ type:'speech', speaker:string, imageN:number|null, text:string, raw:string, innerMonologue?:boolean }>}
  */
 function splitSpeechLine(line) {
   const text = String(line || '');
@@ -313,6 +342,24 @@ function splitSpeechLine(line) {
   const parts = [];
   let cursor = 0;
   let scan = 0;
+
+  function parseAtSpeakerToken(token) {
+    const raw = String(token || '').trim();
+    if (!raw) return { ok: false };
+    let innerMonologue = false;
+    let body = raw;
+    const pct = body.indexOf('%');
+    if (pct >= 0) {
+      const suffix = body.slice(pct + 1).trim();
+      body = body.slice(0, pct).trim();
+      if (suffix !== '内心独白') return { ok: false };
+      innerMonologue = true;
+    }
+    const name = body.split('@')[0].trim();
+    if (!name) return { ok: false };
+    return { ok: true, name, innerMonologue };
+  }
+
   while (true) {
     const open = text.indexOf('{', scan);
     if (open < 0) break;
@@ -329,11 +376,17 @@ function splitSpeechLine(line) {
     let speaker = '';
     let imageN = null;
     let skip = false;
+    let innerMonologue = false;
     let m;
 
     if ((m = before.match(/<([^\s>]{1,24})>说\s*$/))) {
       start = cursor + before.length - m[0].length;
       speaker = trim(m[1]);
+    } else if ((m = before.match(/<([^\s>]{1,24})>内心独白\s*$/))) {
+      // 必须先于裸 {…}，否则会被收成画外音
+      start = cursor + before.length - m[0].length;
+      speaker = trim(m[1]);
+      innerMonologue = true;
     } else if ((m = before.match(/画外音说\s*$/))) {
       start = cursor + before.length - m[0].length;
       speaker = '';
@@ -343,10 +396,12 @@ function splitSpeechLine(line) {
       speaker = '';
     } else if ((m = before.match(/@\[([^\]]{0,40})\]\s*[：:]?\s*$/))) {
       start = cursor + before.length - m[0].length;
-      speaker = trim(m[1]);
-      if (!speaker) {
-        // @[ ]{台词}：说话人位写坏，不成记号（对齐 ArcReel）
+      const parsed = parseAtSpeakerToken(m[1]);
+      if (!parsed.ok) {
         skip = true;
+      } else {
+        speaker = parsed.name;
+        innerMonologue = !!parsed.innerMonologue;
       }
     }
     // else: 裸 {台词} → 画外音
@@ -363,6 +418,7 @@ function splitSpeechLine(line) {
       imageN: Number.isFinite(imageN) ? imageN : null,
       text: inner,
       raw: text.slice(start, close + 1),
+      innerMonologue: !!innerMonologue,
     });
     cursor = close + 1;
     scan = cursor;
@@ -371,14 +427,18 @@ function splitSpeechLine(line) {
   return parts;
 }
 
-/** 发声记号 → 官方提交句式（只输出花括号内原文） */
+/** 发声记号 → 官方提交句式（只输出花括号内原文；内心独白不得改成画外音/开口说） */
 function renderSpeechMark(mark) {
   if (!mark || mark.type !== 'speech') return '';
   const spoken = String(mark.text || '').replace(/[{}]/g, '');
   if (!spoken.trim()) return '';
   if (mark.imageN != null) return `@图片${mark.imageN} 说 {${spoken}}`;
+  if (mark.innerMonologue && mark.speaker) {
+    // 心声口型只挂在本句尾，不整段封口（同人另有对白时可正常张嘴）
+    return `<${mark.speaker}>内心独白 {${spoken}}【心声画面：嘴唇紧闭，不吐舌、不开口，无发声口部动作】`;
+  }
   if (mark.speaker) return `<${mark.speaker}>说 {${spoken}}`;
-  return `画外音说 {${spoken}}`;
+  return `画外音说 {${spoken}}【旁白画面：在场角色嘴唇紧闭，不开口、无说话口型】`;
 }
 
 /** 描述里的 @[名] → <名>（对齐 ArcReel render_mentions_as_subjects；不碰发声记号） */
@@ -402,7 +462,7 @@ function renderSpeechLine(line) {
 
 /**
  * 从全文派生 utterances（阅读顺序）
- * @returns {Array<{ kind:'dialogue'|'voiceover', speaker:string, text:string }>}
+ * @returns {Array<{ kind:'dialogue'|'inner_monologue'|'voiceover', speaker:string, text:string, innerMonologue?:boolean }>}
  */
 /** 约束/说明段里的占位花括号，不是剧本台词 */
 function isMetaSpeechPlaceholder(text) {
@@ -422,11 +482,29 @@ function deriveUtterances(text) {
       const spoken = String(part.text || '').trim();
       if (!spoken || isMetaSpeechPlaceholder(spoken)) continue;
       if (part.imageN != null) {
-        out.push({ kind: 'dialogue', speaker: `@图片${part.imageN}`, text: spoken });
+        out.push({
+          kind: 'dialogue',
+          speaker: `@图片${part.imageN}`,
+          text: spoken,
+          innerMonologue: false,
+        });
+      } else if (part.innerMonologue && part.speaker) {
+        // 内心独白：挂角色音色，绝不能降成 voiceover/画外音
+        out.push({
+          kind: 'inner_monologue',
+          speaker: part.speaker,
+          text: spoken,
+          innerMonologue: true,
+        });
       } else if (part.speaker) {
-        out.push({ kind: 'dialogue', speaker: part.speaker, text: spoken });
+        out.push({
+          kind: 'dialogue',
+          speaker: part.speaker,
+          text: spoken,
+          innerMonologue: false,
+        });
       } else {
-        out.push({ kind: 'voiceover', speaker: '', text: spoken });
+        out.push({ kind: 'voiceover', speaker: '', text: spoken, innerMonologue: false });
       }
     }
   }
@@ -434,8 +512,9 @@ function deriveUtterances(text) {
 }
 
 /**
- * 提交视频前：逐行把发声记号机械重渲染为 <名>说 {…} / 画外音说 {…}
- * （不改画面描述；不把括号外文字升格为台词）
+ * 提交视频前：逐行把发声记号机械重渲染为
+ * <名>说 {…} / <名>内心独白 {…} / 画外音说 {…}
+ * （不改画面描述；不把括号外文字升格为台词；不把内心独白收成画外音）
  */
 function renderUniversalSegmentUtterancesForSubmit(text) {
   const body = normalizeUniversalSegmentTextNewlines(text);
@@ -535,7 +614,13 @@ function sanitizeUniversalSegmentDialogueConflicts(text, opts = {}) {
 
   scrubSpeechCueInShotAndEnv(out);
 
-  return out.filter((x) => x != null && String(x).length >= 0).join('\n').trim();
+  let result = out.filter((x) => x != null && String(x).length >= 0).join('\n').trim();
+  // 心声对应画面：写死「嘴唇紧闭，不吐舌、不开口」
+  try {
+    const { appendInnerMonologueLipGuard } = require('./workflow/referenceMentions');
+    result = appendInnerMonologueLipGuard(result);
+  } catch (_) {}
+  return result;
 }
 
 /** 若文案未含人声硬约束，追加一段（生视频时用） */
@@ -618,6 +703,7 @@ module.exports = {
   DEFAULT_SCENE_NOTE,
   UNIVERSAL_AUDIO_VOICE_SUFFIX,
   SPEECH_MARK_RE,
+  INNER_MONOLOGUE_MARK_RE,
   VO_SPEECH_MARK_RE,
   AT_SPEECH_BRACE_RE,
   isLatinHeavyStyle,

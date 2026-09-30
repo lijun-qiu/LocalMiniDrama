@@ -62,10 +62,11 @@ function generateCharacterImage(db, log, cfg, characterId, modelName, style) {
   effectiveCfg = applyStyleOverrideToCfg(effectiveCfg, style);
 
   let prompt = '';
+  const characterLooks = require('./workflow/characterLooks');
   if (charRow.appearance && String(charRow.appearance).trim()) {
-    prompt = String(charRow.appearance);
+    prompt = characterLooks.stripMultiAgeAppearance(charRow.appearance) || String(charRow.appearance);
   } else if (charRow.description && String(charRow.description).trim()) {
-    prompt = String(charRow.description);
+    prompt = characterLooks.stripMultiAgeAppearance(charRow.description) || String(charRow.description);
   } else {
     prompt = charRow.name || '';
   }
@@ -606,6 +607,108 @@ async function generateCharacterFourViewImage(db, log, cfg, characterId, modelNa
 }
 
 /**
+ * ArcReel-style wardrobe look sheet.
+ * 换装/战损：以 base 图 i2i 保脸。
+ * 童年/少年/老年等年龄造型：禁止用成年 base 体型锁死，改为文生图 + 年龄硬锁（仅保留文字身份特征）。
+ */
+async function generateCharacterLookImage(db, log, cfg, characterId, lookId, modelName, style) {
+  const characterLooks = require('./workflow/characterLooks');
+  const lid = String(lookId || '').trim();
+  if (!lid || lid === characterLooks.BASE_LOOK_ID) {
+    return { ok: false, error: 'invalid look_id' };
+  }
+  const charRow = db
+    .prepare(
+      `SELECT id, drama_id, name, appearance, description, image_url, local_path, looks, negative_prompt
+       FROM characters WHERE id = ? AND deleted_at IS NULL`
+    )
+    .get(Number(characterId));
+  if (!charRow) return { ok: false, error: 'character not found' };
+  if (!characterLooks.isLookRegistered(charRow, lid)) {
+    return { ok: false, error: 'look not registered; save description first' };
+  }
+  const dramaFull = db
+    .prepare('SELECT id, style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL')
+    .get(charRow.drama_id);
+  if (!dramaFull) return { ok: false, error: 'unauthorized' };
+
+  let mergedCfg = mergeCfgStyleWithDrama(cfg, dramaFull);
+  mergedCfg = applyStyleOverrideToCfg(mergedCfg, style);
+  const styleEn = (mergedCfg.style?.default_style_en || mergedCfg.style?.default_style || '').trim();
+  const styleZh = (mergedCfg.style?.default_style_zh || '').trim();
+  const styleBlock = [styleZh, styleEn].filter(Boolean).join(' / ');
+
+  const sheet = characterLooks.resolveLookSheet(charRow, lid);
+  const lookDesc =
+    characterLooks.sanitizeLookDescription(sheet.description || '') || lid;
+  const baseDesc = characterLooks.stripMultiAgeAppearance(
+    String(charRow.appearance || charRow.description || '').trim()
+  );
+  const ageBand = characterLooks.inferLookAgeBand(lid, lookDesc);
+  const ageBlock = characterLooks.ageBandPromptBlock(ageBand, lookDesc);
+
+  let imagePrompt;
+  if (ageBand) {
+    imagePrompt =
+      `${styleBlock ? styleBlock + '\n' : ''}` +
+      `角色「${charRow.name}」的衣橱造型「${lid}」设计参考图（年龄段造型）。\n` +
+      `${ageBlock}\n` +
+      (baseDesc
+        ? `同一人物血缘特征仅保留：瞳色/眉眼形状/肤色倾向等家族相似（不要复制成年脸骨相与成年体型）：${baseDesc}\n`
+        : '') +
+      `本造型唯一服装与外观（必须严格执行）：${lookDesc}\n\n` +
+      `横版 16:9 四格布局，纯白背景：左侧约 40% 宽为胸像特写，右侧三个等宽面板分别为正面 / 四分之三侧面 / 背面的 A-Pose 全身视图。\n` +
+      `四个面板必须是同一年龄、同一身高比例、同一发型与服装，仅视角不同；禁止拼贴成年面板。\n` +
+      `画面避免：水印、多余文字、Logo、多年龄拼贴、成人模特身材。`;
+  } else {
+    imagePrompt =
+      `${styleBlock ? styleBlock + '\n' : ''}` +
+      `角色「${charRow.name}」的衣橱造型「${lid}」设计参考图。` +
+      `参考图只用于同一人物的脸型、五官与身份一致；服装、发型长度、配饰全部换成下列本造型，禁止半套换装。` +
+      `整图必须是同一年龄段、同一套服装；禁止拼贴童年头像或其他年龄段面板。\n\n` +
+      (baseDesc ? `基准身份（只保留脸型、五官；不要沿用其服装或配饰）：${baseDesc}\n\n` : '') +
+      `本造型唯一服装与外观（不得改成其他装扮）：${lookDesc}\n\n` +
+      `横版 16:9 四格布局，纯白背景：左侧约 40% 宽为胸像特写，右侧三个等宽面板分别为正面 / 四分之三侧面 / 背面的 A-Pose 全身视图。\n` +
+      `四个面板中角色面部、发型、服装完全一致，仅视角不同；五官对称、手指完整、肢体比例协调。\n` +
+      `画面避免：水印、多余文字、Logo、多年龄拼贴。`;
+  }
+
+  // 年龄造型不用成年 base 做 i2i（否则体型/发型被锁死成青年）
+  const refUrls = [];
+  if (!ageBand) {
+    if (charRow.local_path && String(charRow.local_path).trim()) refUrls.push(String(charRow.local_path).trim());
+    else if (charRow.image_url && String(charRow.image_url).trim()) refUrls.push(String(charRow.image_url).trim());
+  }
+
+  const userNeg = imageClient.resolveAssetUserNegativeForApi(modelName, charRow.negative_prompt);
+  const imageGen = imageClient.createAndGenerateImage(db, log, {
+    drama_id: charRow.drama_id,
+    character_id: charRow.id,
+    look_id: lid,
+    prompt: imagePrompt,
+    model: modelName || undefined,
+    size: '1792x1024',
+    quality: 'standard',
+    provider: 'openai',
+    user_negative_prompt: userNeg || undefined,
+    reference_image_urls: refUrls.length ? refUrls : undefined,
+    system_prompt: refUrls.length
+      ? 'Image 1: base character sheet — keep face/body identity only; do not copy costume'
+      : undefined,
+  });
+
+  log.info('[衣橱造型] 图片生成任务已提交', {
+    character_id: characterId,
+    look_id: lid,
+    image_gen_id: imageGen?.id,
+    has_base_ref: refUrls.length > 0,
+    age_band: ageBand || 'costume',
+  });
+
+  return { ok: true, image_generation: imageGen };
+}
+
+/**
  * 从角色现有图片中反向提取外貌描述，更新 appearance 字段。
  */
 async function extractAppearanceFromImage(db, log, cfg, characterId) {
@@ -1060,6 +1163,7 @@ module.exports = {
   generateCharacterImage,
   batchGenerateCharacterImages,
   generateCharacterFourViewImage,
+  generateCharacterLookImage,
   generateCharacterPromptOnly,
   extractAppearanceFromImage,
   registerCharacterJimengMaterialAsset,

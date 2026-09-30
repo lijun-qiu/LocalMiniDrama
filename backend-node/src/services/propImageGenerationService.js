@@ -18,6 +18,12 @@ function appendPrompt(base, extra) {
   return current + ', ' + add;
 }
 
+/** 道具资产图硬锁：禁止人像/大头脸，强制单物件棚拍构图 */
+const PROP_SHEET_LOCK_ZH =
+  '【道具资产主图·最高优先级】单一道具特写产品图，道具居中占画面主体，纯色无缝棚拍背景，无人物、无人脸、无大头照、无半身人像、无手、无场景、无台面';
+const PROP_SHEET_LOCK_EN =
+  'single prop product hero shot only, object centered, seamless solid studio backdrop, no person, no face, no portrait, no headshot, no hands, no environment, no table';
+
 async function processPropImageGeneration(db, log, taskId, propId, opts) {
   taskService.updateTaskStatus(db, taskId, 'processing', 0, '正在生成图片...');
 
@@ -40,26 +46,28 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
       cfg = mergeCfgStyleWithDrama(cfg, dr || {});
     } catch (_) {}
   }
+  // 画风只影响材质渲染；棚拍构图与禁人脸必须始终保留（勿因 styleOverride 丢掉 default_prop_style）
   const styleOverride = (opts && opts.style) ? String(opts.style).trim() : '';
-  const baseStyle = styleOverride || (cfg?.style?.default_style_en || cfg?.style?.default_style || '');
+  const dramaStyle =
+    styleOverride ||
+    (cfg?.style?.default_style_zh || '').trim() ||
+    (cfg?.style?.default_style_en || cfg?.style?.default_style || '').trim();
   let style = '';
-  style = appendPrompt(style, baseStyle);
-  if (!styleOverride) {
-    style = appendPrompt(style, cfg?.style?.default_prop_style || '');
+  if (dramaStyle) {
+    style = appendPrompt(style, `画风质感（仅材质渲染，不改变单道具构图）：${dramaStyle}`);
   }
-  // 优先用项目 aspect_ratio 推导尺寸；兜底 1920x1920（满足 ≥3,686,400 像素要求）
+  style = appendPrompt(style, cfg?.style?.default_prop_style || '');
+
+  // 道具资产图固定用 default_prop_ratio（默认 1:1），勿跟项目竖屏 9:16（易出大头脸）
   let imageSize = null;
-  if (prop.drama_id) {
-    try {
-      const dramaRow = db.prepare('SELECT metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(prop.drama_id);
-      if (dramaRow && dramaRow.metadata) {
-        const meta = typeof dramaRow.metadata === 'string' ? JSON.parse(dramaRow.metadata) : dramaRow.metadata;
-        if (meta && meta.aspect_ratio) imageSize = aspectRatioToSize(meta.aspect_ratio);
-      }
-    } catch (_) {}
-  }
+  const propRatio = (cfg?.style?.default_prop_ratio || '1:1').toString().trim();
+  imageSize = aspectRatioToSize(propRatio);
   if (!imageSize) imageSize = cfg?.style?.default_image_size || '1920x1920';
-  const fullPrompt = appendPrompt(String(prop.prompt).trim(), style);
+
+  // 硬锁放末尾：多数模型对尾部约束更敏感；画风只影响材质
+  let fullPrompt = appendPrompt(String(prop.prompt).trim(), style);
+  fullPrompt = appendPrompt(fullPrompt, PROP_SHEET_LOCK_ZH);
+  fullPrompt = appendPrompt(fullPrompt, PROP_SHEET_LOCK_EN);
   // 与角色/场景一致：使用前端「图片生成模型」选择的 model；未传时用 YAML default_image_provider 兜底
   const model = (opts && opts.model) ? String(opts.model).trim() || null : null;
   const preferredProvider = !model && cfg?.ai?.default_image_provider ? cfg.ai.default_image_provider : null;

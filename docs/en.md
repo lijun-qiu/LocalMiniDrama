@@ -117,13 +117,13 @@ cp configs/config.example.yaml configs/config.yaml
 npm run migrate   # first run: initialise DB
 npm start
 
-# 3. Frontend (new terminal, port 3013)
+# 3. Frontend (new terminal, port 3015)
 cd frontweb
 npm install
 npm run dev
 ```
 
-Open `http://localhost:3013` in your browser.
+Open `http://localhost:3015` in your browser.
 
 You can also double-click `run_dev.bat` at the project root to **start both servers at once**.
 
@@ -186,7 +186,7 @@ LocalMiniDrama/
 Full version history → **[CHANGELOG](changelog.md)**
 
 **Latest v1.2.8 highlights:**
-- 🆕 **Agnes AI** — one-click setup for text (`agnes-2.0-flash`), image (`agnes-image-2.1-flash`), and video (`agnes-video-v2.0`) with a single API key
+- 🆕 **Agnes AI** — one-click setup for text (`agnes-3.0-flash`), image (`agnes-image-2.1-flash`), and video (`agnes-video-v2.0`) with a single API key
 - 🆕 **Canvas mode enhancements** — script node on canvas, context menu, floating toolbar, in-canvas create/delete, batch episode generation
 - 🆕 **ModelArk private asset library** — configure BytePlus / Volcengine Ark asset groups for Seedance 2.0 character certification (AK/SK or Bearer auth)
 - 🔧 **Configurable image proxy** — `upload_url`, timeout (default 180s), and retry count in `config.yaml`; stale cache URLs auto-reupload

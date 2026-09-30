@@ -25,6 +25,43 @@ const {
   AGNES_VIDEO_MIN_INTERVAL_MS,
 } = require('../utils/apiKeyPool');
 
+/** Agnes 视频提交并发上限（与前端批量并发对齐） */
+const AGNES_VIDEO_SUBMIT_CONCURRENCY = 7;
+let agnesVideoSubmitActive = 0;
+const agnesVideoSubmitWaiters = [];
+
+function acquireAgnesVideoSubmitSlot() {
+  return new Promise((resolve) => {
+    if (agnesVideoSubmitActive < AGNES_VIDEO_SUBMIT_CONCURRENCY) {
+      agnesVideoSubmitActive += 1;
+      resolve();
+      return;
+    }
+    agnesVideoSubmitWaiters.push(resolve);
+  });
+}
+
+function releaseAgnesVideoSubmitSlot() {
+  const next = agnesVideoSubmitWaiters.shift();
+  if (next) {
+    next();
+    return;
+  }
+  agnesVideoSubmitActive = Math.max(0, agnesVideoSubmitActive - 1);
+}
+
+async function withAgnesVideoSubmitSlot(fn) {
+  await acquireAgnesVideoSubmitSlot();
+  try {
+    return await fn();
+  } finally {
+    releaseAgnesVideoSubmitSlot();
+  }
+}
+
+/** Agnes 可重试错误：每 1 分钟无限重试，直到拿到 task_id / 成功或不可重试错误 / 任务被取消 */
+const AGNES_VIDEO_RETRY_INTERVAL_MS = 60_000;
+
 /**
  * ?? provider ??????????api_protocol ??????????
  */
@@ -2708,7 +2745,7 @@ function buildAgnesSubmitFailure(status, raw, fallbackPrefix) {
   if (detail) errMsg += ' - ' + detail;
   if (code === 'video_queue_full' || /queue is full/i.test(detail)) {
     errMsg =
-      'Agnes 视频队列已满（video_queue_full），不是单 Key 故障。平台全局排队拥堵，将自动重试。原始：' +
+      'Agnes 视频队列已满（video_queue_full），不是单 Key 故障。将每 1 分钟自动重试直到成功。原始：' +
       errMsg;
   }
   return {
@@ -2980,46 +3017,115 @@ async function callAgnesVideoApi(db, config, log, opts) {
     return { task_id, status: data.status || 'processing' };
   };
 
-  // 仅提交失败且上游标记可重试时才重试（成功拿到 task_id / video_url 立即返回）
-  const maxAttempts = 3; // 首次 1 次 + 报错后最多再试 2 次
-  const retryIntervalMs = 60_000;
+  // 可重试错误（含 queue_full）：每 1 分钟重试提交；一旦拿到 task_id / video_url 立即 return，不再打 API
+  // 等待期间释放并发槽；任务被删除/取消/完成则停止
   let lastFail = null;
   const basePrefer =
     preferred_key_index != null && Number.isFinite(Number(preferred_key_index))
       ? Number(preferred_key_index)
       : null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    // 串行/显式轮询：每次重试顺延一个 Key，避免同 Key 卡在 1 分钟冷却
+
+  function readVideoGenRow() {
+    if (video_gen_id == null) return null;
+    try {
+      return db
+        .prepare(
+          'SELECT status, deleted_at, provider_task_id FROM video_generations WHERE id = ?'
+        )
+        .get(Number(video_gen_id));
+    } catch {
+      return null;
+    }
+  }
+
+  function isVideoGenStillActive() {
+    const row = readVideoGenRow();
+    if (video_gen_id == null) return true;
+    if (!row || row.deleted_at) return false;
+    const st = String(row.status || '').toLowerCase();
+    if (st === 'failed' || st === 'completed' || st === 'cancelled' || st === 'canceled') {
+      return false;
+    }
+    return true;
+  }
+
+  /** 已拿到上游 task_id 则禁止再 POST，避免重复计费 */
+  function alreadyAcceptedUpstream() {
+    const row = readVideoGenRow();
+    const tid = row && row.provider_task_id && String(row.provider_task_id).trim();
+    return tid || null;
+  }
+
+  function noteRetrying(attempt, errMsg) {
+    if (video_gen_id == null) return;
+    const now = new Date().toISOString();
+    const note = `排队重试中（已尝试 ${attempt} 次，约 1 分钟后再试）：${String(errMsg || '').slice(0, 180)}`;
+    try {
+      db.prepare('UPDATE video_generations SET error_msg = ?, updated_at = ? WHERE id = ?').run(
+        note,
+        now,
+        Number(video_gen_id)
+      );
+    } catch (_) {
+      try {
+        db.prepare('UPDATE video_generations SET updated_at = ? WHERE id = ?').run(now, Number(video_gen_id));
+      } catch (_) {}
+    }
+  }
+
+  for (let attempt = 1; ; attempt++) {
+    if (!isVideoGenStillActive()) {
+      return { error: lastFail?.error || '视频任务已取消/完成/删除，停止重试', retryable: false };
+    }
+    const existingTid = alreadyAcceptedUpstream();
+    if (existingTid) {
+      log.info('[Agnes] 已有厂商 task_id，跳过重复提交', {
+        video_gen_id,
+        task_id: existingTid,
+        attempt,
+      });
+      return { task_id: existingTid, status: 'processing' };
+    }
     const preferIdx = basePrefer != null ? basePrefer + (attempt - 1) : null;
-    const result = pool
-      ? preferIdx != null
-        ? await pool.runPreferred(preferIdx, (apiKey, keyIndex) => submitWithKey(apiKey, keyIndex, attempt))
-        : await pool.run((apiKey, keyIndex) => submitWithKey(apiKey, keyIndex, attempt))
-      : await submitWithKey(
-          // 无池时仍拆分首个 Key，避免把逗号串整段塞进 Bearer
-          (parseApiKeys(config.api_key)[0] || config.api_key || ''),
-          0,
-          attempt
-        );
-    if (!result.error) return result;
+    const result = await withAgnesVideoSubmitSlot(async () => {
+      return pool
+        ? preferIdx != null
+          ? await pool.runPreferred(preferIdx, (apiKey, keyIndex) => submitWithKey(apiKey, keyIndex, attempt))
+          : await pool.run((apiKey, keyIndex) => submitWithKey(apiKey, keyIndex, attempt))
+        : await submitWithKey(
+            (parseApiKeys(config.api_key)[0] || config.api_key || ''),
+            0,
+            attempt
+          );
+    });
+    // 成功：立刻离开循环，后续只轮询，不会再 POST
+    if (!result.error) {
+      log.info('[Agnes] 提交成功，停止重试', {
+        video_gen_id,
+        attempt,
+        task_id: result.task_id || null,
+        has_video_url: !!result.video_url,
+      });
+      return result;
+    }
     lastFail = result;
     if (!result.retryable) {
-      log.info('[Agnes] 提交失败且不可重试，不再消耗调用次数', {
+      log.info('[Agnes] 提交失败且不可重试，停止', {
         video_gen_id,
         attempt,
         error: result.error,
       });
       break;
     }
-    if (attempt >= maxAttempts) break;
-    log.warn('[Agnes] 提交可重试失败，等待后重试', {
+    noteRetrying(attempt, result.error);
+    log.warn('[Agnes] 提交可重试失败，1 分钟后继续重试（成功即停）', {
       video_gen_id,
       attempt,
       next_attempt: attempt + 1,
-      delay_ms: retryIntervalMs,
+      delay_ms: AGNES_VIDEO_RETRY_INTERVAL_MS,
       error: result.error,
     });
-    await sleepMs(retryIntervalMs);
+    await sleepMs(AGNES_VIDEO_RETRY_INTERVAL_MS);
   }
   return { error: lastFail?.error || 'Agnes 视频请求失败' };
 }
@@ -4250,19 +4356,33 @@ async function callVideoApi(db, log, opts) {
       nameToTag,
       classicFields,
     });
+    const promptBeforeArcReel = prompt;
     arcReelStructured = !!ensured.structured;
-    if (ensured.prompt && ensured.prompt !== prompt) {
-      const before = prompt;
+    if (ensured.prompt) {
       prompt = ensured.prompt;
+      // 对齐 ArcReel：≥2 角色参考时追加双胞胎/分身禁令
+      try {
+        const { appendArcReelTwinPack } = require('./dramaVideoPromptYaml');
+        let charRefCount = 0;
+        if (Array.isArray(opts.character_image_urls)) {
+          charRefCount = opts.character_image_urls.filter(Boolean).length;
+        } else if (Array.isArray(opts.image_urls) && opts.image_urls.length >= 2) {
+          charRefCount = 2;
+        }
+        if (nameToTag && nameToTag.size >= 2) charRefCount = Math.max(charRefCount, nameToTag.size);
+        if (charRefCount >= 2) prompt = appendArcReelTwinPack(prompt);
+      } catch (_) {}
       opts.prompt = prompt;
+    }
+    if (ensured.prompt && (ensured.converted || !ensured.passthrough || prompt !== promptBeforeArcReel)) {
       if (log?.info) {
         log.info(
           ensured.converted
             ? '[视频][台词] 提交前已自动转为 ArcReel drama YAML'
-            : '[视频][台词] ArcReel YAML 已修补（旧 Spoken/【音轨】→ Dialogue）',
+            : '[视频][台词] ArcReel YAML 已规范化（Speaker/Action/心声口型/双胞胎）',
           {
             video_gen_id,
-            prompt_chars_before: before.length,
+            prompt_chars_before: promptBeforeArcReel.length,
             prompt_chars_after: prompt.length,
             converted: ensured.converted,
             source: ensured.source || null,
@@ -4285,10 +4405,8 @@ async function callVideoApi(db, log, opts) {
           }
         } catch (_) {}
       }
-    } else if (arcReelStructured) {
-      if (ensured.passthrough && log?.info) {
-        log.info('[视频][台词] ArcReel drama YAML 已就绪，原样提交', { video_gen_id });
-      }
+    } else if (arcReelStructured && ensured.passthrough && log?.info) {
+      log.info('[视频][台词] ArcReel drama YAML 已就绪，原样提交', { video_gen_id });
     }
   } catch (e) {
     log?.warn?.('[视频][台词] ArcReel 结构化处理跳过', { video_gen_id, error: e.message });

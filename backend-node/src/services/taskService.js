@@ -93,7 +93,9 @@ function cancelTask(db, log, taskId, reason) {
 }
 
 /**
- * 进程内 setImmediate 任务在重启后会丢失；启动时将遗留的 pending/processing 标为失败，避免前端无限轮询。
+ * 进程内 setImmediate 任务在重启后会丢失。
+ * - 普通 async_tasks：标失败，避免前端无限轮询
+ * - video_generation：留给 resumeProcessingVideoGenerations 重提/续轮询，不在这里杀掉
  */
 function failOrphanedAsyncTasksOnStartup(db, log) {
   const rows = db.prepare(
@@ -101,9 +103,11 @@ function failOrphanedAsyncTasksOnStartup(db, log) {
      WHERE status IN ('pending', 'processing') AND deleted_at IS NULL`
   ).all();
   if (!rows.length) return 0;
-  log.warn('Failing orphaned async tasks after startup', { count: rows.length });
+  let failed = 0;
   for (const row of rows) {
+    if (row.type === 'video_generation') continue;
     updateTaskError(db, row.id, ORPHAN_ASYNC_TASK_MSG);
+    failed += 1;
     log.info('Orphaned async task marked failed', {
       task_id: row.id,
       type: row.type,
@@ -111,7 +115,12 @@ function failOrphanedAsyncTasksOnStartup(db, log) {
       previous_status: row.status,
     });
   }
-  return rows.length;
+  if (failed) log.warn('Failing orphaned async tasks after startup', { count: failed });
+  const skipped = rows.length - failed;
+  if (skipped) {
+    log.info('Skipped orphaned video_generation tasks (will resume submit/poll)', { count: skipped });
+  }
+  return failed;
 }
 
 module.exports = {

@@ -47,10 +47,53 @@ describe('dramaVideoPromptYaml (ArcReel drama aligned)', () => {
     assert.ok(isArcReelSubmitReady(yaml));
   });
 
+  it('maps 内心独白 to Speaker 角色%内心独白, never 画外音', () => {
+    const raw = [
+      '【分镜1】（5秒）：',
+      '@[阿杰] 看手机。@[阿杰%内心独白]{交完房租水电后，想要的一直在购物车。}@[阿杰]{就只有三千了。}',
+      '【环境音】',
+      '安静。',
+    ].join('\n');
+    const yaml = convertUniversalSegmentToArcReelYaml(raw, {
+      characters: [{ name: '阿杰', voice_style: '温和内敛' }],
+    });
+    assert.match(yaml, /- Speaker: "?阿杰%内心独白"?\n  Line: 交完房租水电后，想要的一直在购物车。/);
+    assert.match(yaml, /- Speaker: 阿杰\n  Line: 就只有三千了。/);
+    assert.doesNotMatch(yaml, /Speaker: 画外音\n  Line: 交完房租/);
+    assert.match(yaml, /Voice_Profiles:\n- Speaker: 阿杰\n  Voice_Style: 温和内敛/);
+    assert.match(yaml, /【心声口型】/);
+    assert.doesNotMatch(yaml, /【音轨硬约束】/);
+
+    const fromOmni = convertUniversalSegmentToArcReelYaml(
+      '【分镜1】（5秒）：\n<阿杰>内心独白 {算了，下个月吧。}\n【环境音】\n静。',
+      { characters: [{ name: '阿杰', voice_style: '温和' }] }
+    );
+    assert.match(fromOmni, /- Speaker: "?阿杰%内心独白"?\n  Line: 算了，下个月吧。/);
+    assert.doesNotMatch(fromOmni, /Speaker: 画外音/);
+    assert.match(fromOmni, /【心声口型】/);
+  });
+
   it('stripDeliveryAside removes tone and speech residues', () => {
     const out = stripDeliveryAside('坐姿懒散，语气平淡如叙述事实。约第1秒起，话音落下后');
     assert.doesNotMatch(out, /语气平淡/);
     assert.doesNotMatch(out, /话音落下后/);
+  });
+
+  it('inner-monologue Action strips sound-related gestures', () => {
+    const { ensureInnerMonologueLipPackInAction, stripSoundRelatedActionPhrases } = require('../src/services/dramaVideoPromptYaml');
+    const cleaned = stripSoundRelatedActionPhrases(
+      '阿杰盯着奇趣蛋，低声嘟囔着什么，又咂嘴叹气，目光黯淡。'
+    );
+    assert.doesNotMatch(cleaned, /低声|嘟囔|咂嘴|叹气/);
+    assert.match(cleaned, /奇趣蛋/);
+    const action = ensureInnerMonologueLipPackInAction(
+      '阿杰停住，轻声耳语，嘴唇微张。',
+      [{ speaker: '阿杰%内心独白', line: '算了。' }]
+    );
+    const actionBody = action.split('【心声口型】')[0];
+    assert.doesNotMatch(actionBody, /轻声|耳语|嘴唇微张/);
+    assert.match(action, /【心声口型】/);
+    assert.match(action, /禁止描写任何与发声有关的行为/);
   });
 
   it('sanitizeAmbianceAudio drops 人声 phrases', () => {
@@ -235,5 +278,52 @@ describe('dramaVideoPromptYaml (ArcReel drama aligned)', () => {
     assert.equal(out.source, 'classic');
     assert.match(out.prompt, /Line: 你好。/);
     assert.equal(isArcReelSubmitReady(out.prompt), true);
+  });
+
+  it('unquotes doubled Speaker and cleans Action garbage; keeps Dialogue order', () => {
+    const {
+      normalizeArcReelYamlForSubmit,
+      parseArcReelYamlLoose,
+      appendArcReelTwinPack,
+      ARCREEL_TWIN_PACK,
+    } = require('../src/services/dramaVideoPromptYaml');
+    const dirty = [
+      'Voice_Profiles:',
+      '- Speaker: 阿杰',
+      '  Voice_Style: 温和内敛',
+      'Action: "@[阿杰]看手机 【口型】阿杰 内心独白时嘴唇紧闭，不张嘴说话 【音轨硬约束】成片人声仅来自【分镜】里"',
+      'Camera_Motion: Static',
+      'Ambiance_Audio: 低电平现场环境声',
+      'Dialogue:',
+      '- Speaker: "\\"阿杰%内心独白\\""',
+      '  Line: 工资到账了。',
+      '- Speaker: 妈',
+      '  Line: 儿子长大了。',
+      '- Speaker: "\\"阿杰%内心独白\\""',
+      '  Line: 交完房租水电后。',
+      '- Speaker: 阿杰',
+      '  Line: 就只有三千了。',
+      '',
+      '禁止出现：BGM、文字字幕、水印。',
+    ].join('\n');
+    const next = normalizeArcReelYamlForSubmit(dirty);
+    assert.match(next, /- Speaker: "?阿杰%内心独白"?\n  Line: 工资到账了。/);
+    assert.doesNotMatch(next, /\\\\"/);
+    assert.doesNotMatch(next, /\\"阿杰/);
+    assert.doesNotMatch(next, /【口型】/);
+    assert.doesNotMatch(next, /【音轨硬约束】/);
+    assert.match(next, /【心声口型】/);
+    const parsed = parseArcReelYamlLoose(next);
+    assert.deepEqual(
+      parsed.dialogue.map((d) => `${d.speaker}:${d.line}`),
+      [
+        '阿杰%内心独白:工资到账了。',
+        '妈:儿子长大了。',
+        '阿杰%内心独白:交完房租水电后。',
+        '阿杰:就只有三千了。',
+      ]
+    );
+    const withTwin = appendArcReelTwinPack(next);
+    assert.match(withTwin, new RegExp(ARCREEL_TWIN_PACK.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   });
 });

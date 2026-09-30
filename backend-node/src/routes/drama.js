@@ -89,6 +89,86 @@ function saveOutline(db, log) {
   };
 }
 
+function getWorkflowPlan(db, log) {
+  return (req, res) => {
+    try {
+      const drama = dramaService.getDramaById(db, Number(req.params.id));
+      if (!drama) return response.notFound(res, '剧本不存在');
+      const body = req.body || {};
+      const { getWorkflowPlan: plan, WorkflowRequestError } = require('../services/workflow');
+      const result = plan(db, drama, {
+        episode: body.episode != null ? body.episode : req.query.episode,
+        narration_delivery: body.narration_delivery ?? null,
+        confirmed_request_durations: body.confirmed_request_durations || {},
+      });
+      response.success(res, result);
+    } catch (err) {
+      if (err?.name === 'WorkflowRequestError') {
+        return response.badRequest(res, err.message);
+      }
+      log.error('workflow-plan failed', { error: err.message, stack: err.stack });
+      response.internalError(res, err.message || 'workflow-plan failed');
+    }
+  };
+}
+
+function putWorkflowModes(db, log) {
+  return (req, res) => {
+    try {
+      const { saveWorkflowModes } = require('../services/workflow');
+      const body = req.body || {};
+      const drama = saveWorkflowModes(db, req.params.id, {
+        content_mode: body.content_mode,
+        generation_mode: body.generation_mode,
+        grid_storyboard: body.grid_storyboard,
+      });
+      if (!drama) return response.notFound(res, '剧本不存在');
+      response.success(res, {
+        content_mode: drama.metadata?.content_mode,
+        generation_mode: drama.metadata?.generation_mode,
+        grid_storyboard: drama.metadata?.grid_storyboard === true,
+        drama,
+      });
+    } catch (err) {
+      if (err?.name === 'WorkflowRequestError') {
+        return response.badRequest(res, err.message);
+      }
+      log.error('workflow-modes failed', { error: err.message });
+      response.internalError(res, err.message || 'workflow-modes failed');
+    }
+  };
+}
+
+function executeWorkflow(db, log, cfg) {
+  return async (req, res) => {
+    try {
+      const drama = dramaService.getDramaById(db, Number(req.params.id));
+      if (!drama) return response.notFound(res, '剧本不存在');
+      const body = req.body || {};
+      const { executeWorkflowAction } = require('../services/workflow');
+      const result = await executeWorkflowAction(db, log, drama, {
+        episode: body.episode,
+        narration_delivery: body.narration_delivery ?? null,
+        action_type: body.action_type || null,
+        cfg,
+        model: body.model,
+        body,
+      });
+      response.success(res, result);
+    } catch (err) {
+      if (err?.name === 'WorkflowRequestError') {
+        const code = err.code;
+        if (code === 'conflict' || code === 'quarantined' || code === 'no_step1') {
+          return response.error(res, 409, code.toUpperCase(), err.message);
+        }
+        return response.badRequest(res, err.message);
+      }
+      log.error('workflow-execute failed', { error: err.message, stack: err.stack });
+      response.internalError(res, err.message || 'workflow-execute failed');
+    }
+  };
+}
+
 function getCharacters(db) {
   return (req, res) => {
     const characters = dramaService.getCharacters(db, req.params.id, req.query.episode_id);
@@ -393,5 +473,8 @@ module.exports = function dramaRoutes(db, cfg, log) {
     importExample: importExample(db, cfg, log),
     narrationSd2VoiceUpload: narrationSd2VoiceUpload(db, cfg, log),
     narrationSd2VoiceRefresh: narrationSd2VoiceRefresh(db, log),
+    getWorkflowPlan: getWorkflowPlan(db, log),
+    putWorkflowModes: putWorkflowModes(db, log),
+    executeWorkflow: executeWorkflow(db, log, cfg),
   };
 };

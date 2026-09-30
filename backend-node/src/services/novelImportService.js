@@ -1,19 +1,23 @@
+'use strict';
+
 /**
- * 小说/长文章节导入服务
- * 功能：上传 txt/docx 内容 → AI 识别章节分割 → 自动填充各集剧本
+ * 小说/长文章节导入 + 强对话驱动剧本改写（火宝 dialogue_driven skill）
  */
 const aiClient = require('./aiClient');
-const { safeParseAIJSON } = require('../utils/safeJson');
+const {
+  buildRewriteSystemPrompt,
+  buildRewriteUserPrompt,
+} = require('./scriptRewriteSkill');
 
 /**
  * 简单的章节检测（不调用 AI，基于规则）
- * 识别常见章节标题格式
  */
 function detectChaptersByRules(text) {
   const lines = text.split(/\r?\n/);
   const chapterPatterns = [
     /^第[零一二三四五六七八九十百千\d]+章/,
     /^第[零一二三四五六七八九十百千\d]+节/,
+    /^第[零一二三四五六七八九十百千\d]+集/,
     /^Chapter\s+\d+/i,
     /^CHAPTER\s+\d+/,
     /^\d+[\.、]\s*.{2,20}$/,
@@ -39,7 +43,6 @@ function detectChaptersByRules(text) {
       currentStart = i + 1;
     }
   }
-  // 最后一章
   const lastContent = lines.slice(currentStart).join('\n').trim();
   if (lastContent.length > 20) {
     chapters.push({ title: currentTitle, content: lastContent });
@@ -47,54 +50,90 @@ function detectChaptersByRules(text) {
   return chapters;
 }
 
+function stripCodeFence(text) {
+  let t = String(text || '').trim();
+  if (/^```/.test(t)) {
+    t = t.replace(/^```(?:markdown|md|text)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  }
+  return t;
+}
+
 /**
- * 用 AI 将章节内容摘要为剧本形式
+ * 用火宝「强对话驱动」skill 将原文改写为格式化剧本
  */
-async function summarizeChapterToScript(db, log, chapterTitle, chapterContent, dramaTitle) {
-  const maxLen = 2000;
-  const truncated = chapterContent.length > maxLen ? chapterContent.slice(0, maxLen) + '...' : chapterContent;
-  const userPrompt = `小说名称：${dramaTitle || '未知'}
-章节标题：${chapterTitle}
+async function rewriteToScreenplay(db, log, { title, content, previousContext, dramaTitle } = {}) {
+  const raw = String(content || '').trim();
+  if (!raw) throw new Error('改写内容为空');
 
-章节原文（部分）：
-${truncated}
+  const maxLen = 12000;
+  const truncated = raw.length > maxLen ? `${raw.slice(0, maxLen)}\n…（原文已截断）` : raw;
+  const { skillId, systemPrompt } = buildRewriteSystemPrompt();
+  const userPrompt = buildRewriteUserPrompt({
+    title: title || dramaTitle || '',
+    content: truncated,
+    previousContext,
+  });
 
-请将上述章节内容改写为短剧剧本格式，包含：场景描述、角色对话、动作说明。输出为中文纯文本，不需要 JSON 格式，长度200-500字。`;
+  const result = await aiClient.generateText(db, log, 'text', userPrompt, systemPrompt, {
+    scene_key: 'novel_import',
+    max_tokens: 8192,
+    temperature: 0.55,
+  });
+  const out = stripCodeFence(result);
+  if (!out || out.length < 40) {
+    throw new Error('AI 改写结果过短或为空');
+  }
+  log?.info?.('[剧本改写] 完成', { skillId, chars: out.length, title: title || '' });
+  return { script: out, skillId };
+}
 
+/**
+ * 用 AI 将章节内容改写为剧本形式（导入路径）
+ */
+async function summarizeChapterToScript(db, log, chapterTitle, chapterContent, dramaTitle, previousContext) {
   try {
-    const result = await aiClient.generateText(db, log, 'text', userPrompt, null, {
-      scene_key: 'novel_import',
-      max_tokens: 800,
-      temperature: 0.7,
+    const { script } = await rewriteToScreenplay(db, log, {
+      title: chapterTitle,
+      content: chapterContent,
+      dramaTitle,
+      previousContext,
     });
-    return result || chapterContent.slice(0, 500);
+    return script;
   } catch (err) {
     log.warn('[小说导入] AI改写章节失败，使用原文截断', { error: err.message });
-    return chapterContent.slice(0, 500);
+    return chapterContent.slice(0, 2000);
   }
 }
 
 /**
  * 主入口：解析小说文本，返回章节列表
- * @returns {{ chapters: Array<{title, content, script}> }}
+ * @returns {{ chapters: Array<{title, content, script}>, skillId?: string }}
  */
 async function importNovel(db, log, { text, title, maxChapters, aiSummarize }) {
   if (!text || !text.trim()) throw new Error('小说内容不能为空');
 
   const chapters = detectChaptersByRules(text);
   if (chapters.length === 0) {
-    // 没有检测到章节，整个文本作为一章
     chapters.push({ title: title || '第一集', content: text.trim() });
   }
 
   const limit = Math.min(maxChapters || 20, chapters.length);
   const result = [];
+  let skillId = '';
+  let previousTail = '';
 
   for (let i = 0; i < limit; i++) {
     const ch = chapters[i];
     let script = ch.content;
     if (aiSummarize) {
-      script = await summarizeChapterToScript(db, log, ch.title, ch.content, title);
+      script = await summarizeChapterToScript(db, log, ch.title, ch.content, title, previousTail);
+      if (!skillId) {
+        try {
+          skillId = require('./scriptRewriteSkill').readActiveSkillId();
+        } catch (_) {}
+      }
+      // 跨集衔接：取上集改写结果末尾
+      previousTail = String(script || '').slice(-2500);
     }
     result.push({
       index: i + 1,
@@ -104,7 +143,12 @@ async function importNovel(db, log, { text, title, maxChapters, aiSummarize }) {
     });
   }
 
-  return { chapters: result, total: chapters.length };
+  return { chapters: result, total: chapters.length, skillId: skillId || undefined };
 }
 
-module.exports = { importNovel, detectChaptersByRules };
+module.exports = {
+  importNovel,
+  detectChaptersByRules,
+  rewriteToScreenplay,
+  summarizeChapterToScript,
+};

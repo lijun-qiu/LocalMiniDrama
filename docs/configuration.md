@@ -192,7 +192,7 @@ API Key：your-api-key
 在「AI 配置」页面，点击顶部的：
 - **「一键配置通义」** — 自动创建阿里云 DashScope 的文本/图片/视频三套配置模板
 - **「一键配置火山」** — 自动创建火山引擎的文本/图片/视频三套配置模板
-- **「一键配置 Agnes」**（v1.2.8+）— 自动创建 Agnes AI 的文本/图片/视频三套配置模板（`agnes-2.0-flash` / `agnes-image-2.1-flash` / `agnes-video-v2.0`）
+- **「一键配置 Agnes」**（v1.2.8+）— 自动创建 Agnes AI 的文本/图片/视频三套配置模板（`agnes-3.0-flash` / `agnes-image-2.1-flash` / `agnes-video-v2.0`）
 
 一键配置后，只需填入你的 API Key，其他参数已预填好，点击「保存」即可使用。
 

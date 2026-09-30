@@ -150,7 +150,10 @@ async function generatePropPromptOnly(db, log, cfg, propId, modelName, style) {
   ].filter(Boolean).join('\n') || prop.name || '';
 
   const systemPrompt = promptI18n.getPropPolishPrompt(polishCfg);
-  const userPrompt = `请为以下道具生成**一段英文**图片提示词。\n**约束**：最终英文中不得出现人名、地名、组织名、台词或任何剧本专有信息（若下列「道具名称/描述」中含此类词，请改写为泛化物体描述）；只写已给出的可见外观信息，不要扩写未提及的细节。\n\n${descText}`;
+  const wantEn = promptI18n.isEnglish(polishCfg);
+  const userPrompt = wantEn
+    ? `Write ONE English image prompt for the prop below.\n**Constraints**: product-hero of the object only; seamless solid backdrop; no people/faces/portraits/hands/environment; do not invent unstated details; strip any proper names from the text into generic visual wording.\n\n${descText}`
+    : `请为以下道具生成**一段中文**图片提示词。\n**约束**：单道具产品主图；纯色无缝棚拍背景；禁止人物/人脸/大头照/半身像/手/场景；只写已给出的可见外观，不要扩写；若名称含人名地名请改写为泛化物词。\n\n${descText}`;
 
   log.info('[道具提示词] 开始生成', { prop_id: propId, name: prop.name });
 

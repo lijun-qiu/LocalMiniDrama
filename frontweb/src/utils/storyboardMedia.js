@@ -150,5 +150,8 @@ export function hasStoryboardImage(sb, imagesBySbId, drama) {
 export function hasStoryboardVideo(sb, videosBySbId) {
   if (!sb) return false
   const rec = resolveSbVideoRecord(sb, videosBySbId)
-  return !!(rec?.video_url || rec?.local_path || sb.video_url)
+  if (rec?.video_url || rec?.local_path) return true
+  if (sb.local_path && String(sb.local_path).trim()) return true
+  if (sb.video_url && String(sb.video_url).trim()) return true
+  return false
 }

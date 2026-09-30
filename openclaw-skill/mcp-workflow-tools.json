@@ -1,0 +1,47 @@
+{
+  "name": "localminidrama-workflow",
+  "description": "Thin MCP-style tool descriptors mirroring REST WorkflowPlan (no separate agent runtime).",
+  "tools": [
+    {
+      "name": "get_workflow_plan",
+      "description": "读取只读完整工作流计划。返回有序步骤、阻断、活动任务与唯一下一动作。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "drama_id": { "type": "integer" },
+          "episode": { "type": "integer", "minimum": 1 },
+          "narration_delivery": {
+            "type": "string",
+            "enum": ["post_production", "use_tts"]
+          }
+        },
+        "required": ["drama_id"]
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/v1/dramas/{drama_id}/workflow-plan"
+      }
+    },
+    {
+      "name": "execute_workflow_action",
+      "description": "执行当前 next_action（可自动化部分）；返回 plan_after。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "drama_id": { "type": "integer" },
+          "episode": { "type": "integer" },
+          "narration_delivery": {
+            "type": "string",
+            "enum": ["post_production", "use_tts"]
+          },
+          "action_type": { "type": "string" }
+        },
+        "required": ["drama_id"]
+      },
+      "http": {
+        "method": "POST",
+        "path": "/api/v1/dramas/{drama_id}/workflow-execute"
+      }
+    }
+  ]
+}

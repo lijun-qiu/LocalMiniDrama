@@ -46,44 +46,72 @@ function getCharacterExtractionPrompt(cfg) {
   const style = styleTextForCfgLang(cfg);
   const imageRatio = cfg?.style?.default_image_ratio || '16:9';
   if (isEnglish(cfg)) {
-    return `You are a professional character analyst, skilled at extracting and analyzing character information from scripts.
+    return `You are a professional character analyst for AI video production. Extract ONLY author-defined, named characters that can become stable character sheets.
 
-Your task is to extract and organize character settings for all named characters in the script.
+[Extract-first — do NOT invent roles]
+- Register only named individuals with a stable identity (proper name or fixed title, e.g. "Li Ming", "Old Village Chief").
+- Sources: cast list / character intro / parenthetical first appearance / recurring dialogue speakers.
+- Do NOT infer new characters from plot alone.
 
-Requirements:
-1. Extract all characters with names (ignore unnamed passersby or background characters)
-2. For each character, extract:
-   - name: Character name
-   - role: Character role (main/supporting/minor)
-   - appearance: Detailed physical appearance for AI image generation (gender, age, body type, facial features, hairstyle, clothing style — NO scene or background info)
-   - description: Brief background and relationships (50-100 words)
-3. Main characters need detailed appearance; supporting characters can be simplified
-- **Style Requirement**: ${style}
-- **Image Ratio**: ${imageRatio}
-Output Format:
-**CRITICAL: Return ONLY a valid JSON array. Do NOT include any markdown code blocks, explanations, or other text. Start directly with [ and end with ].**
-Each element is a character object containing the above fields.`;
+[Skip extras / crowd / empty shots — never create assets for]
+- Numbered extras: "Old Man A", "Villager B", "Passerby C"
+- Collective: "several villagers", "the soldiers", "a crowd of kids"
+- Pure generics: "an old man", "a few vendors", "that constable"
+- Empty: "none (empty shot)", "empty stage"
+Ask: "Does this name point to one fixed individual who can have a consistent sheet?" If no → skip.
+
+[appearance = ONE base daily sheet ONLY]
+Include: single age band + build, face, hair, visible expression (not personality labels), main outfit (only colors/styles the script states), markers (scars, accessories), stable identity traits.
+appearance is the everyday adult/default costume sheet. If the script has childhood / high-school / battle-damaged variants, do NOT fold them into appearance — those are separate wardrobe looks later.
+NEVER write age spans like "from childhood to adult" or collage multiple ages into one appearance (that causes childhood faces on the main sheet).
+Do NOT include: personality tags, relationships, plot, pose/action, locations frequented, power-activation moments, other characters as body-scale references.
+If the script gives a name but little look, set appearance to a short placeholder like "needs appearance and outfit details" — do NOT invent hair/clothing colors.
+
+[Fields]
+- name, role (main/supporting/minor), appearance (visual only), description (brief background/relationships for humans; keep short), voice_style (optional tone)
+- Style: ${style}
+- Image Ratio: ${imageRatio}
+
+Output: ONLY a JSON array starting with [ and ending with ]. No markdown.`;
   }
   const _charOverride = _overrideCache['character_extraction'];
   if (_charOverride) {
     return _charOverride + `\n- **风格要求**：${style}\n- **图片比例**：${imageRatio}\n输出格式：\n**重要：必须只返回纯JSON数组，不要包含任何markdown代码块、说明文字或其他内容。直接以 [ 开头，以 ] 结尾。**\n每个元素是一个角色对象，包含上述字段。`;
   }
-  return `你是一个专业的角色分析师，擅长从剧本中提取和分析角色信息。
+  return `你是一位专业的角色与世界观分析师，专门从中文剧本中提取可用于 AI 视频生成的角色资产（对齐「提取优先、定装立绘」口径）。
 
-**【语言要求】所有字段的值必须使用中文，禁止出现英文内容（role字段的值除外，固定为 main/supporting/minor）。**
+**【语言要求】所有字段的值必须使用中文，禁止出现英文内容（role 字段除外，固定为 main/supporting/minor）。**
 
-你的任务是根据提供的剧本内容，提取并整理剧中出现的所有有名字角色的设定。
+## 核心原则
+1. **提取作者已写下的具名角色，不要从情节自行推断新角色**
+2. **appearance 只写站着就能看见的外形**；性格、关系、剧情、姿势、场所、能力瞬间不写进 appearance
+3. **不编造源文没有的外形细节**（发色、服装颜色等）；没写就占位「需补充…」
 
-要求：
-1. 提取所有有名字的角色（忽略无名路人或背景角色）
-2. 对每个角色，提取以下信息（全部用中文填写）：
-   - name: 角色名字（中文）
-   - role: 角色类型，固定值之一：main / supporting / minor
-   - appearance: 外貌描述（中文，100-200字，包含性别、年龄、体型、面部特征、发型、服装风格等，不含任何场景或环境信息）
-   - description: 背景故事和角色关系（中文，50-100字）
-3. 主要角色外貌要详细，次要角色可简化
+## 识别什么算角色
+- **抽取来源**：人物表 / 登场人物 / 角色介绍、首次出场括注、对白前缀里反复出现的固定人名——作者给出了具名就登记
+- **具名** = 指向一个贯穿剧本、有稳定外形、能定型立绘的具体个体（专名或固定称谓，如「李明」「林婉」「老村长」）
+
+## 泛指 / 群演 / 空镜 —— 一律不提取
+命中任一即跳过（台词 speaker 可保留原文称呼，但不要建角色资产）：
+- 编号后缀：老人甲、村民乙、路人 A、士兵丙
+- 群体量词：村民若干、士兵们、围观群众、一群孩子
+- 纯泛称无专名：一个老人、几个商贩、那名差役
+- 空镜 / 无人物：无（空镜）、空场
+拿不准时自问：「是否指向一个能定型立绘的固定个体？」——否则跳过。
+
+## 字段口径
+- name: 角色名字
+- role: main / supporting / minor
+- appearance: **日常定装立绘（唯一年龄段）**——性别、单一年龄体态、五官发型、可见神情、主装款式颜色（作者写到的才写）、标志物。默认写成年/源文主时段日常装。童年、高中、战损等跨镜换装**不要**写进 appearance（留给衣橱造型）。
+- **严禁**：年龄跨度（如「从童年到成年」）、多年龄拼贴、把闪回幼年写进主表——否则主图会多出童年头像。
+- 体态写本人身高感，不拿其他角色当参照。不写姿势动作、出没场所、能力瞬间、性格标签、剧情关系。
+- description: 简短背景/关系（供人读，50字以内即可；不要把剧情灌进 appearance）
+- voice_style: 声音/语气（可选，如「温柔但有威严」）
+- 源文几乎无外形时：appearance 写「需补充外貌与服装细节」，禁止脑补颜色与款式
+
 - **风格要求**：${style}
 - **图片比例**：${imageRatio}
+
 输出格式：
 **重要：必须只返回纯JSON数组，不要包含任何markdown代码块、说明文字或其他内容。直接以 [ 开头，以 ] 结尾。**
 每个元素是一个角色对象，包含上述字段。`;
@@ -477,7 +505,7 @@ function formatUserPrompt(cfg, key, ...args) {
   const imageRatio = cfg?.style?.default_image_ratio || '16:9';
   const templates = {
     en: {
-      character_request: 'Script content:\n%s\n\nPlease extract and organize detailed character profiles for ALL named characters from the script.',
+      character_request: 'Script content:\n%s\n\nExtract only author-defined named characters that can become stable character sheets. Skip extras/crowd/empty shots (e.g. Old Man A, several villagers, an old man). appearance = standing-visible look only; do not invent missing colors or outfits.',
       drama_info_template: `Title: %s\nSummary: %s\nGenre: %s\nStyle: ${style}\nImage ratio: ${imageRatio}`,
       script_content_label: '【Script Content】',
       task_label: '【Task】',
@@ -505,7 +533,7 @@ function formatUserPrompt(cfg, key, ...args) {
       video_duration_constraint: '**Constraint**: Total video duration must be around %s seconds (allow ±10%). Please adjust shot count and duration to meet this requirement.',
     },
     zh: {
-      character_request: '剧本内容：\n%s\n\n请提取剧本中所有有名字角色的设定。',
+      character_request: '剧本内容：\n%s\n\n请按「提取优先」规则提取作者已写下的具名角色（能定型立绘的固定个体）。跳过泛指/群演/空镜（如老人甲、村民若干、一个老人）。appearance 只写站着可见的外形；源文没写的发色服装不要编造，写「需补充」。',
       drama_info_template: `剧名：%s\n简介：%s\n类型：%s\n风格: ${style}\n图片比例: ${imageRatio}`,
       script_content_label: '【剧本内容】',
       task_label: '【任务】',
@@ -897,47 +925,41 @@ function getPropExtractionPrompt(cfg) {
   const style = [base, propExtra].filter(Boolean).join(', ');
   const imageRatio = cfg?.style?.default_prop_ratio || cfg?.style?.default_image_ratio || '16:9';
   if (isEnglish(cfg)) {
-    return `You are a professional script prop analyst, skilled at extracting key props with visual characteristics from scripts.
+    return `You are a professional script prop analyst for AI video assets. Extract recurring or visually distinctive props (object body only).
 
-Your task is to extract and organize all key props that are important to the plot or have special visual characteristics from the provided script content.
+[Extract]
+1. Only key / recurring / visually distinctive props. Skip ordinary daily items without plot weight.
+2. One stable name per prop — do not split momentary variants.
 
-[Requirements]
-1. Extract ONLY key props that are important to the plot or have special visual characteristics.
-2. Do NOT extract common daily items (e.g., normal cups, pens) unless they have special plot significance.
-3. If a prop has a clear owner, note it **only** in "description" (Chinese OK). **Never** put character names, nicknames, or relationship words in "image_prompt".
-4. "image_prompt" must be **English**, written as a **professional catalog / product-hero** shot for a single prop: describe shape, material, color, wear, scale cues, and finish in detail.
-5. In "image_prompt" you **must** specify: **one seamless solid-color studio backdrop** (matte, no gradient), **only the prop as the sole subject**, **soft even studio lighting** (readable micro-detail, no dramatic movie lighting), and explicitly forbid people, hands, furniture, floors, tables, scenery, packaging (unless the prop *is* the package), text, logos, dust/debris, or any secondary objects.
-6. **No script leakage in "image_prompt"**: forbid character names, place names, organization names, dialogue, plot beats, and other **original-script identifiers**. Replace with generic visual terms (e.g. "engraved serif lettering" instead of a name). The **only** exception is text that is **visibly printed or engraved on the prop itself** as part of its graphic design—describe that text generically if possible ("small engraved inscription") unless the script explicitly requires exact wording on the object.
-7. **Strict, non-expanding "image_prompt"**: include **only** attributes grounded in the script or the "description" you output—**no** invented accessories, era/brand backstory, mood adjectives unrelated to materials, or "hero story" filler. Prefer a **tight** prompt over a long one.
-- **Style Requirement**: ${style}
-- **Image Ratio**: ${imageRatio}
+[description / image_prompt — object body]
+- Object appearance only: shape, material, size cues, color. NO holder, NO usage action, NO surrounding people.
+- Stable look across shots only. For phones/computers: chassis/bezel/color; default off or neutral blur screen — NEVER push notifications, memo text, app UI, countdown UI (those belong in shot text and cause continuity leaks).
+- Owner may appear only in description; NEVER in image_prompt.
+- Do not invent colors/accessories missing from the script. Prefer short and accurate.
+- image_prompt: English product-hero shot; seamless solid studio backdrop; sole subject; soft even light; no people/hands/furniture/floor/scenery; no script names/places; no expansion.
+- Style: ${style} | Image Ratio: ${imageRatio}
 
-[Output Format]
-**CRITICAL: Return ONLY a valid JSON array. Do NOT include any markdown code blocks, explanations, or other text. Start directly with [ and end with ].**
-Each object containing:
-- name: Prop Name
-- type: Type (e.g., Weapon/Key Item/Daily Item/Special Device)
-- description: Role in the drama and visual description
-- image_prompt: English hero product shot prompt (single prop, solid seamless backdrop, no clutter, no environment, soft studio light, tight wording, no names/places from script, ultra-detailed only where visually grounded)`;
+[Output] ONLY a JSON array of {name, type, description, image_prompt}. No markdown.`;
   }
   const _propLocked = `\n- **风格要求**：${style}\n- **图片比例**：${imageRatio}\n\n【输出格式】\n**重要：必须只返回纯JSON数组，不要包含任何markdown代码块、说明文字或其他内容。直接以 [ 开头，以 ] 结尾。**\n每个对象包含：\n- name: 道具名称\n- type: 类型 (如：武器/关键证物/日常用品/特殊装置)\n- description: 在剧中的作用和中文外观描述（人名、归属可写在此字段，勿写入 image_prompt）\n- image_prompt: 单道具主图提示词（纯色无缝背景、仅主体、无杂物无场景、柔和棚拍光；**禁止**剧本人名/地名/组织名/台词/剧情标签；只写有依据的外观词，**不脑补、不扩写**；中文项目输出中文提示词并匹配项目「语音」与尺度铁律）`;
   const _propOverride = _overrideCache['prop_extraction'];
   if (_propOverride) {
     return _propOverride + _propLocked;
   }
-  return `你是一位专业的剧本道具分析师，擅长从剧本中提取具有视觉特征的关键道具。
+  return `你是一位专业的剧本道具分析师，从剧本中提取可用于 AI 视频生成的**跨镜头稳定道具资产**（对齐「物件本体、不串戏」口径）。
 
-你的任务是根据提供的剧本内容，提取并整理所有对剧情有重要作用或有特殊视觉特征的关键道具。
+## 提取什么
+1. 只提取**重复出现**或有**特殊视觉特征 / 剧情关键**的道具
+2. 普通生活用品（普通杯子、笔、一次性纸巾等）无特殊意义则不提取
+3. 同一道具不同瞬间不要拆成多个资产；名称用稳定称呼（如「玉佩」「黑鞘长剑」）
 
-要求：
-1. 只提取对剧情发展有重要作用、或有特殊视觉特征的关键道具。
-2. 普通的生活用品（如普通的杯子、笔）如果无特殊剧情意义不需要提取。
-3. 若道具有明确归属者，**仅**写在 "description" 中（可用中文人名）；**禁止**在 "image_prompt" 中出现任何角色名、昵称、称谓或人际关系用语。
-4. **description 字段强制纯中文**：必须输出**纯中文、80-150字**的详细视觉外观描述 + 该道具在剧中的核心作用/归属/剧情功能。必须严格遵循本项目一贯的中文影视提示词「语音」：融入符合道具所属时代的真实物理尺度意识、材质工艺细节、磨损痕迹、柔和棚拍光质感、电影化构图暗示。严禁任何英文单词/句子，严禁只写剧情不写可用于画图的外观细节，严禁空泛或翻译腔。
-5. "image_prompt" 按项目语言撰写（**中文项目必须输出纯中文提示词**、英文项目用英文），按**影视资产库 / 电商主图级**单道具产品照标准：写清轮廓、材质、颜色、磨损与工艺细节、体量感。必须完整匹配项目中文影视提示词「语音」（融入真实尺度铁律、次要道具原则、电影化细节、纯色无缝背景、柔和均匀棚光）。
-6. "image_prompt" 中**必须**写明：**单一无缝纯色棚拍背景**（哑光、无渐变）、**画面中仅有该道具一个主体**、**柔和均匀的棚拍光**（便于看清细节，避免电影化强反差光），并**明确禁止**：人物、手、家具、地面/台面、室内外环境、散落杂物、其他道具、文字商标、包装（除非该道具本身就是包装）、烟尘粒子等任何多余元素。
-7. **image_prompt 禁止泄漏剧本特征**：不得出现剧本人名、地名、组织名、台词、情节梗专有称呼等；一律改写为**泛化视觉描述**（如用 "刻有细小铭文" 而非具体人名）。**唯一例外**：文字**实体印/刻在道具表面**且剧本明确要求还原该字样时，可保留该可见字样；否则用泛化描述。
-8. **image_prompt 严格不扩展**：只写剧本与你在本对象 "description" 中已交代、且**肉眼可见**的外观信息；禁止凭空增加配饰、品牌故事、时代煽情形容词、叙事性铺垫；宁可**短而准**，不要为凑字数扩写。必须自然融入「符合时代的真实物理比例」等项目铁律。
+## description / image_prompt 口径（物件本体）
+- **只写物件本体**：外观细节、材质、尺寸参考、色彩特征；**不写手持者、不写使用动作、不写周围人物**
+- **只写跨镜头稳定的外形**：手机/电脑等带屏设备只写机型、边框、配色，默认熄屏或中性模糊屏；**不要**写入某一瞬间的屏幕内容、推送文案、备忘录正文、APP 界面、日期倒计时等可变 UI（那些属于下游镜头正文，写进共享描述会导致串戏）
+- 若有归属者，**仅**可在 description 里用一句话注明；**禁止**在 image_prompt 出现角色名/昵称/称谓
+- description：纯中文，以可见外观为主（可附一句剧情作用），**不脑补**源文没有的颜色与配件；宁可短而准
+- image_prompt：纯中文；**单一无缝纯色棚拍背景**、仅该道具主体、柔和均匀棚光；禁止人物/手/家具/地面台面/环境杂物/包装（除非道具本身是包装）；禁止剧本人名地名组织名台词；只写有依据的外观词，不扩写
+
 - **风格要求**：${style}
 - **图片比例**：${imageRatio}
 
@@ -946,8 +968,8 @@ Each object containing:
 每个对象包含：
 - name: 道具名称
 - type: 类型 (如：武器/关键证物/日常用品/特殊装置)
-- description: **纯中文**的在剧中的作用 + 详细视觉外观描述（必须80-150字，严格遵循项目中文提示词语音：真实尺度、次要元素、电影化细节等）
-- image_prompt: **纯中文**（中文项目）单道具主图提示词（纯色无缝背景、仅主体、无杂物无场景、柔和棚拍光；融入项目真实尺度铁律与次要道具语音；无剧本人名地名等；只写有依据的外观词，简练不扩写）`;
+- description: 纯中文，物件本体外观（+ 可选一句归属/作用）
+- image_prompt: 纯中文单道具主图提示词（纯色无缝背景、仅主体、无人物无场景、柔和棚拍光；无剧本人名地名；简练不扩写）`;
 }
 
 function getSceneExtractionPrompt(cfg, style) {
@@ -955,41 +977,44 @@ function getSceneExtractionPrompt(cfg, style) {
   const s = styleText || styleTextForCfgLang(cfg);
   const imageRatio = cfg?.style?.default_image_ratio || '16:9';
   if (isEnglish(cfg)) {
-    return `[Task] Extract all unique scene backgrounds from the script
+    return `[Task] Extract recurring or visually distinctive scene environments for AI empty-stage reference sheets.
 
-[Requirements]
-1. Identify all different scenes (location + time combinations) in the script
-2. Generate detailed **English** image generation prompts for each scene
-3. **Important**: Scene descriptions must be **pure backgrounds** without any characters, people, or actions
-4. Prompt requirements:
-   - Must use **English**, no Chinese characters
-   - Detailed description of scene, time, atmosphere, style
-   - Must explicitly specify "no people, no characters, empty scene"
-   - **Style Requirement**: ${s}
-   - **Image Ratio**: ${imageRatio}
+[What to extract]
+1. Recurring or distinctive locations — merge minor time variants of the SAME place into one scene when the environment looks the same
+2. Do NOT create a new scene for every brief beat if the space is unchanged
 
-[Output Format]
-**CRITICAL: Return ONLY a valid JSON array. Do NOT include any markdown code blocks. Start directly with [ and end with ].**
-Each element: location, time, prompt (English image generation prompt for pure background).`;
+[prompt / environment rules — empty stage]
+- Describe environment only: space structure, atmosphere, light, color palette, fixed props/set dressing
+- NO people, silhouettes, crowds, guards, vendors, zombies, named characters, or actions on the ground
+- Occupied places still read as "empty stage + set dressing" (e.g. market stalls without vendors; chairs without sitters)
+- Explicitly state empty stage / no people
+- Style: ${s} | Image Ratio: ${imageRatio}
+
+[Output] ONLY a JSON array of {location, time, prompt}. No markdown.`;
   }
-  const _sceneLocked = `\n5. **风格要求**：${s}\n   - **图片比例**：${imageRatio}\n\n【输出格式】\n**重要：必须只返回纯JSON数组，不要包含任何markdown代码块。直接以 [ 开头，以 ] 结尾。**\n每个元素包含：location（地点）, time（时间）, prompt（完整的中文图片生成提示词，纯背景，明确说明无人物）。`;
+  const _sceneLocked = `\n- **风格要求**：${s}\n- **图片比例**：${imageRatio}\n\n【输出格式】\n**重要：必须只返回纯JSON数组，不要包含任何markdown代码块。直接以 [ 开头，以 ] 结尾。**\n每个元素包含：location（地点）, time（时间）, prompt（完整的中文图片生成提示词，纯空场背景，明确说明无人物）。`;
   const _sceneOverride = _overrideCache['scene_extraction'];
   if (_sceneOverride) {
     return _sceneOverride + _sceneLocked;
   }
-  return `【任务】从剧本中提取所有唯一的场景背景
+  return `【任务】从剧本中提取可用于 AI 视频生成的**场景环境资产**（对齐「无人空场参考图」口径）。
 
-【要求】
-1. 识别剧本中所有不同的场景（地点+时间组合）
-2. 为每个场景生成详细的**中文**图片生成提示词（Prompt）
-3. **重要**：场景描述必须是**纯背景**，不能包含人物、角色、动作等元素
-4. **重要**：prompt 字段必须为中文，不得使用英文（风格词如 realistic 可保留）
+【提取什么】
+1. 提取**重复出现**或具有**稳定视觉特征**的环境/地点；同一地点仅因短暂时间切换、外观几乎不变时，合并为一条，不要拆成大量近似场景
+2. location 用稳定地点名（如「客栈大堂」「城南破庙」）；time 写昼夜/天气等环境光信息即可
+3. 不要为每一个瞬间动作单独开场景；场景图是下游分镜的**共享环境参考**，宁少而准
+
+【prompt 口径 —— 空场环境】
+1. 只描述环境本身：空间结构、环境氛围、光线特征、色调、固定陈设
+2. **禁止**写人物、人影、群演、保安、厨师、丧尸、摊贩、打手；禁止写角色名在场地上的布置/动作（如「某某在此设…」）；禁止写这里发生过的情节
+3. 可保留环境陈设（废墟可破败、市场可堆货、空地可有空椅），但主体必须是空场；有人活动的地点写成「空场 + 陈设」，不要写「摊贩/巡逻/阵列」
+4. prompt 必须为中文（风格词如 realistic 可保留），并明确说明「空场、无人物」
 5. **风格要求**：${s}
    - **图片比例**：${imageRatio}
 
 【输出格式】
 **重要：必须只返回纯JSON数组，不要包含任何markdown代码块。直接以 [ 开头，以 ] 结尾。**
-每个元素包含：location（地点）, time（时间）, prompt（完整的中文图片生成提示词，纯背景，明确说明无人物）。`;
+每个元素包含：location（地点）, time（时间）, prompt（完整的中文图片生成提示词，纯空场背景，明确说明无人物）。`;
 }
 
 /**
@@ -1075,7 +1100,7 @@ function getDefaultPromptBody(key) {
       return '【角色】你是一位资深影视分镜师，精通罗伯特·麦基的镜头拆解理论，擅长构建情绪节奏。\n\n【任务】将小说剧本按**独立动作单元**拆解为分镜头方案。\n\n【分镜拆解原则】\n1. **动作单元划分**：每个镜头必须对应一个完整且独立的动作\n   - 一个动作 = 一个镜头（角色站起来、走过去、说一句话、做一个反应表情等）\n   - 禁止合并多个动作（站起+走过去应拆分为2个镜头）\n\n2. **景别标准**（根据叙事需要选择）：\n   - 大远景：环境、氛围营造\n   - 远景：全身动作、空间关系\n   - 中景：交互对话、情感交流\n   - 近景：细节展示、情绪表达\n   - 特写：关键道具、强烈情绪\n\n3. **运镜要求**：\n   - 固定镜头：稳定聚焦于一个主体\n   - 推镜：接近主体，增强紧张感\n   - 拉镜：扩大视野，交代环境\n   - 摇镜：水平移动摄像机，空间转换\n   - 跟镜：跟随主体移动\n   - 移镜：摄像机与主体同向移动\n\n4. **情绪与强度标记**：\n   - emotion：简短描述（兴奋、悲伤、紧张、愉快等）\n   - emotion_intensity：用箭头表示情绪等级\n     * 极强 ↑↑↑ (3)：情绪高峰、高度紧张\n     * 强 ↑↑ (2)：情绪明显波动\n     * 中 ↑ (1)：情绪有所变化\n     * 平稳 → (0)：情绪不变\n     * 弱 ↓ (-1)：情绪回落\n\n【输出要求】\n1. 生成一个数组，每个元素是一个镜头，包含：\n   - shot_number：镜头号\n   - scene_description：场景（地点+时间，如"卧室内，早晨"）\n   - shot_type：景别（大远景/远景/中景/近景/特写）\n   - camera_angle：机位角度（平视/仰视/俯视/侧面/背面）\n   - camera_movement：运镜方式（static/推镜push/拉镜pull/横摇pan/纵摇tilt/跟镜tracking/升镜crane_up/降镜crane_dn/环绕orbit/手持handheld/变焦zoom/旋转roll/甩镜whip_pan/螺旋spiral/希区柯克hitchcock_zoom/子弹时间bullet_time/荷兰角dutch_angle_move/推轨复合dolly_track/升格环绕slowmo_orbit）——**强制动态优先，固定镜头不得超过20%**\n   - action：动作描述\n   - result：动作完成后的画面结果\n   - dialogue：角色对话或旁白（如有）\n   - emotion：当前情绪\n   - emotion_intensity：情绪强度等级（3/2/1/0/-1）';
 
     case 'character_extraction':
-      return '你是一个专业的角色分析师，擅长从剧本中提取和分析角色信息。\n\n**【语言要求】所有字段的值必须使用中文，禁止出现英文内容（role字段的值除外，固定为 main/supporting/minor）。**\n\n你的任务是根据提供的剧本内容，提取并整理剧中出现的所有有名字角色的设定。\n\n要求：\n1. 提取所有有名字的角色（忽略无名路人或背景角色）\n2. 对每个角色，提取以下信息（全部用中文填写）：\n   - name: 角色名字（中文）\n   - role: 角色类型，固定值之一：main / supporting / minor\n   - appearance: 外貌描述（中文，100-200字，包含性别、年龄、体型、面部特征、发型、服装风格等，不含任何场景或环境信息）\n   - description: 背景故事和角色关系（中文，50-100字）\n3. 主要角色外貌要详细，次要角色可以简化';
+      return '你是一个专业的角色分析师，擅长从剧本中提取和分析角色信息。\n\n**【语言要求】所有字段的值必须使用中文，禁止出现英文内容（role字段的值除外，固定为 main/supporting/minor）。**\n\n你的任务是根据提供的剧本内容，提取并整理剧中出现的所有有名字角色的设定。\n\n要求：\n1. 提取所有有名字的角色（忽略无名路人或背景角色）\n2. 对每个角色，提取以下信息（全部用中文填写）：\n   - name: 角色名字（中文）\n   - role: 角色类型，固定值之一：main / supporting / minor\n   - appearance: 日常定装立绘（中文）：单一年龄段 + 体型五官发型服装；默认成年/主时段日常装。禁止「童年到成年」等年龄跨度或多年龄拼贴（童年/高中等留给衣橱造型）\n   - description: 背景故事和角色关系（中文，50-100字）\n3. 主要角色外貌要详细，次要角色可以简化';
 
     case 'scene_extraction':
       return '【任务】从剧本中提取所有唯一的场景背景\n\n【要求】\n1. 识别剧本中所有不同的场景（地点+时间组合）\n2. 为每个场景生成详细的**中文**图片生成提示词（Prompt）\n3. **重要**：场景描述必须是**纯背景**，不能包含人物、角色、动作等元素\n4. **重要**：prompt 字段必须为中文，不得使用英文（风格词如 realistic 可保留）';
@@ -1264,7 +1289,7 @@ function getRolePolishPrompt(cfg) {
 - **仅提取**：角色描述中明确的外貌与服装特征
 - **严禁添加**：场景、环境、叙事性光影特效、情绪形容词堆砌
 - **标志性道具（可选）**：仅当原文明确写出身份关键道具时，写在「SIGNATURE PROP / EQUIPMENT DETAIL」小窗内容里；**不得**凭空加武器或剧情道具
-- **全版面一致**：所有面板同一角色、同一年龄段与妆面；发型、瞳色、服装、体型、比例完全一致
+- **全版面一致**：所有面板同一角色、同一年龄段与妆面；发型、瞳色、服装、体型、比例完全一致；禁止童年头像与成年身体拼贴、禁止多年龄并排
 - **时代匹配**：服装与发型必须符合作品类型所属时代背景${style ? '\n- **画风风格（须贯穿各栏描述，与下长生图侧画风块一致）**：' + style : ''}
 
 ### 版式（强制，减少留白）
@@ -1657,7 +1682,7 @@ function getPropPolishPrompt(cfg) {
 - **唯一主体 + 纯色零背景铁律（CRITICAL）**：画面中**只能有这一件道具**，**100% 纯色无缝无限影棚背景（单一哑光纯色 seamless cyclorama / infinite solid color backdrop）**，**绝对禁止任何环境、地面、台面、墙壁、地板、阴影投射、渐变、纹理、室内外元素**。背景必须是与道具形成高对比的中性纯色（浅灰或深灰最佳，便于抠像），**不得出现任何除道具本体以外的像素**。
 - **严禁模型常见错误**：严禁生成“漂亮的室内场景”“木质桌面”“大理石台面”“柔焦背景”“环境光影”“地面反射”“轻微景深”“工作室一角”“放在架子上”“放在地板上”等任何背景或支撑面描述。任何导致背景不是纯色的输出都属于失败。
 - **零杂物**：禁止桌面散落物、书本、植物、器皿、布料堆叠、包装箱、工具、第二件道具、灰尘烟雾粒子、景深虚化里的「远处物体」等；除非描述明确该物为道具不可分割的一部分，否则一律不出现。
-- **真实物理尺度铁律（最高优先级）**：道具必须严格遵循其所属时代的真实世界物理尺寸与相对比例；道具在画面中为**严格次要环境元素**，严禁夸大、立起、成为主导视觉或破坏透视。
+- **真实物理尺度**：按真实物件尺寸写比例暗示，但本图是**道具资产主图**——道具是画面**唯一视觉主体**，居中特写，**不要**写成「次要环境元素」，也**禁止**人物/大头脸/半身人像/肖像构图。
 
 ### 质感与光
 - 材质、镀层、磨损、刻字（若有）、比例暗示要写具体（可量化词汇：拉丝/哑光/抛光/微细划痕）；**句子宁少勿多**。
@@ -1668,7 +1693,7 @@ function getPropPolishPrompt(cfg) {
 
 ### 输出格式
 直接输出**一段**中文提示词（约 **45–90 字**，能更短则更短），不要解释、标题、列表或引号。
-**必须**在同一段内自然包含以下关键约束的中文表述（或等价流畅说法）：单一主体、纯色无缝棚拍背景、无多余物体、无人物、无手、无环境；并融入真实尺度与次要元素要求；末尾再接画风：${styleZh ? styleZh + ' 渲染质感' : '写实产品主图质感'}`;
+**必须**在同一段内自然包含：单一主体、纯色无缝棚拍背景、无多余物体、无人物、无人脸、无大头照、无手、无环境；末尾再接画风：${styleZh ? styleZh + ' 渲染质感' : '写实产品主图质感'}`;
 }
 
 module.exports = {

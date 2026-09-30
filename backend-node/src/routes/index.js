@@ -49,6 +49,7 @@ function setupRouter(cfg, db, log) {
   const audio = audioRoutes(db, log, cfg);
   const aiVoices = aiVoicesRoutes(db, log, cfg);
   const promptOverrides = promptOverridesRoutes.routes(db, log);
+  const scriptReview = require('./scriptReview')(db, log);
 
   // ---------- dramas ----------
   r.get('/dramas', drama.listDramas);
@@ -79,6 +80,45 @@ function setupRouter(cfg, db, log) {
       response.internalError(res, err.message);
     }
   });
+
+  /** 强对话驱动剧本改写（火宝 dialogue_driven skill） */
+  r.post('/scripts/rewrite', async (req, res) => {
+    try {
+      const novelImportService = require('../services/novelImportService');
+      const content = String(req.body?.content || req.body?.script || '').trim();
+      if (!content) return response.badRequest(res, 'content 不能为空');
+      const title = req.body?.title || '';
+      let previousContext = String(req.body?.previous_context || '').trim();
+      const episodeId = req.body?.episode_id != null ? Number(req.body.episode_id) : null;
+      if (!previousContext && episodeId) {
+        try {
+          const ep = db
+            .prepare(
+              `SELECT e.episode_number, e.drama_id FROM episodes e WHERE e.id = ? AND e.deleted_at IS NULL`
+            )
+            .get(episodeId);
+          if (ep && ep.episode_number > 1) {
+            const prev = db
+              .prepare(
+                `SELECT script_content FROM episodes
+                 WHERE drama_id = ? AND episode_number = ? AND deleted_at IS NULL`
+              )
+              .get(ep.drama_id, ep.episode_number - 1);
+            previousContext = String(prev?.script_content || '').slice(-2500);
+          }
+        } catch (_) {}
+      }
+      const result = await novelImportService.rewriteToScreenplay(db, log, {
+        title,
+        content,
+        previousContext,
+      });
+      response.success(res, result);
+    } catch (err) {
+      log.error('scripts rewrite', { error: err.message });
+      response.internalError(res, err.message);
+    }
+  });
   r.get('/dramas/examples', drama.listExamples);
   r.post('/dramas/import-example', drama.importExample);
   r.put('/dramas/:id/outline', drama.saveOutline);
@@ -87,6 +127,9 @@ function setupRouter(cfg, db, log) {
   r.put('/dramas/:id/episodes', drama.saveEpisodes);
   r.put('/dramas/:id/progress', drama.saveProgress);
   r.put('/dramas/:id/canvas-layout', drama.saveCanvasLayout);
+  r.post('/dramas/:id/workflow-plan', drama.getWorkflowPlan);
+  r.put('/dramas/:id/workflow-modes', drama.putWorkflowModes);
+  r.post('/dramas/:id/workflow-execute', drama.executeWorkflow);
   r.get('/dramas/:id/props', drama.listProps);
   r.post(
     '/dramas/:id/narration-sd2-voice-upload',
@@ -171,6 +214,10 @@ function setupRouter(cfg, db, log) {
   r.get('/characters/:id', characters.getOne);
   r.put('/characters/:id', characters.update);
   r.delete('/characters/:id', characters.delete);
+  r.get('/characters/:id/looks', characters.listLooks);
+  r.put('/characters/:id/looks/:lookId', characters.upsertLook);
+  r.post('/characters/:id/looks/:lookId/generate-image', characters.generateLookImage);
+  r.delete('/characters/:id/looks/:lookId', characters.deleteLook);
   r.post('/characters/batch-generate-images', characters.batchGenerateImages);
   r.post('/characters/:id/generate-image', characters.generateImage);
   r.post('/characters/:id/generate-four-view-image', characters.generateFourViewImage);
@@ -223,6 +270,16 @@ function setupRouter(cfg, db, log) {
   r.post('/episodes/:episode_id/storyboards', drama.generateStoryboard);
   r.post('/episodes/:episode_id/props/extract', prop.extractProps);
   r.post('/episodes/:episode_id/characters/extract', stub.episodeCharactersExtract);
+  r.get('/episodes/:episode_id/script-review', scriptReview.get);
+  r.post('/episodes/:episode_id/script-review/prepare', scriptReview.prepare);
+  r.put('/episodes/:episode_id/script-review/content', scriptReview.putContent);
+  r.post('/episodes/:episode_id/script-review/confirm', scriptReview.confirm);
+  r.get('/episodes/:episode_id/video-units', scriptReview.listVideoUnits);
+  r.post('/episodes/:episode_id/video-units/generate', scriptReview.generateVideoUnits);
+  r.post('/episodes/:episode_id/wardrobe/complete', scriptReview.completeWardrobe);
+  r.post('/episodes/:episode_id/wardrobe/scan-looks', scriptReview.scanWardrobeLooks);
+  r.post('/episodes/:episode_id/wardrobe/propose', scriptReview.proposeWardrobe);
+  r.get('/episodes/:episode_id/wardrobe', scriptReview.getWardrobe);
   r.get('/episodes/:episode_id/storyboards', storyboards.episodeStoryboardsGet);
   r.post('/episodes/:episode_id/finalize', drama.finalizeEpisode);
   r.get('/episodes/:episode_id/download', drama.downloadEpisodeVideo);

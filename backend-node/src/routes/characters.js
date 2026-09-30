@@ -10,7 +10,7 @@ function routes(db, cfg, log, uploadService) {
     getOne: (req, res) => {
       try {
         const row = db.prepare(
-          'SELECT id, drama_id, name, role, appearance, description, personality, voice_style, image_url, local_path, polished_prompt, four_view_image_url, identity_anchors, seedance2_asset, seedance2_voice_asset, negative_prompt, updated_at FROM characters WHERE id = ? AND deleted_at IS NULL'
+          'SELECT id, drama_id, name, role, appearance, description, personality, voice_style, image_url, local_path, polished_prompt, four_view_image_url, identity_anchors, seedance2_asset, seedance2_voice_asset, negative_prompt, looks, stages, updated_at FROM characters WHERE id = ? AND deleted_at IS NULL'
         ).get(Number(req.params.id));
         if (!row) return response.notFound(res, '角色不存在');
         if (row.seedance2_asset) {
@@ -30,6 +30,15 @@ function routes(db, cfg, log, uploadService) {
           }
         } else {
           row.seedance2_voice_asset = null;
+        }
+        if (row.looks) {
+          try {
+            row.looks = JSON.parse(row.looks);
+          } catch (_) {
+            row.looks = {};
+          }
+        } else {
+          row.looks = {};
         }
         response.success(res, { character: row });
       } catch (err) {
@@ -397,6 +406,87 @@ function routes(db, cfg, log, uploadService) {
       } catch (err) {
         log.error('characters sd2-voice-refresh', { error: err.message });
         response.internalError(res, err.message);
+      }
+    },
+    /** GET /characters/:id/looks */
+    listLooks: (req, res) => {
+      try {
+        const characterLooks = require('../services/workflow/characterLooks');
+        const row = db
+          .prepare(
+            `SELECT id, name, appearance, description, image_url, local_path, looks
+             FROM characters WHERE id = ? AND deleted_at IS NULL`
+          )
+          .get(Number(req.params.id));
+        if (!row) return response.notFound(res, '角色不存在');
+        const lookIds = characterLooks.listLookIds(row);
+        response.success(res, {
+          character_id: row.id,
+          name: row.name,
+          looks: Object.fromEntries(
+            lookIds.map((lid) => [
+              lid,
+              {
+                ...characterLooks.resolveLookSheet(row, lid),
+                registered: characterLooks.isLookRegistered(row, lid),
+                has_image: characterLooks.hasLookImage(row, lid),
+              },
+            ])
+          ),
+        });
+      } catch (err) {
+        log.error('characters listLooks', { error: err.message });
+        response.internalError(res, err.message);
+      }
+    },
+    /** PUT /characters/:id/looks/:lookId — upsert wardrobe look (not base) */
+    upsertLook: (req, res) => {
+      try {
+        const characterLooks = require('../services/workflow/characterLooks');
+        const look = characterLooks.upsertLook(db, req.params.id, req.params.lookId, req.body || {});
+        response.success(res, { look_id: req.params.lookId, look });
+      } catch (err) {
+        if ((err.message || '').includes('not found')) return response.notFound(res, err.message);
+        return response.badRequest(res, err.message);
+      }
+    },
+    generateLookImage: async (req, res) => {
+      try {
+        const body = req.body || {};
+        const modelName = body.model_name || body.model || undefined;
+        const style = body.style || undefined;
+        const out = await characterLibraryService.generateCharacterLookImage(
+          db,
+          log,
+          cfg,
+          req.params.id,
+          req.params.lookId,
+          modelName,
+          style
+        );
+        if (!out.ok) {
+          if (out.error === 'character not found') return response.notFound(res, '角色不存在');
+          if (out.error === 'unauthorized') return response.notFound(res, '剧集不存在或无权限');
+          return response.badRequest(res, out.error);
+        }
+        response.success(res, {
+          message: '造型图生成任务已提交',
+          look_id: req.params.lookId,
+          image_generation: out.image_generation,
+        });
+      } catch (err) {
+        log.error('characters generate-look-image', { error: err.message });
+        response.internalError(res, err.message);
+      }
+    },
+    deleteLook: (req, res) => {
+      try {
+        const characterLooks = require('../services/workflow/characterLooks');
+        characterLooks.deleteLook(db, req.params.id, req.params.lookId);
+        response.success(res, { message: '造型已删除' });
+      } catch (err) {
+        if ((err.message || '').includes('not found')) return response.notFound(res, err.message);
+        return response.badRequest(res, err.message);
       }
     },
   };

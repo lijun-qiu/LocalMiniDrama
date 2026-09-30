@@ -294,7 +294,8 @@ export function useProps(deps) {
     }
   }
 
-  async function onGeneratePropImage(prop, useQuadGrid = false) {
+  async function onGeneratePropImage(prop, useQuadGrid = false, options = {}) {
+    const quiet = !!options.quiet
     prop.errorMsg = ''
     prop.error_msg = ''
     const meta = buildPropImageMeta(prop)
@@ -307,22 +308,24 @@ export function useProps(deps) {
         const pollRes = await pollTask(taskId, () => loadDrama(), meta)
         if (pollRes?.status === 'failed') {
           prop.errorMsg = pollRes.error || '生成失败'
-        } else {
-          ElMessage.success('道具图片已生成')
+          return false
         }
-      } else {
-        await loadDrama()
-        await pollUntilResourceHasImage(() => {
-          const list = store.drama?.props ?? store.currentEpisode?.props ?? []
-          const p = list.find((x) => Number(x.id) === Number(prop.id))
-          return !!(p && (p.image_url || p.local_path))
-        })
-        ElMessage.success('道具图片已生成')
+        if (!quiet) ElMessage.success('道具图片已生成')
+        return true
       }
+      await loadDrama()
+      await pollUntilResourceHasImage(() => {
+        const list = store.drama?.props ?? store.currentEpisode?.props ?? []
+        const p = list.find((x) => Number(x.id) === Number(prop.id))
+        return !!(p && (p.image_url || p.local_path))
+      })
+      if (!quiet) ElMessage.success('道具图片已生成')
+      return true
     } catch (e) {
       console.error(e)
       prop.errorMsg = e.message || '生成失败'
-      ElMessage.error(e.message || '提交失败')
+      if (!quiet) ElMessage.error(e.message || '提交失败')
+      return false
     } finally {
       generatingPropIds.delete(prop.id)
       genStore.markDone(meta)

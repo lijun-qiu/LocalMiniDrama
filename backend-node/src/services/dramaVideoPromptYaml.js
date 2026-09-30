@@ -17,15 +17,81 @@ const {
 /** 对齐 ArcReel lib/prompt_builders.py _NEGATIVE_TAIL_VIDEO */
 const ARCREEL_VIDEO_NEGATIVE_TAIL = '禁止出现：BGM、文字字幕、水印。';
 
+/**
+ * 对齐 ArcReel reference_video.prompt_render._TWIN_PACK
+ * （≥2 张角色参考图时追加，压双胞胎/分身）
+ */
+const ARCREEL_TWIN_PACK =
+  '视频全程禁止出现外形、着装、配饰完全一致的人物，禁止生成同款分身、双胞胎效果，同一画面中仅保留单个对应人物，不出现人物重复复刻。';
+
+/**
+ * 对齐 ArcReel _OFFSCREEN_SPEECH_LIP_PACK（drama YAML 路径挂在 Action 尾，压心声口型）
+ * Action 禁止写发声相关行为；心声只走 Dialogue 画外音色。
+ */
+const ARCREEL_INNER_MONOLOGUE_LIP_PACK =
+  '【心声口型】内心独白/旁白只出画外音色、不做说话口型；Action 禁止描写任何与发声有关的行为（说话、嘟囔、轻声、耳语、咂嘴、啧舌、叹气、清嗓、哼唱等）；心声或旁白对应瞬间嘴唇紧闭，不吐舌、不开口、无发声口部动作；同一人既有心里话又有开口对白时：心里话时段闭嘴，仅 Speaker 无%内心独白的对白瞬间才正常张嘴口型；禁止整段跟心声/旁白对口型；Speaker 含%内心独白的条目禁止张嘴说话，不要把心声口型加到画面人物脸上。';
+
+/** Dialogue Speaker 内心独白后缀（与 @[角色%内心独白] 对齐） */
+const INNER_MONOLOGUE_SPEAKER_SUFFIX = '%内心独白';
+
+/** 剥 YAML/JSON 外层引号（可多次，避免 "\"阿杰%内心独白\""） */
+function unquoteYamlScalar(value) {
+  let v = String(value ?? '').trim();
+  for (let i = 0; i < 4; i++) {
+    if (
+      (v.startsWith('"') && v.endsWith('"') && v.length >= 2) ||
+      (v.startsWith("'") && v.endsWith("'") && v.length >= 2)
+    ) {
+      try {
+        const parsed = JSON.parse(v.startsWith("'") ? `"${v.slice(1, -1).replace(/"/g, '\\"')}"` : v);
+        if (typeof parsed === 'string') {
+          v = parsed.trim();
+          continue;
+        }
+      } catch (_) {
+        v = v.slice(1, -1).trim();
+        continue;
+      }
+    }
+    break;
+  }
+  return v;
+}
+
 /** @deprecated 兼容旧导出名 */
 const ARCREEL_SPOKEN_CONSTRAINT = ARCREEL_VIDEO_NEGATIVE_TAIL;
+
+function baseSpeakerName(speaker) {
+  return String(speaker || '')
+    .trim()
+    .replace(/%内心独白$/, '');
+}
+
+function isInnerMonologueSpeaker(speaker) {
+  return /%内心独白$/.test(String(speaker || '').trim());
+}
+
+/**
+ * Dialogue 说话人标签：内心独白 →「阿杰%内心独白」；旁白 →「画外音」；开口 →「阿杰」
+ */
+function formatDialogueSpeaker(name, { innerMonologue = false } = {}) {
+  const n = baseSpeakerName(name);
+  if (!n) return '画外音';
+  if (n === '画外音') return '画外音';
+  if (innerMonologue || isInnerMonologueSpeaker(name)) {
+    return `${n}${INNER_MONOLOGUE_SPEAKER_SUFFIX}`;
+  }
+  return n;
+}
 
 /** 是否像全能片段（应自动转 ArcReel 结构化） */
 function looksLikeUniversalOmniPrompt(text) {
   const t = String(text || '');
   if (!t.trim()) return false;
   if (/【风格锚点】|【场景设定】|【分镜\d*】|【环境音】/.test(t)) return true;
-  if (/<\s*[^>]{1,24}>\s*(?:说\s*)?\{/.test(t)) return true;
+  if (/<\s*[^>]{1,24}>\s*(?:说|内心独白)\s*\{/.test(t)) return true;
+  if (/<\s*[^>]{1,24}>\s*\{/.test(t)) return true;
+  if (/@\[[^\]]+%内心独白\]\s*\{/.test(t)) return true;
   if (/画外音(?:说)?\s*\{/.test(t)) return true;
   return false;
 }
@@ -139,24 +205,40 @@ function splitClassicDialogueChunks(dialogueText) {
  */
 function parseClassicDialogueAndNarration(dialogueText, narrationText) {
   const dialogue = [];
-  const push = (speaker, line) => {
+  const push = (speaker, line, opts = {}) => {
     const spoken = stripClassicDialogueQuotes(line);
     if (!spoken) return;
-    const sp = String(speaker || '').trim() || '画外音';
+    const sp = formatDialogueSpeaker(speaker, { innerMonologue: !!opts.innerMonologue });
     dialogue.push({ speaker: sp, line: spoken });
   };
 
   const dlg = String(dialogueText || '').trim();
   if (dlg) {
-    if (/<\s*[^>]+\s*>\s*(?:说\s*)?\{/.test(dlg) || /画外音(?:说)?\s*\{/.test(dlg)) {
+    if (
+      /<\s*[^>]+\s*>\s*(?:说|内心独白)?\s*\{/.test(dlg) ||
+      /@\[[^\]]+\]\s*[：:]?\s*\{/.test(dlg) ||
+      /画外音(?:说)?\s*\{/.test(dlg)
+    ) {
       for (const u of deriveUtterances(dlg)) {
         const spoken = String(u.text || '').trim();
         if (!spoken) continue;
-        if (u.kind === 'voiceover' || !u.speaker) push('画外音', spoken);
-        else push(u.speaker, spoken);
+        if (u.kind === 'inner_monologue' || u.innerMonologue) {
+          push(u.speaker, spoken, { innerMonologue: true });
+        } else if (u.kind === 'voiceover' || !u.speaker) {
+          push('画外音', spoken);
+        } else {
+          push(u.speaker, spoken);
+        }
       }
     } else {
       for (const chunk of splitClassicDialogueChunks(dlg)) {
+        const heart = chunk.match(
+          /^([^说：:\n「『“"']{1,24})[（(]\s*(?:心里话|内心独白|心声)\s*[）)]\s*[：:\s]*[「『“"']?([^」』”"']+)[」』”"']?\s*$/u
+        );
+        if (heart) {
+          push(heart[1], heart[2], { innerMonologue: true });
+          continue;
+        }
         const sayM = chunk.match(
           /^([^说：:\n「『“"']{1,24})\s*说[道着]?[：:\s]*[「『“"']([^」』”"']+)[」』”"']\s*$/u
         );
@@ -169,8 +251,8 @@ function parseClassicDialogueAndNarration(dialogueText, narrationText) {
           push('画外音', quoteOnly[1]);
           continue;
         }
-        const { name, spoken } = splitDialogueField(chunk);
-        push(name, spoken);
+        const { name, spoken, innerMonologue } = splitDialogueField(chunk);
+        push(name, spoken, { innerMonologue });
       }
     }
   }
@@ -179,6 +261,19 @@ function parseClassicDialogueAndNarration(dialogueText, narrationText) {
     .split(/\n+/)
     .map((s) => s.trim())
     .filter(Boolean)) {
+    // narration 字段里若仍是心里话行，不要一律打成画外音
+    const heart = line.match(
+      /^(.{1,24}?)[（(]\s*(?:心里话|内心独白|心声)\s*[）)]\s*[：:]\s*(.+)$/
+    );
+    if (heart) {
+      push(heart[1], heart[2], { innerMonologue: true });
+      continue;
+    }
+    const atInner = line.match(/@\[([^\]]+%内心独白)\]\s*[：:]?\s*\{([^}]*)\}/);
+    if (atInner) {
+      push(atInner[1].replace(/%内心独白$/, ''), atInner[2], { innerMonologue: true });
+      continue;
+    }
     push('画外音', line);
   }
   return dialogue;
@@ -388,17 +483,38 @@ function isArcReelSubmitReady(text) {
   if (/^Spoken:\s*$/m.test(t)) return false;
   if (/【音轨】/.test(t)) return false;
   if (/【音轨硬约束】/.test(t)) return false;
+  if (/【口型】/.test(t)) return false;
+  if (/\\"/.test(t) && /%内心独白/.test(t)) return false; // "\"阿杰%内心独白\"" 脏 Speaker
+  // 有心声但未挂 ArcReel 口型包 → 须规范化后再提交
+  if (/%内心独白/.test(t) && !/【心声口型】/.test(t)) return false;
   if (/<\s*[^>]+\s*>\s*(?:说\s*)?\{/.test(t)) return false;
   if (/\.\s*Style:/i.test(t)) return false;
   if (!t.includes(ARCREEL_VIDEO_NEGATIVE_TAIL)) return false;
   return true;
 }
 
-function appendArcReelNegativeTail(text) {
-  const t = String(text || '').trim();
+function appendArcReelNegativeTail(text, opts = {}) {
+  let t = String(text || '').trim();
+  if (!t) t = '';
+  if (opts.twinGuard && !t.includes('禁止生成同款分身')) {
+    t = t ? `${t}\n\n${ARCREEL_TWIN_PACK}` : ARCREEL_TWIN_PACK;
+  }
   if (!t) return ARCREEL_VIDEO_NEGATIVE_TAIL;
   if (t.includes(ARCREEL_VIDEO_NEGATIVE_TAIL)) return t;
   return `${t}\n\n${ARCREEL_VIDEO_NEGATIVE_TAIL}`;
+}
+
+/** 在已含负向尾的 ArcReel 文案上补双胞胎约束（幂等） */
+function appendArcReelTwinPack(text) {
+  const t = String(text || '').trim();
+  if (!t || t.includes('禁止生成同款分身')) return t;
+  if (t.includes(ARCREEL_VIDEO_NEGATIVE_TAIL)) {
+    return t.replace(
+      ARCREEL_VIDEO_NEGATIVE_TAIL,
+      `${ARCREEL_TWIN_PACK}\n\n${ARCREEL_VIDEO_NEGATIVE_TAIL}`
+    );
+  }
+  return `${t}\n\n${ARCREEL_TWIN_PACK}\n\n${ARCREEL_VIDEO_NEGATIVE_TAIL}`;
 }
 
 /**
@@ -480,9 +596,39 @@ function stripDeliveryAside(text) {
     .replace(/平淡如叙述事实/g, '')
     .replace(/仿佛这(?:番话|是)[^，。；\n]{0,28}/g, '')
     .replace(/(?:话音|语音|声音)落下后[^，。；\n]{0,8}/g, '')
-    .replace(/[，,]?\s*(?:清晰)?(?:作答|回答|答道|开口|脱口而出|念出|说出|说完)[^，。；\n]{0,12}/gu, '')
+    // (?<!不)开口：勿误伤「不开口」心声硬约束
+    .replace(/[，,]?\s*(?:清晰)?(?:作答|回答|答道|(?<!不)开口|脱口而出|念出|说出|说完)[^，。；\n]{0,12}/gu, '')
     .replace(/理所当然地(?:作答|回答)?/g, '')
     .replace(/约第?\d+(?:\.\d+)?秒起\s*/g, '')
+    .replace(/[，。；]\s*[，。；]/g, '。')
+    .replace(/[，,]\s*[，,]/g, '，')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * 心声节拍的 Action：剥掉与发声/口部出声相关的画面描写（对齐 ArcReel writing_syntax）。
+ * Dialogue 已承载心声台词，Action 只留静默画面。
+ */
+function stripSoundRelatedActionPhrases(text) {
+  return String(text || '')
+    .replace(
+      /[，,]?\s*(?:低声|轻声|小声|压低声音|压着嗓子)?(?:嘟囔|喃喃|自语|耳语|嘀咕|哼唱|清嗓|咂嘴|啧舌|叹气|出声|发声|轻哼)(?:着|道|了|一声)?[^，。；\n]{0,24}/gu,
+      ''
+    )
+    .replace(
+      /[，,]?\s*(?:说着话|说着|说道|说完|说了句|开了口|张开嘴|张嘴说话|动了动嘴唇|嘴唇微张|嘴角开合|双唇开合|嘴唇翕动)[^，。；\n]{0,16}/gu,
+      ''
+    )
+    .replace(
+      /[，,]?\s*(?:嗓音|声音|嗓子|喉音)(?:微微|轻轻|低沉)?(?:响起|发出|传来)?[^，。；\n]{0,20}/gu,
+      ''
+    )
+    .replace(
+      /[，,]?\s*(?:发出|传来)(?:一声)?(?:轻笑|苦笑|冷笑|叹息|鼻音|喉音)[^，。；\n]{0,12}/gu,
+      ''
+    )
+    .replace(/[，,]?\s*(?:嘴里念叨|念念有词|自言自语)[^，。；\n]{0,16}/gu, '')
     .replace(/[，。；]\s*[，。；]/g, '。')
     .replace(/[，,]\s*[，,]/g, '，')
     .replace(/\s{2,}/g, ' ')
@@ -523,7 +669,19 @@ function inferCameraMotion(text) {
 }
 
 function cleanActionBlob(text) {
-  let desc = stripDeliveryAside(String(text || ''));
+  let desc = String(text || '');
+  // 先剥泄漏进 Action 的约束/口型垃圾（勿经 stripDeliveryAside 误伤「不开口」）
+  desc = desc
+    .replace(/【音轨硬约束】[\s\S]*$/g, '')
+    .replace(/【音轨】[\s\S]*$/g, '')
+    .replace(/【口型】[^【\n]*/g, '')
+    .replace(/【心声画面：[^\]]*】/g, '')
+    .replace(/【心声口型】[^【\n]*/g, '')
+    .replace(/<[^>\n]{1,24}>嘴唇紧闭[^【\n。]*/g, '')
+    .replace(/内心独白时嘴唇紧闭[^【\n。]*/g, '')
+    .replace(/（此时嘴唇紧闭[^）]*）/g, '')
+    .replace(/视频全程禁止出现外形[^。\n]*。?/g, '');
+  desc = stripDeliveryAside(desc);
   desc = desc
     .replace(/日本动漫画风[^。]{0,120}/g, '动画风格。')
     .replace(/精细赛璐璐[^。]{0,80}/g, '')
@@ -535,6 +693,19 @@ function cleanActionBlob(text) {
     .replace(/[，。；]\s*[，。；]/g, '。')
     .trim();
   return desc;
+}
+
+/** Action 尾注入心声口型包（幂等）；仅当 Dialogue 含 %内心独白 */
+function ensureInnerMonologueLipPackInAction(action, dialogue) {
+  const hasMono = (Array.isArray(dialogue) ? dialogue : []).some((d) =>
+    isInnerMonologueSpeaker(unquoteYamlScalar(d?.speaker))
+  );
+  let a = cleanActionBlob(action);
+  // 去掉旧包再按需重挂，避免重复与脏文本
+  a = a.replace(/\s*【心声口型】[^【]*/g, '').trim();
+  if (!hasMono) return a;
+  a = stripSoundRelatedActionPhrases(a);
+  return `${a} ${ARCREEL_INNER_MONOLOGUE_LIP_PACK}`.trim();
 }
 
 function universalSegmentToDramaVideoPrompt(text, opts = {}) {
@@ -552,7 +723,7 @@ function universalSegmentToDramaVideoPrompt(text, opts = {}) {
   if (isArcReelStructuredPrompt(body)) {
     const parsed = parseArcReelYamlLoose(body);
     // 迁移/修补时清洗；就绪原样路径不走这里
-    parsed.action = cleanActionBlob(parsed.action);
+    parsed.action = ensureInnerMonologueLipPackInAction(parsed.action, parsed.dialogue);
     parsed.ambiance_audio = sanitizeAmbianceAudio(parsed.ambiance_audio);
     return parsed;
   }
@@ -592,7 +763,7 @@ function universalSegmentToDramaVideoPrompt(text, opts = {}) {
   for (const u of utterances) {
     const spoken = String(u.text || '').trim();
     if (!spoken) continue;
-    if (u.kind === 'voiceover' || !u.speaker) {
+    if (u.kind === 'voiceover' || (!u.speaker && u.kind !== 'inner_monologue')) {
       dialogue.push({ speaker: '画外音', line: spoken });
       continue;
     }
@@ -605,7 +776,12 @@ function universalSegmentToDramaVideoPrompt(text, opts = {}) {
         }
       }
     }
-    dialogue.push({ speaker, line: spoken });
+    dialogue.push({
+      speaker: formatDialogueSpeaker(speaker, {
+        innerMonologue: u.kind === 'inner_monologue' || !!u.innerMonologue,
+      }),
+      line: spoken,
+    });
   }
 
   return {
@@ -628,7 +804,7 @@ function buildVoiceProfiles(dialogue, characters) {
   const seen = new Set();
   const profiles = [];
   for (const d of dialogue) {
-    const speaker = String(d?.speaker || '').trim();
+    const speaker = baseSpeakerName(d?.speaker);
     if (!speaker || speaker === '画外音' || seen.has(speaker)) continue;
     seen.add(speaker);
     const style = byName.get(speaker) || '';
@@ -642,12 +818,13 @@ function parseArcReelYamlLoose(text) {
     .replace(/\n【音轨硬约束】[\s\S]*$/m, '')
     .replace(/\n【音轨】[\s\S]*$/m, '')
     .replace(/\n禁止出现：BGM、文字字幕、水印。\s*$/m, '')
+    .replace(new RegExp(`\\n${ARCREEL_TWIN_PACK.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm'), '')
     .trim();
-  const actionM = t.match(/^Action:\s*(?:"([^"]*)"|(.*))$/m);
-  const action = ((actionM && (actionM[1] || actionM[2])) || '').trim();
-  const camera = ((t.match(/^Camera_Motion:\s*(.*)$/m) || [])[1] || 'Static').trim();
-  const ambM = t.match(/^Ambiance_Audio:\s*(?:"([^"]*)"|(.*))$/m);
-  const ambiance = ((ambM && (ambM[1] || ambM[2])) || '').trim();
+  const actionM = t.match(/^Action:\s*(.*)$/m);
+  const action = unquoteYamlScalar((actionM && actionM[1]) || '');
+  const camera = unquoteYamlScalar((t.match(/^Camera_Motion:\s*(.*)$/m) || [])[1] || 'Static');
+  const ambM = t.match(/^Ambiance_Audio:\s*(.*)$/m);
+  const ambiance = unquoteYamlScalar((ambM && ambM[1]) || '');
   const dialogue = [];
 
   // Dialogue 优先（对齐 ArcReel）；兼容旧 Spoken 稿迁移
@@ -656,12 +833,28 @@ function parseArcReelYamlLoose(text) {
     const speakerRe = /-\s*Speaker:\s*(.+)\n\s*Line:\s*(.+)/g;
     let m;
     while ((m = speakerRe.exec(dlgBlock)) !== null) {
-      dialogue.push({ speaker: m[1].trim(), line: m[2].trim().replace(/^"|"$/g, '') });
+      const speaker = unquoteYamlScalar(m[1]);
+      const line = unquoteYamlScalar(m[2]);
+      if (!line) continue;
+      dialogue.push({
+        speaker: formatDialogueSpeaker(speaker, {
+          innerMonologue: isInnerMonologueSpeaker(speaker),
+        }),
+        line,
+      });
     }
   }
   if (!dialogue.length) {
     const spokenBlock = (t.split(/^Spoken:\s*$/m)[1] || '').split(/\n【|\n禁止出现/)[0] || '';
     for (const line of spokenBlock.split('\n')) {
+      const inner = line.match(/^<([^>]+)>内心独白\s*\{([^}]*)\}/);
+      if (inner) {
+        dialogue.push({
+          speaker: formatDialogueSpeaker(inner[1].trim(), { innerMonologue: true }),
+          line: inner[2].trim(),
+        });
+        continue;
+      }
       const sm = line.match(/^<([^>]+)>(?:说)?\s*\{([^}]*)\}/);
       if (sm) dialogue.push({ speaker: sm[1].trim(), line: sm[2].trim() });
       const vo = line.match(/^(?:画外音说|画外音)\s*\{([^}]*)\}/);
@@ -674,7 +867,10 @@ function parseArcReelYamlLoose(text) {
   const vpRe = /-\s*Speaker:\s*(.+)\n\s*Voice_Style:\s*(.+)/g;
   let m;
   while ((m = vpRe.exec(vpBlock)) !== null) {
-    voice_profiles.push({ Speaker: m[1].trim(), Voice_Style: m[2].trim() });
+    voice_profiles.push({
+      Speaker: unquoteYamlScalar(m[1]),
+      Voice_Style: unquoteYamlScalar(m[2]),
+    });
   }
   return {
     action,
@@ -696,32 +892,44 @@ function yamlQuote(s) {
 }
 
 /** 对齐 ArcReel video_prompt_to_yaml */
-function dramaVideoPromptToYaml(videoPrompt) {
+function dramaVideoPromptToYaml(videoPrompt, opts = {}) {
   const vp = videoPrompt || {};
   const lines = [];
   const profiles = Array.isArray(vp.voice_profiles) ? vp.voice_profiles : [];
   if (profiles.length) {
     lines.push('Voice_Profiles:');
     for (const p of profiles) {
-      lines.push(`- Speaker: ${yamlQuote(p.Speaker)}`);
-      lines.push(`  Voice_Style: ${yamlQuote(p.Voice_Style)}`);
+      const sp = unquoteYamlScalar(p.Speaker);
+      const st = unquoteYamlScalar(p.Voice_Style);
+      lines.push(`- Speaker: ${yamlQuote(sp)}`);
+      lines.push(`  Voice_Style: ${yamlQuote(st)}`);
     }
   }
-  lines.push(`Action: ${yamlQuote(String(vp.action || '').trim())}`);
-  lines.push(`Camera_Motion: ${yamlQuote(vp.camera_motion || 'Static')}`);
-  lines.push(`Ambiance_Audio: ${yamlQuote(String(vp.ambiance_audio || '').trim())}`);
-  const dialogue = Array.isArray(vp.dialogue) ? vp.dialogue : [];
+  const dialogueRaw = Array.isArray(vp.dialogue) ? vp.dialogue : [];
+  const dialogue = [];
+  for (const d of dialogueRaw) {
+    const speakerRaw = unquoteYamlScalar(d.speaker) || '画外音';
+    const line = unquoteYamlScalar(d.line);
+    if (!line) continue;
+    dialogue.push({
+      speaker: formatDialogueSpeaker(speakerRaw, {
+        innerMonologue: isInnerMonologueSpeaker(speakerRaw),
+      }),
+      line,
+    });
+  }
+  const action = ensureInnerMonologueLipPackInAction(vp.action, dialogue);
+  lines.push(`Action: ${yamlQuote(action)}`);
+  lines.push(`Camera_Motion: ${yamlQuote(unquoteYamlScalar(vp.camera_motion) || 'Static')}`);
+  lines.push(`Ambiance_Audio: ${yamlQuote(unquoteYamlScalar(vp.ambiance_audio))}`);
   if (dialogue.length) {
     lines.push('Dialogue:');
     for (const d of dialogue) {
-      const speaker = String(d.speaker || '').trim() || '画外音';
-      const line = String(d.line || '').trim();
-      if (!line) continue;
-      lines.push(`- Speaker: ${yamlQuote(speaker)}`);
-      lines.push(`  Line: ${yamlQuote(line)}`);
+      lines.push(`- Speaker: ${yamlQuote(d.speaker)}`);
+      lines.push(`  Line: ${yamlQuote(d.line)}`);
     }
   }
-  return appendArcReelNegativeTail(lines.join('\n').trim());
+  return appendArcReelNegativeTail(lines.join('\n').trim(), opts);
 }
 
 function convertUniversalSegmentToArcReelYaml(text, opts = {}) {
@@ -748,7 +956,7 @@ function extractSpeakersFromArcReelYaml(text) {
   const names = [];
   const seen = new Set();
   for (const d of parsed.dialogue || []) {
-    const s = String(d.speaker || '').trim();
+    const s = baseSpeakerName(d.speaker);
     if (!s || s === '画外音' || seen.has(s)) continue;
     seen.add(s);
     names.push(s);
@@ -806,6 +1014,8 @@ function injectAudioRefsIntoArcReelYaml(yamlText, bindings) {
 
 module.exports = {
   ARCREEL_VIDEO_NEGATIVE_TAIL,
+  ARCREEL_TWIN_PACK,
+  ARCREEL_INNER_MONOLOGUE_LIP_PACK,
   ARCREEL_SPOKEN_CONSTRAINT,
   isArcReelStructuredPrompt,
   isArcReelSubmitReady,
@@ -813,10 +1023,14 @@ module.exports = {
   looksLikeClassicVideoPrompt,
   ensureArcReelStructuredForVideoSubmit,
   appendArcReelNegativeTail,
+  appendArcReelTwinPack,
+  unquoteYamlScalar,
   stripSpeechMarksFromLine,
   stripDeliveryAside,
+  stripSoundRelatedActionPhrases,
   sanitizeAmbianceAudio,
   cleanActionBlob,
+  ensureInnerMonologueLipPackInAction,
   universalSegmentToDramaVideoPrompt,
   classicStoryboardToDramaVideoPrompt,
   parseClassicVideoPromptProse,
@@ -831,4 +1045,6 @@ module.exports = {
   injectAudioRefsIntoArcReelYaml,
   normalizeArcReelYamlForSubmit,
   parseArcReelYamlLoose,
+  formatDialogueSpeaker,
+  baseSpeakerName,
 };

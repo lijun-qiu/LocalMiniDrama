@@ -31,7 +31,7 @@ style:
   default_style: ''
   default_role_style: full body and face clearly visible, character centered, consistent facial features, high detail, masterpiece, best quality
   default_scene_style: wide establishing shot, highly detailed environment, sharp focus, rich atmosphere, masterpiece, best quality
-  default_prop_style: object centered, clean simple background, studio lighting, sharp focus, high detail, masterpiece, best quality
+  default_prop_style: object centered product hero shot, clean seamless solid-color studio backdrop, studio softbox lighting, sharp focus, high detail, no person, no face, no portrait, no headshot, no hands, masterpiece, best quality
   default_image_ratio: '16:9'
   default_video_ratio: '16:9'
   default_prop_ratio: '1:1'

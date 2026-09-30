@@ -680,7 +680,14 @@ async function submitNew() {
   if (!title) return
   newSaving.value = true
   try {
-    const drama = await dramaAPI.create({ title, description: newForm.value.description?.trim() || undefined, metadata: { aspect_ratio: newForm.value.aspect_ratio || '16:9' } })
+    const drama = await dramaAPI.create({
+      title,
+      description: newForm.value.description?.trim() || undefined,
+      metadata: {
+        aspect_ratio: newForm.value.aspect_ratio || '16:9',
+        generation_mode: 'reference_video',
+      },
+    })
     showNewDialog.value = false
     ElMessage.success('项目已创建')
     loadList()

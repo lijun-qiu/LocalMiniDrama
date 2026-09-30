@@ -309,7 +309,8 @@ export function useScenes(deps) {
     }
   }
 
-  async function onGenerateSceneImage(scene, useQuadGrid = false) {
+  async function onGenerateSceneImage(scene, useQuadGrid = false, options = {}) {
+    const quiet = !!options.quiet
     scene.errorMsg = ''
     scene.error_msg = ''
     const meta = buildSceneImageMeta(scene)
@@ -329,22 +330,24 @@ export function useScenes(deps) {
         const pollRes = await pollTask(taskId, () => loadDrama(), meta)
         if (pollRes?.status === 'failed') {
           scene.errorMsg = pollRes.error || '生成失败'
-        } else {
-          ElMessage.success('场景图片已生成')
+          return false
         }
-      } else {
-        await loadDrama()
-        await pollUntilResourceHasImage(() => {
-          const list = store.drama?.scenes ?? store.currentEpisode?.scenes ?? []
-          const s = list.find((x) => Number(x.id) === Number(scene.id))
-          return !!(s && (s.image_url || s.local_path))
-        })
-        ElMessage.success('场景图片已生成')
+        if (!quiet) ElMessage.success('场景图片已生成')
+        return true
       }
+      await loadDrama()
+      await pollUntilResourceHasImage(() => {
+        const list = store.drama?.scenes ?? store.currentEpisode?.scenes ?? []
+        const s = list.find((x) => Number(x.id) === Number(scene.id))
+        return !!(s && (s.image_url || s.local_path))
+      })
+      if (!quiet) ElMessage.success('场景图片已生成')
+      return true
     } catch (e) {
       console.error(e)
       scene.errorMsg = e.message || '生成失败'
-      ElMessage.error(e.message || '提交失败')
+      if (!quiet) ElMessage.error(e.message || '提交失败')
+      return false
     } finally {
       generatingSceneIds.delete(scene.id)
       genStore.markDone(meta)

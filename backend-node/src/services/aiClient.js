@@ -203,9 +203,11 @@ function postJSONWithTimeout(url, headers, body, timeoutMs = 600000) {
  * 用 SSE 流式输出（stream: true）请求 OpenAI 兼容接口。
  * 流式模式下 socket 每收到一个 token 就重置静默计时器，只要模型在生成就不会超时，
  * 彻底解决分镜等长耗时任务的 "fetch failed / timeout" 问题。
- * silenceTimeoutMs：连续多少毫秒无任何数据才判定超时（默认 60 秒）。
+ * silenceTimeoutMs：连续多少毫秒无任何数据才判定超时（默认 600 秒）。
  */
-function postJSONStream(url, headers, body, silenceTimeoutMs = 60000, onProgress = null) {
+const DEFAULT_STREAM_SILENCE_MS = 600_000;
+
+function postJSONStream(url, headers, body, silenceTimeoutMs = DEFAULT_STREAM_SILENCE_MS, onProgress = null) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const mod = parsed.protocol === 'https:' ? https : http;
@@ -362,7 +364,15 @@ function getConfigFromModelMap(db, sceneKey) {
 }
 
 async function generateText(db, log, serviceType, userPrompt, systemPrompt, options = {}) {
-  const { model: preferredModel, temperature = 0.7, json_mode = false, min_max_tokens = null, streamCallback = null, scene_key = null } = options;
+  const {
+    model: preferredModel,
+    temperature = 0.7,
+    json_mode = false,
+    min_max_tokens = null,
+    streamCallback = null,
+    scene_key = null,
+    silence_timeout_ms = null,
+  } = options;
 
   // F2: 若传入 scene_key，优先从 ai_model_map 查找对应的模型路由配置
   let config = null;
@@ -460,7 +470,11 @@ async function generateText(db, log, serviceType, userPrompt, systemPrompt, opti
       attempt,
       max_attempts: maxAttempts,
     });
-    const res = await withAgnesApiKey(config, (apiKey) => postJSONStream(url, { Authorization: 'Bearer ' + apiKey }, body, 60000, (receivedLen, event, accumulated) => {
+    const silenceMs =
+      silence_timeout_ms != null && Number(silence_timeout_ms) > 0
+        ? Number(silence_timeout_ms)
+        : DEFAULT_STREAM_SILENCE_MS;
+    const res = await withAgnesApiKey(config, (apiKey) => postJSONStream(url, { Authorization: 'Bearer ' + apiKey }, body, silenceMs, (receivedLen, event, accumulated) => {
       if (event === 'first_token') {
         log.info('AI stream first token', { model, ttft_ms: Date.now() - startMs, attempt });
       } else if (receivedLen > 0 && receivedLen % 500 < 20) {
@@ -575,7 +589,10 @@ async function streamGenerateText(db, log, serviceType, userPrompt, systemPrompt
     ...(json_mode ? { response_format: { type: 'json_object' } } : {}),
   };
   body = applyDeepSeekChatOptions(config, body);
-  const silenceMs = options.silence_timeout_ms != null ? Number(options.silence_timeout_ms) : 120000;
+  const silenceMs =
+    options.silence_timeout_ms != null && Number(options.silence_timeout_ms) > 0
+      ? Number(options.silence_timeout_ms)
+      : DEFAULT_STREAM_SILENCE_MS;
   const startMs = Date.now();
   log.info('AI streamGenerateText request', {
     url: url.slice(0, 60),

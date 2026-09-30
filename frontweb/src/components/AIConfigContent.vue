@@ -966,7 +966,7 @@ input_reference = (图片文件，可选)</pre>
         <div class="one-key-section">
           <div class="one-key-section-title">📋 将自动创建以下配置</div>
           <ul class="one-key-list">
-            <li><b>文本/对话</b>：Agnes 2.0 Flash（agnes-2.0-flash）— 生成故事剧本</li>
+            <li><b>文本/对话</b>：Agnes 3.0 Flash（agnes-3.0-flash）— 生成故事剧本</li>
             <li><b>文本生成图片</b>：Agnes Image 2.1 Flash — 角色/场景/道具图</li>
             <li><b>分镜图片生成</b>：Agnes Image 2.1 Flash — 支持参考图编辑</li>
             <li><b>视频生成</b>：Agnes Video V2.0（agnes-video-v2.0）— 生成视频片段</li>
@@ -980,7 +980,7 @@ input_reference = (图片文件，可选)</pre>
             <li>点击「Create new secret key」创建密钥</li>
             <li>复制 Key 填入下方</li>
           </ol>
-          <p class="one-key-note">💡 一个 Key 同时支持文本、图片、视频；接口文档见 <a href="https://agnes-ai.com/doc/agnes-20-flash" target="_blank" class="one-key-link">agnes-ai.com/doc</a></p>
+          <p class="one-key-note">💡 一个 Key 同时支持文本、图片、视频；接口文档见 <a href="https://www.agnes-ai.com/zh-Hans/docs/agnes-30-flash" target="_blank" class="one-key-link">Agnes 3.0 Flash 文档</a></p>
         </div>
       </div>
       <el-form label-width="0" style="margin-top: 8px">
@@ -1117,7 +1117,7 @@ async function loadGenerationSettings() {
   try {
     const res = await generationSettingsAPI.get()
     genConcurrencyInput.value = res?.concurrency ?? 3
-    genVideoConcurrencyInput.value = res?.video_concurrency ?? 3
+    genVideoConcurrencyInput.value = res?.video_concurrency ?? 7
   } catch (_) {}
 }
 
@@ -1302,7 +1302,7 @@ const providerConfigs = {
     { id: 'gemini', name: 'Google Gemini', models: ['gemini-2.5-pro', 'gemini-3-flash-preview'] },
     { id: 'deepseek', name: 'DeepSeek', models: ['deepseek-v4-flash', 'deepseek-v4-pro'] },
     { id: 'qwen', name: '通义千问', models: ['qwen3-max', 'qwen-plus', 'qwen-flash'] },
-    { id: 'agnes', name: 'Agnes AI', models: ['agnes-2.0-flash'] }
+    { id: 'agnes', name: 'Agnes AI', models: ['agnes-3.0-flash', 'agnes-2.0-flash'] }
   ],
   image: [
     { id: 'volcengine', name: '火山引擎', models: ['doubao-seedream-4-5-251128', 'doubao-seedream-4-0-250828'] },
@@ -1696,7 +1696,7 @@ const VOLCENGINE_CONFIGS = [
 
 /** Agnes 一键配置用 */
 const AGNES_CONFIGS = [
-  { service_type: 'text', name: 'Agnes 文本', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-2.0-flash'] },
+  { service_type: 'text', name: 'Agnes 文本', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-3.0-flash'] },
   { service_type: 'image', name: 'Agnes 文本生图', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-image-2.1-flash'] },
   { service_type: 'storyboard_image', name: 'Agnes 分镜图', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'openai', model: ['agnes-image-2.1-flash'] },
   { service_type: 'video', name: 'Agnes 视频', base_url: 'https://apihub.agnes-ai.com/v1', provider: 'agnes', api_protocol: 'agnes', endpoint: '/videos', query_endpoint: '/videos/{taskId}', model: ['agnes-video-v2.0'] },

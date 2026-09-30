@@ -1,4 +1,4 @@
-﻿---
+---
 name: local-mini-drama
 version: 1.1.0
 description: LocalMiniDrama 本地短剧助手 — 通过自然语言控制短剧项目全流程：创建剧本、生成角色/场景/道具、生成分镜、批量出图、出视频、合成完整剧集、支持小说导入和工程导入导出
@@ -36,6 +36,83 @@ homepage: https://github.com/xuanyustudio/LocalMiniDrama
 - **Character（角色）**：剧集中的角色，支持全局角色库复用
 - **Scene（场景）**：剧集中的场景，支持全局场景库
 - **Prop（道具）**：剧集中的道具，支持全局道具库
+
+### 工作流契约（必须遵守）
+
+编排权威来源是 **WorkflowPlan**，与 ArcReel 对齐。Agent **禁止**自己硬编码步骤顺序；每次动手前先读 plan，只执行 `next_action`。
+
+详见同目录 [`workflow-contract.md`](./workflow-contract.md) 与 [`mcp-workflow-tools.json`](./mcp-workflow-tools.json)。
+
+**模式矩阵**（存在 `dramas.metadata`）：
+
+| content_mode | generation_mode | 含义 |
+|---|---|---|
+| `narration` | `storyboard` | 旁白解说 × 分镜 |
+| `narration` | `reference_video` | 旁白解说 × 参考视频 |
+| `drama` | `storyboard` | 剧情演绎 × 分镜（默认） |
+| `drama` | `reference_video` | 剧情演绎 × 参考视频 |
+
+**三轴不得折叠**：
+
+1. `steps[].state` — 编排进度（completed/ready/active/blocked/pending/skipped）
+2. `steps[].artifacts` — 产物时效（current/stale/missing/blocked）
+3. `steps[].tasks` + `provider_checkpoint` — 进行中的生成任务
+
+```
+POST {baseUrl}/api/v1/dramas/{drama_id}/workflow-plan
+Content-Type: application/json
+
+{
+  "episode": 1,
+  "narration_delivery": "post_production"
+}
+```
+
+执行下一步（可自动化部分）：
+
+```
+POST {baseUrl}/api/v1/dramas/{drama_id}/workflow-execute
+{ "episode": 1, "narration_delivery": "post_production" }
+```
+
+`narration_delivery` 只作用于**本次**请求（`persisted: false`），可选 `post_production` | `use_tts`。
+
+设置模式：
+
+```
+PUT {baseUrl}/api/v1/dramas/{drama_id}/workflow-modes
+{ "content_mode": "narration", "generation_mode": "storyboard" }
+```
+
+创建项目时可写入 metadata：
+
+```json
+{
+  "title": "…",
+  "metadata": {
+    "content_mode": "drama",
+    "generation_mode": "storyboard",
+    "aspect_ratio": "16:9"
+  }
+}
+```
+
+循环：`get workflow-plan` → `workflow-execute` 或对应 REST → 再读 plan，直到 `export` 或 `wait_for_task`。
+
+### 衣橱 + 内心独白（reference_video）
+
+- **同一角色挂 looks**，不要拆假角色。基准图 = `image_url`；其它造型 = `characters.looks` JSON。
+- 例：闪回「童年阿杰」→ 角色 `阿杰` + look `童年`，**禁止**新建角色「童年阿杰」。
+- 参考视频在 step1 前：`propose_character_looks`
+  - `POST /episodes/{id}/wardrobe/propose` — LLM 提议造型/场景/道具（ArcReel propose-character-looks）
+  - `POST /episodes/{id}/wardrobe/complete` — 写入 looks + 新场景/道具并盖章
+  - `POST /episodes/{id}/wardrobe/scan-looks` — 仅扫描正文已有 `@[角色@造型]`
+- 造型 API：`PUT /characters/{id}/looks/{lookId}`
+- 正文语法：
+  - `@[角色@造型]` 选用衣橱
+  - `@[角色]{台词}` 对白
+  - `@[角色%内心独白]{台词}` → 渲染为 `<角色>内心独白 {…}`（闭嘴）
+  - `{旁白}` → `画外音说 {…}`
 
 ## 触发条件
 

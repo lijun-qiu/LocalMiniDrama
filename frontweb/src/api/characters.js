@@ -7,6 +7,21 @@ export const characterAPI = {
   generateImage(characterId, model, style) {
     return request.post(`/characters/${characterId}/generate-image`, { model, style })
   },
+  getLooks(characterId) {
+    return request.get(`/characters/${characterId}/looks`)
+  },
+  upsertLook(characterId, lookId, body) {
+    return request.put(`/characters/${characterId}/looks/${encodeURIComponent(lookId)}`, body || {})
+  },
+  generateLookImage(characterId, lookId, model, style) {
+    return request.post(`/characters/${characterId}/looks/${encodeURIComponent(lookId)}/generate-image`, {
+      model,
+      style,
+    })
+  },
+  deleteLook(characterId, lookId) {
+    return request.delete(`/characters/${characterId}/looks/${encodeURIComponent(lookId)}`)
+  },
   generatePrompt(characterId, model, style) {
     return request.post(`/characters/${characterId}/generate-prompt`, { model, style })
   },

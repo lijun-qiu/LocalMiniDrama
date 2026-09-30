@@ -143,6 +143,42 @@ describe('ArcReel utterance parse + submit render', () => {
     assert.match(out, /<陈浩> 落座/);
   });
 
+  it('preserves 内心独白 and never rewrites it to 画外音', () => {
+    const raw = [
+      '【分镜1】（5秒）：',
+      '<阿杰>内心独白 {男生的遗憾，是从一枚奇趣蛋开始的。} <阿杰>说 {我想吃这个。}',
+      '【环境音】',
+      '便利店冷柜嗡鸣。',
+    ].join('\n');
+    const parts = splitSpeechLine(raw.split('\n')[1]);
+    const marks = parts.filter((p) => typeof p !== 'string');
+    assert.equal(marks.length, 2);
+    assert.equal(marks[0].innerMonologue, true);
+    assert.equal(marks[0].speaker, '阿杰');
+    assert.equal(marks[1].innerMonologue, false);
+
+    const out = renderUniversalSegmentUtterancesForSubmit(raw);
+    assert.match(
+      out,
+      /<阿杰>内心独白 \{男生的遗憾，是从一枚奇趣蛋开始的。\}【心声画面：嘴唇紧闭，不吐舌、不开口，无发声口部动作】/
+    );
+    assert.match(out, /<阿杰>说 \{我想吃这个。\}/);
+    assert.doesNotMatch(out, /画外音说 \{男生的遗憾/);
+    // 同人另有对白：不追加整段 <阿杰>嘴唇紧闭
+    assert.doesNotMatch(out, /<阿杰>嘴唇紧闭，不吐舌、不开口，无发声口部动作。/);
+
+    const fromAt = renderUniversalSegmentUtterancesForSubmit(
+      '【分镜1】（5秒）：\n@[阿杰%内心独白]{别再逃了} {夜深了}'
+    );
+    assert.match(fromAt, /<阿杰>内心独白 \{别再逃了\}【心声画面：嘴唇紧闭，不吐舌、不开口，无发声口部动作】/);
+    assert.match(fromAt, /画外音说 \{夜深了\}/);
+
+    const utt = deriveUtterances(raw.split('\n')[1]);
+    assert.equal(utt[0].kind, 'inner_monologue');
+    assert.equal(utt[0].speaker, '阿杰');
+    assert.equal(utt[1].kind, 'dialogue');
+  });
+
   it('deriveUtterances only takes brace interiors', () => {
     const u = deriveUtterances(
       '推门。<林薇>说 {请坐}，点头。{夜风灌进来}'

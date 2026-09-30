@@ -335,7 +335,8 @@ export function useCharacters(deps) {
     }
   }
 
-  async function onGenerateCharacterImage(char) {
+  async function onGenerateCharacterImage(char, options = {}) {
+    const quiet = !!options.quiet
     char.errorMsg = ''
     char.error_msg = ''
     const meta = buildCharImageMeta(char)
@@ -348,22 +349,24 @@ export function useCharacters(deps) {
         const pollRes = await pollTask(taskId, () => loadDrama(), meta)
         if (pollRes?.status === 'failed') {
           char.errorMsg = pollRes.error || '生成失败'
-        } else {
-          ElMessage.success('角色图片已生成')
+          return false
         }
-      } else {
-        await loadDrama()
-        await pollUntilResourceHasImage(() => {
-          const list = store.drama?.characters ?? store.currentEpisode?.characters ?? []
-          const c = list.find((x) => Number(x.id) === Number(char.id))
-          return !!(c && (c.image_url || c.local_path))
-        })
-        ElMessage.success('角色图片已生成')
+        if (!quiet) ElMessage.success('角色图片已生成')
+        return true
       }
+      await loadDrama()
+      await pollUntilResourceHasImage(() => {
+        const list = store.drama?.characters ?? store.currentEpisode?.characters ?? []
+        const c = list.find((x) => Number(x.id) === Number(char.id))
+        return !!(c && (c.image_url || c.local_path))
+      })
+      if (!quiet) ElMessage.success('角色图片已生成')
+      return true
     } catch (e) {
       console.error(e)
       char.errorMsg = e.message || '生成失败'
-      ElMessage.error(e.message || '提交失败')
+      if (!quiet) ElMessage.error(e.message || '提交失败')
+      return false
     } finally {
       generatingCharIds.delete(char.id)
       genStore.markDone(meta)

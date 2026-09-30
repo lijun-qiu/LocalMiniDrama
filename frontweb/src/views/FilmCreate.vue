@@ -92,6 +92,16 @@
         </div>
       </div>
 
+      <WorkflowPanel
+        v-if="dramaId"
+        ref="workflowPanelRef"
+        :drama-id="dramaId"
+        :episode-number="currentEpisodeNumber"
+        :collapsed="navCollapsed"
+        @need-ui-action="onWorkflowNeedUiAction"
+        @plan-updated="onWorkflowPlanUpdated"
+      />
+
       <!-- 分镜子列表 -->
       <div v-if="!navCollapsed && storyboards.length > 0" class="nav-group">
         <div class="nav-sub-toggle" @click="storyboardMenuExpanded = !storyboardMenuExpanded">
@@ -279,6 +289,15 @@
                   >
                     保存当前集
                   </el-button>
+                  <el-button
+                    type="primary"
+                    plain
+                    :loading="scriptRewriting"
+                    :disabled="!(scriptContent || '').trim()"
+                    @click="onRewriteScriptDialogueDriven"
+                  >
+                    对话驱动改写
+                  </el-button>
                 </div>
               </div>
             </div>
@@ -361,6 +380,155 @@
         </div>
       </el-dialog>
 
+      <!-- 内容确认：核对 prepare_step1 分场后再盖章 -->
+      <el-dialog
+        v-model="step1ReviewVisible"
+        title="内容确认"
+        width="720px"
+        destroy-on-close
+        class="step1-review-dialog"
+      >
+        <div v-loading="step1ReviewBusy" class="step1-review-body">
+          <p class="asset-review-hint">
+            {{ step1ReviewHint || '请核对整理后的分场/对白。确认后才会进入正式剧本；不要空点跳过。' }}
+            口播按 5 字/秒估算；超过 12s 会自动拆镜，同分场且接得下则并入下一镜，否则独立成新 unit；仍超长会标红。
+          </p>
+          <div v-if="step1ReviewUnits.length" class="step1-review-list">
+            <div
+              v-for="(u, i) in step1ReviewUnits"
+              :key="u.unit_id || i"
+              class="step1-review-item"
+              :class="{ 'is-speech-overload': isStep1SpeechOverload(u) }"
+            >
+              <div class="step1-review-id">
+                {{ u.unit_id || `单元 ${i + 1}` }} · {{ u.duration_seconds || 5 }}s
+                <span v-if="isStep1SpeechOverload(u)" class="step1-review-overload-tag">
+                  {{ step1OverloadTag(u) }}
+                </span>
+              </div>
+              <pre class="step1-review-text">{{ u.text }}</pre>
+            </div>
+          </div>
+          <div v-else class="muted">暂无整理内容 — 请先执行「整理内容」</div>
+        </div>
+        <template #footer>
+          <el-button @click="step1ReviewVisible = false">取消</el-button>
+          <el-button type="primary" :loading="!!step1ReviewBusy" :disabled="!step1ReviewUnits.length" @click="onConfirmStep1Review">
+            确认并继续
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 资产确认：AI 提议衣橱造型 + 场景/道具，可补提取后写入并标记完成 -->
+      <el-dialog
+        v-model="assetReviewVisible"
+        title="资产确认（衣橱）"
+        width="720px"
+        destroy-on-close
+        class="asset-review-dialog"
+      >
+        <div v-loading="assetReviewLoading" class="asset-review-body">
+          <p v-if="assetReviewHint" class="asset-review-hint">{{ assetReviewHint }}</p>
+          <div class="asset-review-actions">
+            <el-button size="small" type="primary" :loading="assetReviewBusy === 'propose'" @click="onAssetReviewPropose">
+              AI 提议造型/场景/道具
+            </el-button>
+            <el-button size="small" :loading="assetReviewBusy === 'chars'" @click="onAssetReviewExtractChars">提取角色</el-button>
+            <el-button size="small" :loading="assetReviewBusy === 'scenes'" @click="onAssetReviewExtractScenes">提取场景</el-button>
+            <el-button size="small" :loading="assetReviewBusy === 'props'" @click="onAssetReviewExtractProps">提取道具</el-button>
+            <el-button size="small" type="warning" plain :loading="assetReviewBusy === 'scan'" @click="onAssetReviewScanLooks">扫描 @[造型]</el-button>
+            <el-button size="small" :loading="assetReviewBusy === 'refresh'" @click="refreshAssetReview">刷新清单</el-button>
+          </div>
+
+          <div v-if="assetReviewProposal" class="asset-review-proposal">
+            <div class="asset-review-h">
+              AI 提议
+              <span v-if="assetReviewProposal.status === 'NEED_CONFIRM'" class="warn">（有拿不准项，请核对）</span>
+            </div>
+            <div v-if="assetReviewProposal.looks?.length" class="asset-review-section">
+              <div class="muted">造型（挂在已有角色下，如 阿杰@童年）</div>
+              <el-checkbox-group v-model="assetReviewSelectedLooks">
+                <div v-for="(lk, i) in assetReviewProposal.looks" :key="'pl'+i" class="asset-review-check">
+                  <el-checkbox :label="i">
+                    {{ lk.character_name }}@{{ lk.look_id }} — {{ lk.description || '（无描述）' }}
+                  </el-checkbox>
+                </div>
+              </el-checkbox-group>
+            </div>
+            <div v-if="assetReviewProposal.scenes?.length" class="asset-review-section">
+              <div class="muted">场景</div>
+              <el-checkbox-group v-model="assetReviewSelectedScenes">
+                <div v-for="(sc, i) in assetReviewProposal.scenes" :key="'ps'+i" class="asset-review-check">
+                  <el-checkbox :label="i">{{ sc.name }} — {{ sc.description || '' }}</el-checkbox>
+                </div>
+              </el-checkbox-group>
+            </div>
+            <div v-if="assetReviewProposal.props?.length" class="asset-review-section">
+              <div class="muted">道具</div>
+              <el-checkbox-group v-model="assetReviewSelectedProps">
+                <div v-for="(pr, i) in assetReviewProposal.props" :key="'pp'+i" class="asset-review-check">
+                  <el-checkbox :label="i">{{ pr.name }} — {{ pr.description || '' }}</el-checkbox>
+                </div>
+              </el-checkbox-group>
+            </div>
+            <div v-if="assetReviewProposal.uncertain?.length" class="asset-review-section">
+              <div class="warn">拿不准（未勾选，仅供参考）</div>
+              <ul class="asset-review-list">
+                <li v-for="(u, i) in assetReviewProposal.uncertain" :key="'u'+i">
+                  {{ u.type }} · {{ u.candidate }} — {{ u.why || u.description }}
+                </li>
+              </ul>
+            </div>
+            <p v-if="!assetReviewProposal.looks?.length && !assetReviewProposal.scenes?.length && !assetReviewProposal.props?.length" class="muted">
+              AI 未建议新增项（或已全部登记）
+            </p>
+          </div>
+
+          <div class="asset-review-section">
+            <div class="asset-review-h">当前角色 {{ assetReviewInfo?.summary?.characters ?? 0 }}</div>
+            <ul v-if="assetReviewInfo?.characters?.length" class="asset-review-list">
+              <li v-for="c in assetReviewInfo.characters" :key="'c'+c.id">
+                {{ c.name }}
+                <span v-if="c.look_ids?.filter((id) => id !== 'base').length" class="muted">
+                  · 造型 {{ c.look_ids.filter((id) => id !== 'base').join('、') }}
+                </span>
+                <span v-if="!c.base_has_image || c.missing_looks?.length" class="warn"> · 缺图</span>
+              </li>
+            </ul>
+            <p v-else class="muted">暂无角色 — 先「提取角色」，再「AI 提议」</p>
+          </div>
+          <div class="asset-review-section">
+            <div class="asset-review-h">当前场景 {{ assetReviewInfo?.summary?.scenes ?? 0 }}</div>
+            <ul v-if="assetReviewInfo?.scenes?.length" class="asset-review-list">
+              <li v-for="s in assetReviewInfo.scenes" :key="'s'+s.id">
+                {{ s.name }}
+                <span v-if="!s.has_image" class="warn"> · 缺图</span>
+              </li>
+            </ul>
+            <p v-else class="muted">暂无场景</p>
+          </div>
+          <div class="asset-review-section">
+            <div class="asset-review-h">当前道具 {{ assetReviewInfo?.summary?.props ?? 0 }}</div>
+            <ul v-if="assetReviewInfo?.props?.length" class="asset-review-list">
+              <li v-for="p in assetReviewInfo.props" :key="'p'+p.id">
+                {{ p.name }}
+                <span v-if="!p.has_image" class="warn"> · 缺图</span>
+              </li>
+            </ul>
+            <p v-else class="muted">暂无道具</p>
+          </div>
+          <p class="asset-review-tip">
+            同一角色换装挂 looks（例：阿杰 → 造型「童年」），不要建「童年阿杰」假角色。标记完成会写入勾选的提议并过门禁。
+          </p>
+        </div>
+        <template #footer>
+          <el-button @click="assetReviewVisible = false">稍后再说</el-button>
+          <el-button type="primary" :loading="assetReviewBusy === 'complete'" @click="onAssetReviewComplete">
+            写入并标记完成
+          </el-button>
+        </template>
+      </el-dialog>
+
       <!-- 一键全流程生成 -->
       <section class="section card pipeline-section">
         <div class="one-click-actions">
@@ -373,11 +541,32 @@
             <el-option label="4:3" value="4:3" />
             <el-option label="21:9 宽银幕" value="21:9" />
           </el-select>
+          <el-select v-model="workflowContentMode" style="width: 120px" @change="onWorkflowModesChange">
+            <el-option label="剧情演绎" value="drama" />
+            <el-option label="旁白解说" value="narration" />
+          </el-select>
+          <el-select v-model="workflowGenerationMode" style="width: 130px" @change="onWorkflowModesChange">
+            <el-option label="分镜模式" value="storyboard" />
+            <el-option label="参考图模式" value="reference_video" />
+          </el-select>
+          <el-button
+            type="warning"
+            plain
+            :disabled="!currentEpisodeId"
+            title="提取资产后确认角色造型 / 场景 / 道具清单（参考视频模式门禁）"
+            @click="onOpenWardrobeReview"
+          >
+            资产确认
+          </el-button>
           <el-select v-model="videoClipDuration" style="width: 105px" @change="() => saveProjectSettings(false)">
             <el-option label="4秒/段" :value="4" />
             <el-option label="5秒/段" :value="5" />
+            <el-option label="6秒/段" :value="6" />
+            <el-option label="7秒/段" :value="7" />
             <el-option label="8秒/段" :value="8" />
+            <el-option label="9秒/段" :value="9" />
             <el-option label="10秒/段" :value="10" />
+            <el-option label="11秒/段" :value="11" />
             <el-option label="12秒/段" :value="12" />
             <el-option label="15秒/段" :value="15" />
           </el-select>
@@ -468,6 +657,16 @@
                 <el-button type="primary" size="small" :loading="charactersGenerating" :disabled="!dramaId" @click="onGenerateCharacters">
                   剧本自动提取角色
                 </el-button>
+                <el-button
+                  type="success"
+                  size="small"
+                  :loading="batchGeneratingCharImages"
+                  :disabled="!dramaId || !characters.length || batchGeneratingCharImages"
+                  @click="onBatchGenerateCharacterImages"
+                >
+                  <el-icon v-if="!batchGeneratingCharImages"><MagicStick /></el-icon>
+                  一键生成配图
+                </el-button>
                 <el-button size="small" :disabled="!dramaId" @click="openAddCharacter">添加角色</el-button>
                 <el-button size="small" @click="showCharLibrary = true">本剧角色库</el-button>
               </div>
@@ -484,6 +683,22 @@
                       </el-button>
                     </div>
                     <div class="asset-desc-full">{{ char.appearance || char.description || '暂无描述' }}</div>
+                    <div v-if="characterLookEntries(char).length" class="asset-looks-row">
+                      <span class="asset-looks-label">衣橱</span>
+                      <el-tag
+                        v-for="lk in characterLookEntries(char)"
+                        :key="lk.id"
+                        size="small"
+                        effect="plain"
+                        type="warning"
+                        class="asset-look-tag asset-look-tag--click"
+                        :title="(lk.description || lk.id) + '（点击编辑/生成）'"
+                        @click.stop="openLookEditDialog(char, lk.id)"
+                      >
+                        {{ lk.id }}
+                        <span v-if="!lk.has_image" class="asset-look-miss">缺图</span>
+                      </el-tag>
+                    </div>
                     <div class="asset-btns">
                       <el-button size="small" @click="editCharacter(char)">编辑</el-button>
                       <el-button size="small" :loading="addingCharToLibraryId === char.id" :disabled="!hasAssetImage(char)" @click="onAddCharacterToLibrary(char)">
@@ -614,6 +829,16 @@
             <div v-show="!propsBlockCollapsed" class="resource-block-body">
               <div class="asset-actions">
                 <el-button type="primary" size="small" :loading="propsExtracting" :disabled="!currentEpisodeId" @click="onExtractProps">从剧本提取道具</el-button>
+                <el-button
+                  type="success"
+                  size="small"
+                  :loading="batchGeneratingPropImages"
+                  :disabled="!dramaId || !props.length || batchGeneratingPropImages"
+                  @click="onBatchGeneratePropImages"
+                >
+                  <el-icon v-if="!batchGeneratingPropImages"><MagicStick /></el-icon>
+                  一键生成配图
+                </el-button>
                 <el-button size="small" :disabled="!dramaId" @click="showAddProp = true">添加道具</el-button>
                 <el-button size="small" @click="showPropLibrary = true">本剧道具库</el-button>
               </div>
@@ -715,11 +940,21 @@
                 <el-button type="primary" size="small" :loading="scenesExtracting" :disabled="!currentEpisodeId" @click="onExtractScenes">
                   从剧本提取场景
                 </el-button>
+                <el-button
+                  type="success"
+                  size="small"
+                  :loading="batchGeneratingSceneImages"
+                  :disabled="!dramaId || !scenes.length || batchGeneratingSceneImages"
+                  @click="onBatchGenerateSceneImages"
+                >
+                  <el-icon v-if="!batchGeneratingSceneImages"><MagicStick /></el-icon>
+                  一键生成配图
+                </el-button>
                 <el-button size="small" :disabled="!dramaId" @click="openAddScene">添加场景</el-button>
                 <el-button size="small" @click="showSceneLibrary = true">本剧场景库</el-button>
               </div>
               <div class="scene-gen-mode" style="margin: 8px 0; font-size: 13px;">
-                <el-checkbox v-model="sceneUseQuadGrid">生成四宫格场景（默认开启，取消则单图）</el-checkbox>
+                <el-checkbox v-model="sceneUseQuadGrid">生成四宫格场景（勾选后才用四宫格，默认单图）</el-checkbox>
               </div>
               <div class="asset-list asset-list-two">
                 <div v-for="scene in scenes" :key="scene.id" class="asset-item asset-item-left-right">
@@ -1406,14 +1641,35 @@
                     <div
                       v-for="c in getSbSelectedCharacters(sb.id)"
                       :key="c.id"
-                      class="sb-thumb-item sb-thumb-avatar"
-                      :class="{ 'sb-thumb-clickable': hasAssetImage(c) }"
-                      :title="c.name"
-                      role="button"
-                      @click="hasAssetImage(c) && openImagePreview(assetImageUrl(c))"
+                      class="sb-thumb-char-wrap"
                     >
-                      <img v-if="hasAssetImage(c)" :src="assetImageUrl(c)" alt="" />
-                      <span v-else class="sb-thumb-placeholder">{{ (c.name || '')[0] }}</span>
+                      <div
+                        class="sb-thumb-item sb-thumb-avatar"
+                        :class="{ 'sb-thumb-clickable': !!sbCharacterThumbUrl(sb.id, c) }"
+                        :title="sbCharacterDisplayTitle(sb.id, c)"
+                        role="button"
+                        @click="sbCharacterThumbUrl(sb.id, c) && openImagePreview(sbCharacterThumbUrl(sb.id, c))"
+                      >
+                        <img v-if="sbCharacterThumbUrl(sb.id, c)" :src="sbCharacterThumbUrl(sb.id, c)" alt="" />
+                        <span v-else class="sb-thumb-placeholder">{{ (c.name || '')[0] }}</span>
+                      </div>
+                      <el-select
+                        v-if="characterLookEntries(c).length"
+                        :model-value="getSbCharacterLook(sb.id, c.id)"
+                        size="small"
+                        class="sb-look-select"
+                        placeholder="造型"
+                        @update:model-value="(v) => setSbCharacterLook(sb.id, c.id, v)"
+                        @click.stop
+                      >
+                        <el-option label="基准" value="base" />
+                        <el-option
+                          v-for="lk in characterLookEntries(c)"
+                          :key="lk.id"
+                          :label="lk.has_image ? lk.id : `${lk.id}(缺图)`"
+                          :value="lk.id"
+                        />
+                      </el-select>
                     </div>
                     <el-dropdown trigger="click" @command="(cmd) => onSbAddCharacterCommand(sb.id, cmd)">
                       <div
@@ -2171,6 +2427,28 @@
             <div v-else style="font-size:12px;color:#c0c4cc;padding:4px 0">暂无锚点，点击「提炼视觉锚点」自动提炼</div>
           </div>
         </el-form-item>
+        <!-- 衣橱 looks（参考视频换装，挂在同一角色下） -->
+        <el-form-item v-if="editCharacterForm.id" label="衣橱造型">
+          <div style="width:100%">
+            <div style="font-size:12px;color:#909399;margin-bottom:6px">
+              跨镜换装挂在此角色下（如童年 / 战损），正文用 @[{{ editCharacterForm.name || '角色' }}@造型]。勿新建假角色。
+            </div>
+            <div v-if="editCharacterLookEntries.length" class="edit-char-looks">
+              <div
+                v-for="lk in editCharacterLookEntries"
+                :key="lk.id"
+                class="edit-char-look-row edit-char-look-row--click"
+                @click="openLookEditDialog(editCharacterForm, lk.id)"
+              >
+                <el-tag size="small" type="warning" effect="plain">{{ lk.id }}</el-tag>
+                <span class="edit-char-look-desc">{{ lk.description || '（无描述）' }}</span>
+                <span v-if="!lk.has_image" class="warn" style="font-size:12px">缺图 · 点击编辑</span>
+                <span v-else class="muted" style="font-size:12px">点击编辑</span>
+              </div>
+            </div>
+            <div v-else style="font-size:12px;color:#c0c4cc">暂无造型 — 在「资产确认」里用 AI 提议后写入</div>
+          </div>
+        </el-form-item>
         <!-- P1-3: 多阶段造型（stages） -->
         <el-form-item v-if="editCharacterForm.id" label="多阶段造型">
           <div style="width:100%">
@@ -2221,6 +2499,48 @@
       </template>
       <template #footer>
         <el-button @click="showCharSd2Cert = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 衣橱造型：编辑描述 + 生成设定图 -->
+    <el-dialog
+      v-model="lookEditVisible"
+      :title="lookEditTitle"
+      width="560px"
+      destroy-on-close
+      class="look-edit-dialog"
+    >
+      <div v-loading="lookEditBusy === 'load'" class="look-edit-body">
+        <div
+          class="look-edit-preview"
+          :class="{ 'look-edit-preview--clickable': lookEditHasImage }"
+          @click="lookEditHasImage && openImagePreview(lookEditImageUrl)"
+        >
+          <img v-if="lookEditHasImage" :src="lookEditImageUrl" alt="" />
+          <div v-else class="look-edit-placeholder">暂无造型图</div>
+        </div>
+        <el-form label-width="88px">
+          <el-form-item label="造型 ID">
+            <el-input :model-value="lookEditForm.look_id" disabled />
+          </el-form-item>
+          <el-form-item label="外观差异">
+            <el-input
+              v-model="lookEditForm.description"
+              type="textarea"
+              :rows="4"
+              placeholder="相对日常装的服装/发型/配饰差异，勿写剧情词"
+            />
+          </el-form-item>
+          <p class="look-edit-tip">
+            换装/战损：有基准图时会按脸型参考生成。童年/少年/老年等年龄造型会按描述重绘体型与发型（不用成年底图锁死）。正文：@[{{ lookEditForm.character_name }}@{{ lookEditForm.look_id }}]
+          </p>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button :loading="lookEditBusy === 'delete'" type="danger" plain @click="onLookEditDelete">删除造型</el-button>
+        <el-button @click="lookEditVisible = false">关闭</el-button>
+        <el-button :loading="lookEditBusy === 'save'" @click="onLookEditSave">保存描述</el-button>
+        <el-button type="primary" :loading="lookEditBusy === 'gen'" @click="onLookEditGenerate">生成造型图</el-button>
       </template>
     </el-dialog>
 
@@ -2984,7 +3304,9 @@
             <span>最多导入集数：</span>
             <el-input-number v-model="novelMaxChapters" :min="1" :max="20" size="small" style="width:100px" />
           </div>
-          <el-checkbox v-model="novelAiSummarize" size="small">AI 转换为剧本格式（会消耗 Token）</el-checkbox>
+          <el-checkbox v-model="novelAiSummarize" size="small">
+            AI 强对话驱动改写为剧本格式（火宝 skill，会消耗 Token）
+          </el-checkbox>
         </div>
       </div>
       <template #footer>
@@ -3022,6 +3344,7 @@ import { useFilmStore } from '@/stores/film'
 import { useGenerationTaskStore, GEN_RESOURCE } from '@/stores/generationTaskStore'
 import { syncGeneratingSetsFromStore, buildEpisodeContext, buildExtractTaskMeta, isEpisodeExtractRunning } from '@/composables/useGenerationTaskSync'
 import { dramaAPI } from '@/api/drama'
+import WorkflowPanel from '@/components/WorkflowPanel.vue'
 import { aiVoicesAPI } from '@/api/aiVoices'
 import { generationAPI } from '@/api/generation'
 import { aiAPI } from '@/api/ai'
@@ -3116,6 +3439,7 @@ const savedCurrentEpisodeNumber = ref(1)
 const scriptLanguage = ref('zh')
 const scriptStoryboardStyle = ref('')
 const scriptGenerating = ref(false)
+const scriptRewriting = ref(false)
 const isStoryGenRunning = computed(() => {
   if (storyGenerating.value || scriptGenerating.value) return true
   return genStore.getAllRunningTasks().some(
@@ -3125,6 +3449,8 @@ const isStoryGenRunning = computed(() => {
 const generationStyle = ref('')
 const customStylePrompt = ref('')
 const projectAspectRatio = ref('16:9')
+const workflowContentMode = ref('drama')
+const workflowGenerationMode = ref('storyboard')
 const videoClipDuration = ref(5)
 
 /** 根据 value 查找样式选项对象 */
@@ -3303,9 +3629,551 @@ const dramaId = computed(() => store.dramaId)
 const characters = computed(() => store.characters)
 const scenes = computed(() => store.scenes)
 const props = computed(() => store.props)
+
+/** 角色衣橱非 base 造型（数据在 characters.looks） */
+function characterLookEntries(char) {
+  const raw = char?.looks
+  let obj = raw
+  if (typeof raw === 'string') {
+    try {
+      obj = JSON.parse(raw)
+    } catch (_) {
+      obj = {}
+    }
+  }
+  if (!obj || typeof obj !== 'object') return []
+  return Object.keys(obj)
+    .filter((id) => id && id !== 'base')
+    .map((id) => {
+      const e = obj[id] && typeof obj[id] === 'object' ? obj[id] : {}
+      const has_image = Boolean(
+        (e.image_url && String(e.image_url).trim()) || (e.local_path && String(e.local_path).trim())
+      )
+      return {
+        id,
+        description: e.description || '',
+        has_image,
+        image_url: e.image_url || '',
+        local_path: e.local_path || '',
+      }
+    })
+}
+
+const lookEditVisible = ref(false)
+const lookEditBusy = ref('')
+const lookEditForm = ref({
+  character_id: null,
+  character_name: '',
+  look_id: '',
+  description: '',
+  image_url: '',
+  local_path: '',
+})
+const lookEditTitle = computed(
+  () => `${lookEditForm.value.character_name || '角色'}@${lookEditForm.value.look_id || '造型'}`
+)
+const lookEditImageUrl = computed(() => {
+  const p = lookEditForm.value.local_path || lookEditForm.value.image_url
+  if (!p) return ''
+  if (typeof localPathToUrl === 'function') return localPathToUrl(p)
+  const s = String(p).trim()
+  if (s.startsWith('http://') || s.startsWith('https://') || s.startsWith('/')) return s
+  return '/static/' + s.replace(/^\//, '')
+})
+const lookEditHasImage = computed(() => Boolean(lookEditImageUrl.value))
+
+function openLookEditDialog(char, lookId) {
+  if (!char?.id || !lookId) return
+  const entries = characterLookEntries(char)
+  const lk = entries.find((e) => e.id === lookId) || { id: lookId, description: '', image_url: '', local_path: '' }
+  lookEditForm.value = {
+    character_id: char.id,
+    character_name: char.name || '',
+    look_id: lookId,
+    description: lk.description || '',
+    image_url: lk.image_url || '',
+    local_path: lk.local_path || '',
+  }
+  lookEditVisible.value = true
+}
+
+async function onLookEditSave() {
+  const f = lookEditForm.value
+  if (!f.character_id || !f.look_id) return
+  lookEditBusy.value = 'save'
+  try {
+    await characterAPI.upsertLook(f.character_id, f.look_id, {
+      description: f.description || '',
+      image_url: f.image_url || undefined,
+      local_path: f.local_path || undefined,
+    })
+    ElMessage.success('造型描述已保存')
+    if (typeof loadDrama === 'function') await loadDrama()
+  } catch (e) {
+    ElMessage.error(e?.message || '保存失败')
+  } finally {
+    lookEditBusy.value = ''
+  }
+}
+
+async function onLookEditGenerate() {
+  const f = lookEditForm.value
+  if (!f.character_id || !f.look_id) return
+  lookEditBusy.value = 'gen'
+  try {
+    // 先落盘描述，再出图
+    await characterAPI.upsertLook(f.character_id, f.look_id, {
+      description: f.description || '',
+      image_url: f.image_url || undefined,
+      local_path: f.local_path || undefined,
+    })
+    const style = typeof getSelectedStyle === 'function' ? getSelectedStyle() : undefined
+    const res = await characterAPI.generateLookImage(f.character_id, f.look_id, undefined, style)
+    const taskId = res?.image_generation?.task_id ?? res?.task_id
+    if (taskId && typeof pollTask === 'function') {
+      const pollRes = await pollTask(taskId, () => (typeof loadDrama === 'function' ? loadDrama() : null))
+      if (pollRes?.status === 'failed') {
+        ElMessage.error(pollRes.error || '造型图生成失败')
+        return
+      }
+    } else if (typeof loadDrama === 'function') {
+      await loadDrama()
+      if (typeof pollUntilResourceHasImage === 'function') {
+        await pollUntilResourceHasImage(() => {
+          const list = store.drama?.characters ?? store.currentEpisode?.characters ?? []
+          const c = list.find((x) => Number(x.id) === Number(f.character_id))
+          const entry = characterLookEntries(c).find((e) => e.id === f.look_id)
+          return !!(entry && entry.has_image)
+        })
+      }
+    }
+    if (typeof loadDrama === 'function') await loadDrama()
+    const list = store.drama?.characters ?? store.currentEpisode?.characters ?? []
+    const c = list.find((x) => Number(x.id) === Number(f.character_id))
+    const entry = characterLookEntries(c).find((e) => e.id === f.look_id)
+    if (entry) {
+      lookEditForm.value = {
+        ...lookEditForm.value,
+        description: entry.description || lookEditForm.value.description,
+        image_url: entry.image_url || '',
+        local_path: entry.local_path || '',
+      }
+    }
+    ElMessage.success('造型图已生成')
+  } catch (e) {
+    ElMessage.error(e?.message || '生成失败')
+  } finally {
+    lookEditBusy.value = ''
+  }
+}
+
+async function onLookEditDelete() {
+  const f = lookEditForm.value
+  if (!f.character_id || !f.look_id) return
+  try {
+    await ElMessageBox.confirm(`确定删除造型「${f.look_id}」？`, '删除造型', { type: 'warning' })
+  } catch (_) {
+    return
+  }
+  lookEditBusy.value = 'delete'
+  try {
+    await characterAPI.deleteLook(f.character_id, f.look_id)
+    ElMessage.success('造型已删除')
+    lookEditVisible.value = false
+    if (typeof loadDrama === 'function') await loadDrama()
+  } catch (e) {
+    ElMessage.error(e?.message || '删除失败')
+  } finally {
+    lookEditBusy.value = ''
+  }
+}
+
 const storyboards = computed(() => store.storyboards)
 const currentEpisode = computed(() => store.currentEpisode)
 const currentEpisodeId = computed(() => store.currentEpisode?.id ?? null)
+const currentEpisodeNumber = computed(() => Number(store.currentEpisode?.episode_number) || 1)
+const workflowPanelRef = ref(null)
+
+function onWorkflowNeedUiAction(detail) {
+  const ui = detail?.ui
+  if (ui === 'generate_asset_sheets') {
+    scrollToAnchor('anchor-characters')
+    ElMessage.info(detail.message || '请生成角色/场景/道具设定图（可使用一键流水线中的资产出图步骤）')
+  } else if (ui === 'generate_storyboards') {
+    scrollToAnchor('anchor-storyboard')
+    if (typeof startBatchImageGeneration === 'function') {
+      startBatchImageGeneration()
+    } else {
+      ElMessage.info(detail.message || '请批量生成分镜图')
+    }
+  } else if (ui === 'generate_videos') {
+    scrollToAnchor('anchor-video')
+    if (typeof startBatchVideoGeneration === 'function') {
+      startBatchVideoGeneration()
+    } else {
+      ElMessage.info(detail.message || '请批量生成视频')
+    }
+  } else if (ui === 'analyze_assets' && currentEpisodeId.value) {
+    dramaAPI.extractEpisodeCharacters(currentEpisodeId.value).catch(() => {})
+    if (typeof onExtractScenes === 'function') onExtractScenes()
+    if (typeof onExtractProps === 'function') onExtractProps()
+    ElMessage.info('已触发角色/场景/道具提取；请在资产确认中补全后标记完成')
+    setTimeout(() => openWardrobeReviewDialog(detail.expected_episode_source_revision, detail.message), 800)
+  } else if (ui === 'propose_character_looks') {
+    scrollToAnchor('anchor-characters')
+    openWardrobeReviewDialog(detail.expected_episode_source_revision, detail.message)
+  } else if (ui === 'confirm_step1') {
+    openStep1ReviewDialog(detail)
+  } else if (ui === 'collect_project_input') {
+    scrollToAnchor('anchor-script')
+  } else if (ui === 'generate_tts') {
+    scrollToAnchor('anchor-storyboard')
+    ElMessage.info(detail.message || '请为分镜生成旁白/对白 TTS')
+  }
+}
+
+/** 工作流改剧本/分镜后自动刷新列表，避免还得手动点刷新 */
+const WORKFLOW_STORYBOARD_REFRESH_ACTIONS = new Set([
+  'generate_script',
+  'reset_step1',
+  'reset_episode_planning',
+  'prepare_step1',
+  'confirm_step1',
+])
+
+async function onWorkflowPlanUpdated(payload) {
+  const executed = payload?.executed
+  if (!executed || !WORKFLOW_STORYBOARD_REFRESH_ACTIONS.has(executed)) return
+  if (!dramaId.value) return
+  try {
+    await loadDrama()
+  } catch (_) {
+    /* ignore refresh race */
+  }
+}
+
+const step1ReviewVisible = ref(false)
+const step1ReviewBusy = ref(false)
+const step1ReviewHint = ref('')
+const step1ReviewUnits = ref([])
+
+const STEP1_MAX_SPEECH_SEC = 12
+const STEP1_SPEECH_CPS = 5
+
+/** 估算 unit 台词秒数（5字/秒）；优先用后端标注 */
+function step1SpeechSeconds(u) {
+  if (u?.speech_seconds != null && Number(u.speech_seconds) >= 0) {
+    return Number(u.speech_seconds)
+  }
+  const text = String(u?.text || '')
+  let chars = 0
+  const re = /@\[[^\]]*\]\s*\{([^}]*)\}|\{([^}]*)\}/g
+  let m
+  while ((m = re.exec(text)) !== null) {
+    chars += String(m[1] || m[2] || '').replace(/\s+/g, '').length
+  }
+  return chars ? Math.round((chars / STEP1_SPEECH_CPS) * 100) / 100 : 0
+}
+
+function isStep1SpeechOverload(u) {
+  if (u?.speech_overload === true) return true
+  return step1SpeechSeconds(u) > STEP1_MAX_SPEECH_SEC * 1.05
+}
+
+/** 标红文案：真超最长档 vs 仅超本段时长 */
+function step1OverloadTag(u) {
+  const speech = step1SpeechSeconds(u)
+  const dur = Number(u?.duration_seconds) || 0
+  if (speech > STEP1_MAX_SPEECH_SEC * 1.05) {
+    return `台词约 ${speech}s（超最长 ${STEP1_MAX_SPEECH_SEC}s）`
+  }
+  if (dur > 0 && speech > dur * 1.05) {
+    return `台词约 ${speech}s（超本段 ${dur}s）`
+  }
+  return `台词约 ${speech}s（偏紧）`
+}
+
+function openStep1ReviewDialog(detail) {
+  step1ReviewHint.value = detail?.message || ''
+  step1ReviewVisible.value = true
+  step1ReviewUnits.value = []
+  const fromDetail = detail?.review?.content || detail?.content
+  const seed = Array.isArray(fromDetail?.units)
+    ? fromDetail.units
+    : Array.isArray(fromDetail?.segments)
+      ? fromDetail.segments.map((s, i) => ({
+          unit_id: s.segment_id || `S${i + 1}`,
+          text: s.novel_text || s.text || '',
+          duration_seconds: s.duration_seconds || 5,
+        }))
+      : Array.isArray(fromDetail?.scenes)
+        ? fromDetail.scenes.map((s, i) => ({
+            unit_id: s.scene_id || `C${i + 1}`,
+            text: s.scene_description || s.source_text || '',
+            duration_seconds: s.duration_seconds || 5,
+          }))
+        : []
+  if (seed.length) step1ReviewUnits.value = seed
+
+  // 整理完成后随时可看：以接口内容为准（含标红所需字段）
+  if (!currentEpisodeId.value) return
+  step1ReviewBusy.value = true
+  dramaAPI
+    .getScriptReview(currentEpisodeId.value)
+    .then((rev) => {
+      const payload = rev?.data && (rev.content == null) ? rev.data : rev
+      const c = payload?.content || payload?.review?.content
+      const u = Array.isArray(c?.units) ? c.units : []
+      if (u.length) step1ReviewUnits.value = u
+      else if (!step1ReviewUnits.value.length) {
+        ElMessage.warning('暂无整理内容，请先执行「整理内容」')
+      }
+    })
+    .catch((e) => {
+      if (!step1ReviewUnits.value.length) {
+        ElMessage.error(e?.message || '加载整理内容失败')
+      }
+    })
+    .finally(() => {
+      step1ReviewBusy.value = false
+    })
+}
+
+async function onStep1ReviewConfirm() {
+  if (!dramaId.value) return
+  step1ReviewBusy.value = true
+  try {
+    if (workflowPanelRef.value?.runNext) {
+      await workflowPanelRef.value.runNext({ confirmed: true })
+    } else {
+      await dramaAPI.executeWorkflow(dramaId.value, {
+        episode: currentEpisodeNumber.value,
+        confirmed: true,
+      })
+    }
+    step1ReviewVisible.value = false
+    ElMessage.success('内容已确认')
+    if (typeof store.loadDrama === 'function') await store.loadDrama(dramaId.value)
+    if (currentEpisodeId.value && typeof store.loadEpisode === 'function') {
+      await store.loadEpisode(currentEpisodeId.value)
+    }
+  } catch (e) {
+    ElMessage.error(e?.message || '确认失败')
+  } finally {
+    step1ReviewBusy.value = false
+  }
+}
+
+const onConfirmStep1Review = onStep1ReviewConfirm
+
+const assetReviewVisible = ref(false)
+const assetReviewLoading = ref(false)
+const assetReviewBusy = ref('')
+const assetReviewInfo = ref(null)
+const assetReviewRev = ref(null)
+const assetReviewHint = ref('')
+const assetReviewProposal = ref(null)
+const assetReviewSelectedLooks = ref([])
+const assetReviewSelectedScenes = ref([])
+const assetReviewSelectedProps = ref([])
+
+async function refreshAssetReview() {
+  if (!currentEpisodeId.value) return
+  assetReviewBusy.value = 'refresh'
+  try {
+    const info = await dramaAPI.getWardrobe(currentEpisodeId.value)
+    assetReviewInfo.value = info
+    assetReviewRev.value = info?.source_revision || assetReviewRev.value
+  } catch (e) {
+    ElMessage.error(e?.message || '刷新资产清单失败')
+  } finally {
+    assetReviewBusy.value = ''
+  }
+}
+
+async function openWardrobeReviewDialog(expectedRevision, message) {
+  if (!currentEpisodeId.value) {
+    ElMessage.warning('请先选择分集')
+    return
+  }
+  assetReviewHint.value = message || ''
+  assetReviewRev.value = expectedRevision || null
+  assetReviewProposal.value = null
+  assetReviewSelectedLooks.value = []
+  assetReviewSelectedScenes.value = []
+  assetReviewSelectedProps.value = []
+  assetReviewVisible.value = true
+  assetReviewLoading.value = true
+  try {
+    const info = await dramaAPI.getWardrobe(currentEpisodeId.value)
+    assetReviewInfo.value = info
+    assetReviewRev.value = expectedRevision || info?.source_revision || null
+  } catch (e) {
+    assetReviewInfo.value = null
+    ElMessage.error(e?.message || '加载资产清单失败')
+  } finally {
+    assetReviewLoading.value = false
+  }
+}
+
+async function onAssetReviewExtractChars() {
+  assetReviewBusy.value = 'chars'
+  try {
+    await onGenerateCharacters()
+    await refreshAssetReview()
+  } catch (e) {
+    ElMessage.error(e?.message || '提取角色失败')
+  } finally {
+    assetReviewBusy.value = ''
+  }
+}
+
+async function onAssetReviewExtractScenes() {
+  assetReviewBusy.value = 'scenes'
+  try {
+    await onExtractScenes()
+    await refreshAssetReview()
+  } catch (e) {
+    ElMessage.error(e?.message || '提取场景失败')
+  } finally {
+    assetReviewBusy.value = ''
+  }
+}
+
+async function onAssetReviewExtractProps() {
+  assetReviewBusy.value = 'props'
+  try {
+    await onExtractProps()
+    await refreshAssetReview()
+  } catch (e) {
+    ElMessage.error(e?.message || '提取道具失败')
+  } finally {
+    assetReviewBusy.value = ''
+  }
+}
+
+async function onAssetReviewPropose() {
+  if (!currentEpisodeId.value) return
+  if (!(assetReviewInfo.value?.characters?.length)) {
+    ElMessage.warning('请先提取角色，再提议衣橱（造型挂在已有角色下）')
+    return
+  }
+  assetReviewBusy.value = 'propose'
+  try {
+    const out = await dramaAPI.proposeWardrobe(currentEpisodeId.value)
+    const looks = out?.looks || []
+    const scenes = out?.scenes || []
+    const props = out?.props || []
+    assetReviewProposal.value = {
+      status: out?.status || 'READY',
+      looks,
+      scenes,
+      props,
+      uncertain: out?.uncertain || [],
+      skipped: out?.skipped || [],
+    }
+    assetReviewSelectedLooks.value = looks.map((_, i) => i)
+    assetReviewSelectedScenes.value = scenes.map((_, i) => i)
+    assetReviewSelectedProps.value = props.map((_, i) => i)
+    if (out?.source_revision) assetReviewRev.value = out.source_revision
+    if (out?.inventory) {
+      assetReviewInfo.value = {
+        ...assetReviewInfo.value,
+        ...out.inventory,
+        summary: out.inventory.summary || assetReviewInfo.value?.summary,
+      }
+    }
+    const n = looks.length + scenes.length + props.length
+    if (out?.status === 'NEED_CONFIRM') {
+      ElMessage.warning(`提议完成（有不确定项），确定新增 ${n} 项，请核对后写入`)
+    } else if (n) {
+      ElMessage.success(`提议 ${n} 项（如阿杰@童年），勾选后点写入`)
+    } else {
+      ElMessage.info('AI 未提议新增项')
+    }
+  } catch (e) {
+    ElMessage.error(e?.message || 'AI 提议失败（请检查 AI 配置）')
+  } finally {
+    assetReviewBusy.value = ''
+  }
+}
+
+async function onAssetReviewScanLooks() {
+  if (!currentEpisodeId.value) return
+  assetReviewBusy.value = 'scan'
+  try {
+    const out = await dramaAPI.scanWardrobeLooks(currentEpisodeId.value)
+    const n = out?.upserted?.length || 0
+    if (n) ElMessage.success(`已登记 ${n} 个造型`)
+    else ElMessage.info('未发现新的 @[角色@造型] 提及（或造型已登记）')
+    if (out?.review) {
+      assetReviewInfo.value = out.review
+      assetReviewRev.value = out.source_revision || assetReviewRev.value
+    } else {
+      await refreshAssetReview()
+    }
+  } catch (e) {
+    ElMessage.error(e?.message || '扫描造型失败')
+  } finally {
+    assetReviewBusy.value = ''
+  }
+}
+
+async function onAssetReviewComplete() {
+  if (!currentEpisodeId.value) return
+  assetReviewBusy.value = 'complete'
+  try {
+    const prop = assetReviewProposal.value
+    const lookSet = new Set(assetReviewSelectedLooks.value)
+    const sceneSet = new Set(assetReviewSelectedScenes.value)
+    const propSet = new Set(assetReviewSelectedProps.value)
+    const looks = (prop?.looks || [])
+      .filter((_, i) => lookSet.has(i))
+      .map(({ character_id, character_name, look_id, description }) => ({
+        character_id,
+        character_name,
+        look_id,
+        description,
+      }))
+    const scenes = (prop?.scenes || [])
+      .filter((_, i) => sceneSet.has(i))
+      .map(({ name, description }) => ({ name, description }))
+    const props = (prop?.props || [])
+      .filter((_, i) => propSet.has(i))
+      .map(({ name, description }) => ({ name, description }))
+    const out = await dramaAPI.completeWardrobe(currentEpisodeId.value, {
+      looks,
+      scenes,
+      props,
+      scan_looks: true,
+      expected_episode_source_revision: assetReviewRev.value,
+    })
+    const bits = []
+    if (out?.added?.length) bits.push(`造型 ${out.added.join('、')}`)
+    if (out?.added_scenes?.length) bits.push(`场景 ${out.added_scenes.join('、')}`)
+    if (out?.added_props?.length) bits.push(`道具 ${out.added_props.join('、')}`)
+    ElMessage.success(bits.length ? `已写入：${bits.join('；')}` : '资产确认已完成')
+    assetReviewVisible.value = false
+    assetReviewProposal.value = null
+    assetReviewSelectedLooks.value = []
+    assetReviewSelectedScenes.value = []
+    assetReviewSelectedProps.value = []
+    await workflowPanelRef.value?.refresh?.()
+    if (typeof loadDrama === 'function') await loadDrama()
+  } catch (e) {
+    ElMessage.error(e?.message || '资产确认失败')
+  } finally {
+    assetReviewBusy.value = ''
+  }
+}
+
+function onOpenWardrobeReview() {
+  if (workflowGenerationMode.value !== 'reference_video') {
+    ElMessage.info('资产确认主要用于「参考视频」模式；当前可先补全并标记，切到参考视频后会生效')
+  }
+  openWardrobeReviewDialog(null, null)
+}
+
 const videoProgress = computed(() => store.videoProgress)
 const videoStatus = computed(() => store.videoStatus)
 
@@ -3345,14 +4213,14 @@ let pipelineResolveResume = null
 const pipelineCountdown = ref(0)      // 剩余秒数，0 表示不在倒计时
 const pipelineCountdownMsg = ref('')  // 倒计时说明文字
 const pipelineConcurrency = ref(3)
-const pipelineVideoConcurrency = ref(3)
+const pipelineVideoConcurrency = ref(7)
 const pipelineActiveTasks = reactive(new Set())
 
 async function loadPipelineConcurrency() {
   try {
     const res = await generationSettingsAPI.get()
     pipelineConcurrency.value = Math.max(1, Number(res?.concurrency) || 3)
-    pipelineVideoConcurrency.value = Math.max(1, Number(res?.video_concurrency) || 3)
+    pipelineVideoConcurrency.value = Math.max(1, Number(res?.video_concurrency) || 7)
   } catch (_) {}
 }
 
@@ -3412,6 +4280,13 @@ const {
   onDeleteCharLibrary, onAddCharacterToLibrary, onAddCharacterToMaterialLibrary,
   onAddCharFromLibrary, onAddDramaCharToEpisode,
 } = useCharacters({ store, dramaId, currentEpisodeId, getSelectedStyle, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage })
+
+const editCharacterLookEntries = computed(() => {
+  const form = editCharacterForm?.value
+  if (!form?.id) return []
+  const live = (characters.value || []).find((c) => c.id === form.id)
+  return characterLookEntries(live || form)
+})
 
 // ── Composable: Props ──────────────────────────────────
 const {
@@ -3515,8 +4390,105 @@ const resourcePanelCollapsed = ref(false)
 const charactersBlockCollapsed = ref(false)
 const propsBlockCollapsed = ref(false)
 const scenesBlockCollapsed = ref(false)
-const sceneUseQuadGrid = ref(true)
+const sceneUseQuadGrid = ref(false)
 const propUseQuadGrid = ref(false)  // 道具四视图（与场景四宫格同级选项）
+const batchGeneratingCharImages = ref(false)
+const batchGeneratingSceneImages = ref(false)
+const batchGeneratingPropImages = ref(false)
+
+/** 确认批量配图目标：优先补全无图项；若全部已有图则询问是否重生成 */
+async function confirmBatchAssetImageTargets(list, label) {
+  if (!list.length) {
+    ElMessage.warning(`暂无${label}`)
+    return null
+  }
+  const missing = list.filter((item) => !hasAssetImage(item))
+  if (missing.length) {
+    try {
+      await ElMessageBox.confirm(
+        `将为 ${missing.length} 个无图${label}生成配图（共 ${list.length} 个），是否继续？`,
+        '一键生成配图',
+        { confirmButtonText: '开始生成', cancelButtonText: '取消' }
+      )
+      return missing
+    } catch {
+      return null
+    }
+  }
+  try {
+    await ElMessageBox.confirm(
+      `全部 ${list.length} 个${label}已有配图，是否全部重新生成？`,
+      '一键生成配图',
+      { type: 'warning', confirmButtonText: '全部重新生成', cancelButtonText: '取消' }
+    )
+    return list.slice()
+  } catch {
+    return null
+  }
+}
+
+async function onBatchGenerateCharacterImages() {
+  const targets = await confirmBatchAssetImageTargets(characters.value || [], '角色')
+  if (!targets) return
+  batchGeneratingCharImages.value = true
+  await loadPipelineConcurrency()
+  const concurrency = pipelineConcurrency.value || 3
+  let ok = 0
+  let fail = 0
+  try {
+    await runConcurrently(targets, concurrency, async (char) => {
+      const success = await onGenerateCharacterImage(char, { quiet: true })
+      if (success) ok++
+      else fail++
+    }, { getLabel: (char) => '角色图 ' + (char.name || char.id) })
+    if (fail) ElMessage.warning(`角色配图完成：成功 ${ok}，失败 ${fail}`)
+    else ElMessage.success(`已为 ${ok} 个角色生成配图`)
+  } finally {
+    batchGeneratingCharImages.value = false
+  }
+}
+
+async function onBatchGenerateSceneImages() {
+  const targets = await confirmBatchAssetImageTargets(scenes.value || [], '场景')
+  if (!targets) return
+  batchGeneratingSceneImages.value = true
+  await loadPipelineConcurrency()
+  const concurrency = pipelineConcurrency.value || 3
+  let ok = 0
+  let fail = 0
+  try {
+    await runConcurrently(targets, concurrency, async (scene) => {
+      const success = await onGenerateSceneImage(scene, sceneUseQuadGrid.value, { quiet: true })
+      if (success) ok++
+      else fail++
+    }, { getLabel: (scene) => '场景图 ' + (scene.location || scene.id) })
+    if (fail) ElMessage.warning(`场景配图完成：成功 ${ok}，失败 ${fail}`)
+    else ElMessage.success(`已为 ${ok} 个场景生成配图`)
+  } finally {
+    batchGeneratingSceneImages.value = false
+  }
+}
+
+async function onBatchGeneratePropImages() {
+  const targets = await confirmBatchAssetImageTargets(props.value || [], '道具')
+  if (!targets) return
+  batchGeneratingPropImages.value = true
+  await loadPipelineConcurrency()
+  const concurrency = pipelineConcurrency.value || 3
+  let ok = 0
+  let fail = 0
+  try {
+    await runConcurrently(targets, concurrency, async (prop) => {
+      const success = await onGeneratePropImage(prop, propUseQuadGrid.value, { quiet: true })
+      if (success) ok++
+      else fail++
+    }, { getLabel: (prop) => '道具图 ' + (prop.name || prop.id) })
+    if (fail) ElMessage.warning(`道具配图完成：成功 ${ok}，失败 ${fail}`)
+    else ElMessage.success(`已为 ${ok} 个道具生成配图`)
+  } finally {
+    batchGeneratingPropImages.value = false
+  }
+}
 
 // 分镜行内编辑状态（按 storyboard id 存储）
 // navCollapsed/storyboardMenuExpanded/toggleNav → 已移至 useNavigation composable
@@ -3694,6 +4666,8 @@ async function cancelActiveTask(item) {
   }
 }
 const sbCharacterIds = ref({})  // sbId -> number[] 多选角色
+/** sbId -> { [charId]: lookId } 衣橱造型（base 或缺省表示基准造型） */
+const sbCharacterLooks = ref({})
 const sbPropIds = ref({})       // sbId -> number[] 多选物品
 const sbSceneId = ref({})
 const sbDialogue = ref({})
@@ -4151,6 +5125,28 @@ function recordHasPlayableVideoUrl(i) {
   const lp = i.local_path && String(i.local_path).trim()
   if (lp) return true
   return isHttpVideoUrl(i.video_url)
+}
+
+/** 分镜是否已有成片：有完成记录或分镜上已挂视频。批量/一键只补缺，不自动重生成。 */
+function storyboardAlreadyHasPlayableVideo(sb) {
+  if (!sb) return false
+  const vidList = sbVideos.value[sb.id] || []
+  if (vidList.some((v) => v.status === 'completed' && recordHasPlayableVideoUrl(v))) return true
+  if (sb.local_path && String(sb.local_path).trim()) return true
+  if (sb.video_url && String(sb.video_url).trim()) return true
+  return false
+}
+
+/** 批量/流水线：只收集「还没有成片」的分镜 */
+function collectStoryboardsMissingVideo() {
+  return (store.storyboards || []).filter((sb) => {
+    if (storyboardAlreadyHasPlayableVideo(sb)) return false
+    if (isSbUniversalMode(sb.id)) {
+      if (!sbCanSubmitVideo(sb)) return false
+      return collectSbOmniReferenceAbsoluteUrls(sb).length > 0
+    }
+    return !!getSbFirstFrameUrl(sb)
+  })
 }
 /** 主播放器强制随记录/地址重建，避免重新生成后 <video> 仍缓存旧 src */
 function sbMainVideoPlayerKey(sbId) {
@@ -4868,7 +5864,7 @@ async function onGenerateSbFrameImage(sb, slot) {
       prompt = sbRow?.polished_prompt || sbRow?.image_prompt || sbRow?.description || ''
     }
     try {
-      await storyboardsAPI.update(sb.id, { character_ids: Array.isArray(idsToSave) ? idsToSave : [] })
+      await storyboardsAPI.update(sb.id, { characters: buildSbCharacterPayload(sb.id) })
     } catch (e) {
       ElMessage.warning('保存分镜角色失败')
       return
@@ -4963,7 +5959,7 @@ async function onGenerateSbImage(sb) {
         .filter((n) => Number.isFinite(n))
     }
     try {
-      await storyboardsAPI.update(sb.id, { character_ids: Array.isArray(idsToSave) ? idsToSave : [] })
+      await storyboardsAPI.update(sb.id, { characters: buildSbCharacterPayload(sb.id) })
     } catch (e) {
       console.warn('[分镜图] 保存角色勾选失败', e)
       ElMessage.warning('保存分镜角色失败，请稍后重试')
@@ -5072,6 +6068,7 @@ function onSbImageFileChange(ev) {
 function syncStoryboardStateFromEpisode(ep) {
   const boards = ep?.storyboards || []
   const nextCharIds = {}
+  const nextCharLooks = {}
   const nextPropIds = {}
   const nextScene = {}
   const nextDialogue = {}
@@ -5116,11 +6113,21 @@ function syncStoryboardStateFromEpisode(ep) {
     nextLayoutDescription[sb.id] = (sb.layout_description ?? '').toString()
     const charList = Array.isArray(sb.characters) ? sb.characters : (sb.characters != null ? [sb.characters] : [])
     nextCharIds[sb.id] = charList.map((c) => (typeof c === 'object' && c != null ? Number(c.id) : Number(c))).filter((n) => Number.isFinite(n))
+    const lookMap = {}
+    for (const c of charList) {
+      if (typeof c !== 'object' || c == null) continue
+      const cid = Number(c.id)
+      const look = String(c.look || '').trim()
+      if (!Number.isFinite(cid) || !look || look === 'base') continue
+      lookMap[cid] = look
+    }
+    nextCharLooks[sb.id] = lookMap
     nextPropIds[sb.id] = Array.isArray(sb.prop_ids) ? sb.prop_ids : []
     nextCreationMode[sb.id] = sb.creation_mode === 'universal' ? 'universal' : 'classic'
     nextUniversalSegment[sb.id] = (sb.universal_segment_text ?? '').toString()
   }
   sbCharacterIds.value = nextCharIds
+  sbCharacterLooks.value = nextCharLooks
   sbPropIds.value = nextPropIds
   sbSceneId.value = nextScene
   sbDialogue.value = nextDialogue
@@ -5181,6 +6188,9 @@ async function loadDrama() {
       customStylePrompt.value = ''
     }
     projectAspectRatio.value = (d.metadata && d.metadata.aspect_ratio) ? d.metadata.aspect_ratio : '16:9'
+    workflowContentMode.value = d.metadata?.content_mode === 'narration' ? 'narration' : 'drama'
+    workflowGenerationMode.value =
+      d.metadata?.generation_mode === 'reference_video' ? 'reference_video' : 'storyboard'
     videoClipDuration.value = (d.metadata && d.metadata.video_clip_duration) ? Number(d.metadata.video_clip_duration) : 5
     storyboardIncludeNarration.value = !!(d.metadata && d.metadata.storyboard_include_narration)
     storyboardStaticDialogue.value = !!(d.metadata && d.metadata.storyboard_static_dialogue)
@@ -5255,7 +6265,60 @@ function getMovementLabel(m) {
 function setSbCharacterIds(sbId, v) {
   const next = Array.isArray(v) ? v : []
   sbCharacterIds.value = { ...sbCharacterIds.value, [sbId]: next }
+  const keep = new Set(next.map((x) => Number(x)))
+  const prevLooks = { ...(sbCharacterLooks.value[sbId] || {}) }
+  const nextLooks = {}
+  for (const [cid, look] of Object.entries(prevLooks)) {
+    if (keep.has(Number(cid))) nextLooks[cid] = look
+  }
+  sbCharacterLooks.value = { ...sbCharacterLooks.value, [sbId]: nextLooks }
   onStoryboardCharacterChange(sbId)
+}
+
+function getSbCharacterLook(sbId, charId) {
+  const map = sbCharacterLooks.value[sbId] || {}
+  const look = map[charId] ?? map[String(charId)] ?? map[Number(charId)]
+  return look && String(look).trim() && String(look) !== 'base' ? String(look) : 'base'
+}
+
+function setSbCharacterLook(sbId, charId, lookId) {
+  const cid = Number(charId)
+  if (!Number.isFinite(cid)) return
+  const look = String(lookId || 'base').trim() || 'base'
+  const map = { ...(sbCharacterLooks.value[sbId] || {}) }
+  if (!look || look === 'base') delete map[cid]
+  else map[cid] = look
+  sbCharacterLooks.value = { ...sbCharacterLooks.value, [sbId]: map }
+  onStoryboardCharacterChange(sbId)
+}
+
+function characterLookAsset(char, lookId) {
+  const look = String(lookId || '').trim()
+  if (!char || !look || look === 'base') return null
+  return characterLookEntries(char).find((e) => e.id === look) || null
+}
+
+function sbCharacterThumbUrl(sbId, char) {
+  if (!char) return ''
+  const look = getSbCharacterLook(sbId, char.id)
+  const lk = characterLookAsset(char, look)
+  if (lk && (lk.image_url || lk.local_path)) return assetImageUrl(lk)
+  return hasAssetImage(char) ? assetImageUrl(char) : ''
+}
+
+function sbCharacterDisplayTitle(sbId, char) {
+  const name = char?.name || '角色'
+  const look = getSbCharacterLook(sbId, char?.id)
+  return look && look !== 'base' ? `${name}@${look}` : name
+}
+
+function buildSbCharacterPayload(sbId) {
+  return (getSbCharacterIds(sbId) || []).map((id) => {
+    const n = Number(id)
+    const look = getSbCharacterLook(sbId, n)
+    if (look && look !== 'base') return { id: n, look }
+    return { id: n }
+  })
 }
 
 /** 当前分镜尚未勾选的角色（供缩略图旁「+」下拉添加） */
@@ -5315,10 +6378,8 @@ function getSbSelectedProps(sbId) {
 }
 
 async function onStoryboardCharacterChange(sbId) {
-  const ids = sbCharacterIds.value[sbId] || []
   try {
-    await storyboardsAPI.update(sbId, { character_ids: ids })
-    // 首/尾帧提示词保留（含用户手动保存版）；图生时后端会按当前勾选做 sanitize
+    await storyboardsAPI.update(sbId, { characters: buildSbCharacterPayload(sbId) })
   } catch (e) {
     console.warn('[分镜] 保存角色失败', e)
   }
@@ -6140,6 +7201,8 @@ async function saveProjectSettings(includeGenerationStyle = false) {
     story_style: storyStyle.value || undefined,
     aspect_ratio: projectAspectRatio.value || '16:9',
     video_clip_duration: videoClipDuration.value || 5,
+    content_mode: workflowContentMode.value || 'drama',
+    generation_mode: workflowGenerationMode.value || 'reference_video',
     storyboard_include_narration: !!storyboardIncludeNarration.value,
     storyboard_static_dialogue: !!storyboardStaticDialogue.value,
     storyboard_universal_omni: !!storyboardUniversalOmni.value,
@@ -6157,6 +7220,21 @@ async function saveProjectSettings(includeGenerationStyle = false) {
     payload.style = generationStyle.value || undefined
   }
   dramaAPI.saveOutline(store.dramaId, payload).catch(e => console.error('Settings auto-save failed', e))
+}
+
+async function onWorkflowModesChange() {
+  if (!store.dramaId) return
+  try {
+    await dramaAPI.setWorkflowModes(store.dramaId, {
+      content_mode: workflowContentMode.value,
+      generation_mode: workflowGenerationMode.value,
+    })
+    await saveProjectSettings(false)
+    await workflowPanelRef.value?.refresh?.()
+    ElMessage.success('工作流模式已更新')
+  } catch (e) {
+    ElMessage.error(e?.message || '模式更新失败')
+  }
 }
 
 async function onGenerateStory() {
@@ -6417,6 +7495,40 @@ async function onGenerateScript() {
     ElMessage.error(e.message || '保存失败')
   } finally {
     scriptGenerating.value = false
+  }
+}
+
+/** 火宝强对话驱动 skill：把当前集正文改写为 ## S0x 格式化剧本 */
+async function onRewriteScriptDialogueDriven() {
+  const content = (scriptContent.value ?? store.scriptContent ?? '').toString().trim()
+  if (!content) {
+    ElMessage.warning('请先填写剧本内容再改写')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      '将按「强对话驱动」规范改写当前集（对白推进、节拍切场、不写镜头语言）。原内容会被替换，是否继续？',
+      '对话驱动改写',
+      { type: 'warning', confirmButtonText: '开始改写', cancelButtonText: '取消' }
+    )
+  } catch (_) {
+    return
+  }
+  scriptRewriting.value = true
+  try {
+    const res = await dramaAPI.rewriteScript({
+      content,
+      title: scriptTitle.value || '',
+      episode_id: currentEpisodeId.value || selectedEpisodeId.value || undefined,
+    })
+    const script = String(res?.script || '').trim()
+    if (!script) throw new Error('改写结果为空')
+    scriptContent.value = script
+    ElMessage.success(`改写完成（${res?.skillId || 'dialogue_driven'}）`)
+  } catch (e) {
+    ElMessage.error(e.message || '改写失败')
+  } finally {
+    scriptRewriting.value = false
   }
 }
 
@@ -7700,12 +8812,13 @@ function getSbUniversalOmniRefSlots(sb) {
     })
   }
   for (const c of getSbSelectedCharacters(sb.id)) {
-    if (hasAssetImage(c)) {
+    const thumb = sbCharacterThumbUrl(sb.id, c)
+    if (thumb) {
       out.push({
         index: idx++,
         kind: 'character',
-        name: (c.name || '角色').toString(),
-        thumbUrl: assetImageUrl(c),
+        name: sbCharacterDisplayTitle(sb.id, c),
+        thumbUrl: thumb,
       })
     }
   }
@@ -7733,12 +8846,91 @@ function collectSbOmniReferenceAbsoluteUrls(sb) {
     seen.add(abs)
     urls.push(abs)
   }
-  const scene = getSbSelectedScene(sb.id)
-  if (scene && hasAssetImage(scene)) pushAbs(assetImageUrl(scene))
-  for (const c of getSbSelectedCharacters(sb.id)) {
-    if (hasAssetImage(c)) pushAbs(assetImageUrl(c))
+  let scene = getSbSelectedScene(sb.id)
+  let chars = getSbSelectedCharacters(sb.id)
+  let propsList = getSbSelectedProps(sb.id)
+  // 参考视频工作流：分镜常未手动勾选参考图 → 从片段正文按 @[资产] 补齐漏绑的场景/角色/道具
+  const needAuto =
+    !scene || !chars.length || !(propsList && propsList.length)
+  if (needAuto) {
+    const text = String(sbUniversalSegmentTrimmed(sb) || sb.universal_segment_text || sb.description || '')
+    const allChars = characters.value || []
+    const allScenes = scenes.value || []
+    const allProps = props.value || []
+    if (!chars.length) {
+      chars = allChars.filter((c) => {
+        const n = String(c.name || '').trim()
+        if (!n) return false
+        if (text.includes(`@[${n}]`) || text.includes(`@[${n}@`) || text.includes(`<${n}>`)) return true
+        if (n.length <= 1) {
+          return new RegExp(
+            `(^|[\\n\\s])${n.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\s*[（(：:]`
+          ).test(text)
+        }
+        return new RegExp(
+          `(^|[\\n\\s])${n.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\s*[（(：:]`
+        ).test(text)
+      })
+    }
+    if (!scene) {
+      // 1) @[场景location] 或 @[便利店] → 便利店·童年
+      for (const s of allScenes) {
+        const n = String(s.location || '').trim()
+        if (!n) continue
+        if (text.includes(`@[${n}]`) || text.includes(`@[${n}@`) || text.includes(`<${n}>`)) {
+          scene = s
+          break
+        }
+        const head = n.split(/[·•]/)[0].trim()
+        if (
+          head.length >= 2 &&
+          (text.includes(`@[${head}]`) || text.includes(`<${head}>`))
+        ) {
+          scene = s
+          break
+        }
+      }
+      // 2) 【分场】标题
+      if (!scene) {
+        const header = text.match(/【分场】\s*([^\n]+)/)
+        const locFull = header ? header[1].trim() : ''
+        const loc = locFull.split(/[·•]/)[0].trim() || locFull
+        if (loc) {
+          scene =
+            allScenes.find((s) => String(s.location || '').trim() === locFull) ||
+            allScenes.find((s) => String(s.location || '').trim() === loc) ||
+            allScenes.find(
+              (s) =>
+                String(s.location || '').includes(loc) ||
+                locFull.includes(String(s.location || '').trim())
+            ) ||
+            null
+        }
+      }
+    }
+    if (!(propsList && propsList.length)) {
+      propsList = allProps.filter((p) => {
+        const n = String(p.name || '').trim()
+        if (!n) return false
+        if (
+          text.includes(`@[${n}]`) ||
+          text.includes(`@[${n}@`) ||
+          text.includes(`<${n}>`)
+        ) {
+          return true
+        }
+        // 登记名整词出现（LLM 常漏写 @[道具]）
+        return n.length >= 2 && text.includes(n)
+      })
+    }
   }
-  for (const p of getSbSelectedProps(sb.id)) {
+  if (scene && hasAssetImage(scene)) pushAbs(assetImageUrl(scene))
+  for (const c of chars) {
+    const lookUrl = sb.id != null ? sbCharacterThumbUrl(sb.id, c) : ''
+    if (lookUrl) pushAbs(lookUrl)
+    else if (hasAssetImage(c)) pushAbs(assetImageUrl(c))
+  }
+  for (const p of propsList) {
     if (hasAssetImage(p)) pushAbs(assetImageUrl(p))
   }
   return urls.slice(0, 10)
@@ -7779,6 +8971,11 @@ async function getActiveVideoAiConfig() {
   }
   activeVideoAiConfigCacheAt = now
   return activeVideoAiConfigCache
+}
+
+/** 批量/流水线视频并发（尊重设置；默认 7） */
+async function resolveVideoBatchConcurrency(preferred) {
+  return Math.max(1, Number(preferred) || 7)
 }
 
 function videoModelNameFromAiConfig(cfg) {
@@ -8641,29 +9838,19 @@ async function startBatchVideoGeneration() {
   batchVideoStopping.value = false
   batchVideoRunning.value = true
   try {
-    // 仅当媒体数据尚未加载时才全量拉取，避免点击时触发大量冗余请求
-    if (Object.keys(sbVideos.value).length === 0) {
-      await loadStoryboardMedia()
-    }
-    const boards = store.storyboards || []
-    // 只处理：有参考图（经典=分镜主图；全能=场景/角色/道具，不含经典主图）且 还没有已完成视频 的分镜
-    const todo = boards.filter((sb) => {
-      const vidList = sbVideos.value[sb.id] || []
-      if (vidList.some((v) => v.status === 'completed' && recordHasPlayableVideoUrl(v))) return false
-      if (isSbUniversalMode(sb.id)) {
-        if (!sbCanSubmitVideo(sb)) return false
-        return collectSbOmniReferenceAbsoluteUrls(sb).length > 0
-      }
-      return !!getSbFirstFrameUrl(sb)
-    })
+    // 始终刷新媒体列表，避免漏判「已有成片」导致重复生成
+    await loadStoryboardMedia()
+    const todo = collectStoryboardsMissingVideo()
     if (todo.length === 0) {
       ElMessage.info('没有需要生成视频的分镜（分镜缺少图片，或视频已全部生成）')
       return
     }
     batchVideoProgress.value = { current: 0, total: todo.length, failed: 0 }
     const contiguity = videoFrameContiguity.value
-    // 连贯帧模式强制顺序（concurrency=1），普通模式并发
-    const videoConcurrency = contiguity ? 1 : (pipelineVideoConcurrency.value || 2)
+    // 连贯帧强制顺序；Agnes 也强制串行，避免 video_queue_full
+    const videoConcurrency = contiguity
+      ? 1
+      : await resolveVideoBatchConcurrency(pipelineVideoConcurrency.value || 2)
     let videoDoneCount = 0
     let prevVideoItem = null  // 连贯帧：保存上一条已完成的视频记录
 
@@ -8872,7 +10059,21 @@ function resolvePollMeta(meta = {}) {
 }
 
 function pollTask(taskId, onDone, meta = {}) {
-  return genStore.pollTask(taskId, resolvePollMeta(meta), onDone, { ElMessage })
+  const resolved = resolvePollMeta(meta)
+  const isVideo =
+    resolved.resourceType === GEN_RESOURCE.SB_VIDEO ||
+    resolved.resourceType === 'video' ||
+    /视频/.test(String(resolved.label || ''))
+  // 后端 Agnes 可对 queue_full 无限重试（每 2 分钟），前端视频任务轮询放宽到 24 小时
+  return genStore.pollTask(taskId, resolved, onDone, {
+    ElMessage,
+    ...(isVideo
+      ? {
+          maxAttempts: 43200,
+          timeoutMessage: '视频任务轮询超时（后端可能仍在排队重试，请刷新页面查看）',
+        }
+      : {}),
+  })
 }
 
 /** 一键生成视频：暂停时等待，返回 { paused: true } 表示被暂停中断 */
@@ -8882,7 +10083,7 @@ function pollTaskWithPause(taskId, onDone, meta = {}) {
   if (trackInStore && taskId) {
     genStore.markRunning({ ...resolvedMeta, taskId })
   }
-  const maxAttempts = 450  // 450 × 2s = 15 分钟
+  const maxAttempts = 43200  // 视频可长时间排队重试：24h（2s 间隔）
   const interval = 2000
   let attempts = 0
   return new Promise((resolve, reject) => {
@@ -8926,7 +10127,7 @@ function pollTaskWithPause(taskId, onDone, meta = {}) {
       }
       if (attempts < maxAttempts) setTimeout(tick, interval)
       else {
-        const timeoutMsg = '任务查询超时（超过15分钟）'
+        const timeoutMsg = '视频任务轮询超时（后端可能仍在排队重试，请刷新页面查看）'
         finishStore('failed', timeoutMsg)
         resolve({ status: 'timeout', error: timeoutMsg })
       }
@@ -9401,17 +10602,9 @@ async function runOneClickPipeline(textOnly = false) {
     // 步骤 9：生成分镜视频
     {
       await loadStoryboardMedia()
-      const boards2 = (store.storyboards || []).filter((sb) => {
-        const vidList = sbVideos.value[sb.id] || []
-        if (vidList.some((v) => v.status === 'completed' && recordHasPlayableVideoUrl(v))) return false
-        if (isSbUniversalMode(sb.id)) {
-          if (!sbCanSubmitVideo(sb)) return false
-          return collectSbOmniReferenceAbsoluteUrls(sb).length > 0
-        }
-        return !!getSbFirstFrameUrl(sb)
-      })
-      const concurrency = pipelineVideoConcurrency.value
-      setPipelineStep(9, `生成分镜视频（${boards2.length} 个，并发 ${concurrency}）...`)
+      const boards2 = collectStoryboardsMissingVideo()
+      const concurrency = await resolveVideoBatchConcurrency(pipelineVideoConcurrency.value)
+      setPipelineStep(9, `生成分镜视频（补缺 ${boards2.length} 个，并发 ${concurrency}）...`)
       const { paused } = await runConcurrently(boards2, concurrency, async (sb) => {
         await checkPause()
         generatingSbVideoIds.add(sb.id)
@@ -9745,18 +10938,10 @@ async function runRepairPipeline() {
       pipelineCurrentStep.value = '全能模式跳过分镜图，继续生成视频...'
     }
     await loadStoryboardMedia()
-    const boards2 = (store.storyboards || []).filter((sb) => {
-      const vidList = sbVideos.value[sb.id] || []
-      if (vidList.some((v) => v.status === 'completed' && recordHasPlayableVideoUrl(v))) return false
-      if (isSbUniversalMode(sb.id)) {
-        if (!sbCanSubmitVideo(sb)) return false
-        return collectSbOmniReferenceAbsoluteUrls(sb).length > 0
-      }
-      return !!getSbFirstFrameUrl(sb)
-    })
+    const boards2 = collectStoryboardsMissingVideo()
     {
-      const concurrency = pipelineVideoConcurrency.value
-      pipelineCurrentStep.value = `正在生成分镜视频（并发${concurrency}）...`
+      const concurrency = await resolveVideoBatchConcurrency(pipelineVideoConcurrency.value)
+      pipelineCurrentStep.value = `正在生成分镜视频（补缺 ${boards2.length} 个，并发${concurrency}）...`
       const { paused } = await runConcurrently(boards2, concurrency, async (sb) => {
         await checkPause()
         generatingSbVideoIds.add(sb.id)
@@ -10590,6 +11775,100 @@ html.light .section-title { color: #1e1b4b; }
 .pipeline-section {
   padding: 12px 16px !important;
 }
+.asset-review-body { font-size: 13px; color: #1e293b; }
+.asset-review-hint { margin: 0 0 10px; color: #64748b; line-height: 1.4; }
+.asset-review-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.asset-review-section { margin-bottom: 10px; }
+.asset-review-h { font-weight: 600; margin-bottom: 4px; }
+.asset-review-list { margin: 0; padding-left: 18px; line-height: 1.55; }
+.asset-review-tip { margin: 8px 0 0; font-size: 12px; color: #64748b; line-height: 1.45; }
+.asset-review-body .muted { color: #94a3b8; }
+.asset-review-body .warn { color: #c2410c; }
+.asset-review-proposal {
+  margin-bottom: 12px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(194, 65, 12, 0.06);
+  border: 1px solid rgba(194, 65, 12, 0.18);
+}
+.asset-review-check { margin: 4px 0; }
+.asset-review-check :deep(.el-checkbox) { height: auto; align-items: flex-start; white-space: normal; }
+.step1-review-body { font-size: 13px; color: #1e293b; max-height: min(60vh, 520px); overflow: auto; }
+.step1-review-list { display: flex; flex-direction: column; gap: 10px; }
+.step1-review-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.04);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+.step1-review-item.is-speech-overload {
+  background: rgba(220, 38, 38, 0.06);
+  border-color: rgba(220, 38, 38, 0.45);
+}
+.step1-review-id { font-weight: 600; font-size: 12px; margin-bottom: 4px; color: #0f766e; }
+.step1-review-item.is-speech-overload .step1-review-id { color: #dc2626; }
+.step1-review-overload-tag {
+  margin-left: 8px;
+  font-weight: 500;
+  font-size: 11px;
+  color: #dc2626;
+}
+.step1-review-item.is-speech-overload .step1-review-text { color: #b91c1c; }
+.step1-review-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #334155;
+}
+.asset-looks-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 4px;
+}
+.asset-looks-label {
+  font-size: 11px;
+  color: #94a3b8;
+  flex-shrink: 0;
+}
+.asset-look-tag { max-width: 100%; }
+.asset-look-tag--click { cursor: pointer; }
+.asset-look-miss {
+  margin-left: 4px;
+  color: #c2410c;
+  font-size: 10px;
+}
+.edit-char-look-row--click { cursor: pointer; }
+.edit-char-look-row--click:hover { opacity: 0.85; }
+.look-edit-body { font-size: 13px; }
+.look-edit-preview {
+  width: 100%;
+  min-height: 180px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.04);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.look-edit-preview--clickable { cursor: zoom-in; }
+.look-edit-preview img { max-width: 100%; max-height: 280px; object-fit: contain; display: block; }
+.look-edit-placeholder { color: #94a3b8; font-size: 13px; padding: 24px; }
+.look-edit-tip { margin: 0 0 4px; font-size: 12px; color: #64748b; line-height: 1.45; }
+.edit-char-looks { display: flex; flex-direction: column; gap: 6px; }
+.edit-char-look-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.edit-char-look-desc { font-size: 12px; color: #64748b; line-height: 1.4; }
 .one-click-actions {
   display: flex;
   align-items: center;
@@ -11513,7 +12792,22 @@ html.light .sb-panel {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  align-items: flex-start;
+}
+.sb-thumb-char-wrap {
+  display: flex;
+  flex-direction: column;
   align-items: center;
+  gap: 4px;
+  max-width: 88px;
+}
+.sb-look-select {
+  width: 78px;
+}
+.sb-look-select :deep(.el-select__wrapper) {
+  min-height: 22px;
+  padding: 0 6px;
+  font-size: 11px;
 }
 .sb-thumb-item {
   flex-shrink: 0;

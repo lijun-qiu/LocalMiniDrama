@@ -1568,14 +1568,33 @@ async function callImageApi(db, log, opts) {
   const isAgnes = isAgnesImageConfig(config, model);
   // doubao-seedream 系列模型（含通过自定义代理使用的场景）：使用 volcengine 图片 API 规范
   const isSeedream = isVolc || /seedream|doubao/i.test(model);
-  // 解析参考图：本地路径/localhost URL → base64，公网 URL → 直接传
+  // 解析参考图：本地路径/localhost URL → data URI base64，公网 URL → 直接传
   const rawRefs = Array.isArray(reference_image_urls) ? reference_image_urls.filter(Boolean) : [];
-  const resolvedRefs = rawRefs.map((r) => resolveImageRef(r, files_base_url, storage_local_path)).filter(Boolean);
+  let resolvedRefs = rawRefs.map((r) => resolveImageRef(r, files_base_url, storage_local_path)).filter(Boolean);
+  // Agnes Image：extra_body.image 只接受公网 URL 或 Data URI（data:image/...;base64,...）
+  // 相对路径未转成 data URI 时上送会 400：extra_body.image is not a valid image base64
+  if (isAgnes && resolvedRefs.length > 0) {
+    const before = resolvedRefs.length;
+    resolvedRefs = resolvedRefs.filter((r) => {
+      const s = String(r || '').trim();
+      if (!s) return false;
+      if (/^data:[^;]+;base64,/i.test(s)) return true;
+      if (/^https?:\/\//i.test(s) && !/localhost|127\.0\.0\.1/i.test(s)) return true;
+      return false;
+    });
+    if (before > 0 && resolvedRefs.length === 0) {
+      log.warn('Agnes Image: reference images dropped (need public URL or data URI)', {
+        image_gen_id,
+        raw_count: rawRefs.length,
+        sample: String(rawRefs[0] || '').slice(0, 80),
+      });
+    }
+  }
   if (resolvedRefs.length > 0) {
     log.info('Image API request with reference images', {
       url: url.slice(0, 60), model, image_gen_id,
       ref_count: resolvedRefs.length,
-      ref_types: resolvedRefs.map((r) => (r.startsWith('data:') ? 'base64' : 'url')),
+      ref_types: resolvedRefs.map((r) => (String(r).startsWith('data:') ? 'data_uri' : 'url')),
     });
   }
 
@@ -1749,7 +1768,11 @@ function createAndGenerateImage(db, log, opts) {
     quality,
     provider,
     user_negative_prompt,
+    look_id,
+    reference_image_urls,
+    system_prompt,
   } = opts;
+  const lookIdStr = look_id != null ? String(look_id).trim() : '';
   const negRow = (user_negative_prompt && String(user_negative_prompt).trim()) || null;
   const now = new Date().toISOString();
   const dramaIdNum = Number(drama_id) || 0;
@@ -1757,7 +1780,8 @@ function createAndGenerateImage(db, log, opts) {
   const sceneIdNum = scene_id != null ? Number(scene_id) : null;
 
   let resourceId;
-  if (charIdNum != null) resourceId = `character_${charIdNum}`;
+  if (charIdNum != null && lookIdStr) resourceId = `character_${charIdNum}_look_${lookIdStr}`;
+  else if (charIdNum != null) resourceId = `character_${charIdNum}`;
   else if (sceneIdNum != null) resourceId = `scene_${sceneIdNum}`;
   else resourceId = String(dramaIdNum);
   const task = taskService.createTask(db, log, 'image_generation', resourceId);
@@ -1798,6 +1822,18 @@ function createAndGenerateImage(db, log, opts) {
   setImmediate(async () => {
     try {
       db.prepare('UPDATE image_generations SET status = ? WHERE id = ?').run('processing', imageGenId);
+      let filesBaseUrl = '';
+      let storageLocalPath = '';
+      try {
+        const loadConfig = require('../config').loadConfig;
+        const cfg = loadConfig();
+        filesBaseUrl = (cfg.storage && cfg.storage.base_url)
+          ? String(cfg.storage.base_url).replace(/\/$/, '')
+          : '';
+        storageLocalPath = path.isAbsolute(cfg.storage?.local_path)
+          ? cfg.storage.local_path
+          : path.join(process.cwd(), cfg.storage?.local_path || './data/storage');
+      } catch (_) {}
       const result = await callImageApi(db, log, {
         prompt,
         model,
@@ -1808,6 +1844,10 @@ function createAndGenerateImage(db, log, opts) {
         image_type,
         image_gen_id: imageGenId,
         user_negative_prompt: user_negative_prompt || undefined,
+        reference_image_urls: Array.isArray(reference_image_urls) ? reference_image_urls : undefined,
+        system_prompt: system_prompt || undefined,
+        files_base_url: filesBaseUrl || undefined,
+        storage_local_path: storageLocalPath || undefined,
       });
       const now2 = new Date().toISOString();
       if (result.error) {
@@ -1815,7 +1855,7 @@ function createAndGenerateImage(db, log, opts) {
           'UPDATE image_generations SET status = ?, error_msg = ?, updated_at = ? WHERE id = ?'
         ).run('failed', result.error, now2, imageGenId);
         taskService.updateTaskError(db, taskId, result.error);
-        if (charIdNum != null) {
+        if (charIdNum != null && !lookIdStr) {
           try {
             db.prepare('UPDATE characters SET error_msg = ?, updated_at = ? WHERE id = ?').run(result.error, now2, charIdNum);
           } catch (_) {}
@@ -1860,8 +1900,36 @@ function createAndGenerateImage(db, log, opts) {
           throw e;
         }
       }
-      taskService.updateTaskResult(db, taskId, { image_generation_id: imageGenId, image_url: result.image_url, local_path: localPath, status: 'completed' });
-      if (charIdNum != null) {
+      taskService.updateTaskResult(db, taskId, {
+        image_generation_id: imageGenId,
+        image_url: result.image_url,
+        local_path: localPath,
+        status: 'completed',
+        look_id: lookIdStr || undefined,
+      });
+      if (charIdNum != null && lookIdStr) {
+        try {
+          const characterLooks = require('./workflow/characterLooks');
+          const prev = db
+            .prepare('SELECT looks FROM characters WHERE id = ? AND deleted_at IS NULL')
+            .get(charIdNum);
+          const looks = characterLooks.parseLooks(prev?.looks);
+          const prevLook = looks[lookIdStr] && typeof looks[lookIdStr] === 'object' ? looks[lookIdStr] : {};
+          characterLooks.upsertLook(db, charIdNum, lookIdStr, {
+            description: prevLook.description || '',
+            image_url: result.image_url,
+            local_path: localPath,
+          });
+          log.info('Character look image updated', {
+            character_id: charIdNum,
+            look_id: lookIdStr,
+            image_url: result.image_url,
+            local_path: localPath,
+          });
+        } catch (e) {
+          log.error('Failed to write look image', { character_id: charIdNum, look_id: lookIdStr, error: e.message });
+        }
+      } else if (charIdNum != null) {
         try {
           // 旧图追加到 extra_images，与上传逻辑保持一致
           const oldChar = db

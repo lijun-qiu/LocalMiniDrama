@@ -3,6 +3,7 @@ const taskService = require('./taskService');
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
 const { safeParseAIJSON, extractFirstArray } = require('../utils/safeJson');
+const { filterGenericExtraCharacters, isGenericExtraName } = require('../utils/assetExtractionFilters');
 const characterLibraryService = require('./characterLibraryService');
 const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
 
@@ -65,7 +66,8 @@ async function processCharacterGeneration(db, cfg, log, taskID, req) {
   }
   const userPrompt = promptI18n.formatUserPrompt(effectiveCfg, 'character_request', outlineText);
   const systemPrompt = promptI18n.getCharacterExtractionPrompt(effectiveCfg);
-  const temperature = req.temperature != null ? req.temperature : 0.7;
+  // 提取类任务偏低温，减少脑补外形与误提群演（对齐 ArcReel 提取优先口径）
+  const temperature = req.temperature != null ? req.temperature : 0.3;
 
   // 固定 6000 tokens：足够约 10-12 个角色（每角色约 400-500 tokens）
   // repairTruncatedJsonArray 兜底处理极端截断情况
@@ -98,6 +100,16 @@ async function processCharacterGeneration(db, cfg, log, taskID, req) {
     return;
   }
 
+  const beforeFilter = result.length;
+  result = filterGenericExtraCharacters(result);
+  if (beforeFilter !== result.length) {
+    log.info('Filtered generic extra characters', {
+      task_id: taskID,
+      before: beforeFilter,
+      after: result.length,
+    });
+  }
+
   const dramaId = Number(req.drama_id);
   const now = new Date().toISOString();
 
@@ -125,7 +137,7 @@ async function processCharacterGeneration(db, cfg, log, taskID, req) {
 
   for (const char of result) {
     const name = (char.name || '').trim();
-    if (!name) continue;
+    if (!name || isGenericExtraName(name)) continue;
     const existing = db.prepare('SELECT id, name FROM characters WHERE drama_id = ? AND name = ? AND deleted_at IS NULL').get(dramaId, name);
     if (existing) {
       characters.push({
@@ -140,6 +152,8 @@ async function processCharacterGeneration(db, cfg, log, taskID, req) {
       });
       continue;
     }
+    const characterLooks = require('./workflow/characterLooks');
+    const appearanceClean = characterLooks.stripMultiAgeAppearance(char.appearance ?? '') || null;
     const info = db.prepare(
       `INSERT INTO characters (drama_id, name, role, description, personality, appearance, voice_style, sort_order, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
@@ -149,16 +163,16 @@ async function processCharacterGeneration(db, cfg, log, taskID, req) {
       char.role ?? null,
       char.description ?? null,
       char.personality ?? null,
-      char.appearance ?? null,
+      appearanceClean,
       char.voice_style ?? null,
       now,
       now
     );
     const newCharId = info.lastInsertRowid;
     // 异步后台提炼视觉锚点 + 预生成图片提示词，不阻塞主流程
-    if (char.appearance) {
+    if (appearanceClean) {
       setImmediate(() => {
-        enrichIdentityAnchors(db, log, newCharId, char.appearance).catch(() => {});
+        enrichIdentityAnchors(db, log, newCharId, appearanceClean).catch(() => {});
         characterLibraryService.generateCharacterPromptOnly(db, log, effectiveCfg, newCharId, undefined, undefined).catch((err) => {
           log.warn('[提取角色] 预生成polished_prompt失败', { character_id: newCharId, error: err.message });
         });

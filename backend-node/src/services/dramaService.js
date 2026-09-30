@@ -40,6 +40,18 @@ function createDrama(db, log, req) {
   if (!meta.storage_folder_label) {
     meta.storage_folder_label = storageLayout.sanitizeFolderLabel(req.title || '');
   }
+  // Workflow mode pair (ArcReel-aligned). New projects default: drama × reference_video.
+  if (meta.generation_mode == null || meta.generation_mode === '') {
+    meta.generation_mode = 'reference_video';
+  }
+  const { resolveProjectModes } = require('./workflow/workflowRules');
+  const modes = resolveProjectModes(meta);
+  meta.content_mode = modes.content_mode;
+  meta.generation_mode = modes.generation_mode;
+  if (meta.grid_storyboard == null) meta.grid_storyboard = false;
+  // Enable formal step1 review gate for new projects (legacy projects omit this → bypass).
+  if (!meta.workflow || typeof meta.workflow !== 'object') meta.workflow = {};
+  if (meta.workflow.step1_enforced == null) meta.workflow.step1_enforced = true;
   const metadataStr = Object.keys(meta).length ? JSON.stringify(meta) : null;
   const stmt = db.prepare(`
     INSERT INTO dramas (title, description, genre, style, metadata, status, created_at, updated_at)
@@ -422,6 +434,8 @@ function rowToCharacter(r) {
     four_view_image_url: r.four_view_image_url || null,
     seedance2_asset: parseJsonColumn(r.seedance2_asset),
     seedance2_voice_asset: parseJsonColumn(r.seedance2_voice_asset),
+    looks: parseJsonColumn(r.looks) || {},
+    stages: parseJsonColumn(r.stages),
     created_at: r.created_at,
     updated_at: r.updated_at,
   };

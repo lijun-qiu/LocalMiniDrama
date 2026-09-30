@@ -35,6 +35,54 @@ export const dramaAPI = {
     if (workflowGroups !== undefined) body.workflow_groups = workflowGroups
     return request.put(`/dramas/${id}/canvas-layout`, body)
   },
+  /**
+   * ArcReel-aligned workflow plan (three axes). Agent/UI must read this before acting.
+   * body: { episode?, narration_delivery?: 'post_production'|'use_tts', confirmed_request_durations? }
+   */
+  getWorkflowPlan(id, body) {
+    return request.post(`/dramas/${id}/workflow-plan`, body || {})
+  },
+  /** Persist content_mode × generation_mode on drama.metadata */
+  setWorkflowModes(id, body) {
+    return request.put(`/dramas/${id}/workflow-modes`, body || {})
+  },
+  /** Execute plan.next_action (or action_type if matches) */
+  executeWorkflow(id, body) {
+    return request.post(`/dramas/${id}/workflow-execute`, body || {})
+  },
+  getScriptReview(episodeId) {
+    return request.get(`/episodes/${episodeId}/script-review`)
+  },
+  prepareScriptReview(episodeId) {
+    return request.post(`/episodes/${episodeId}/script-review/prepare`)
+  },
+  confirmScriptReview(episodeId) {
+    return request.post(`/episodes/${episodeId}/script-review/confirm`)
+  },
+  getVideoUnits(episodeId) {
+    return request.get(`/episodes/${episodeId}/video-units`)
+  },
+  getWardrobe(episodeId) {
+    return request.get(`/episodes/${episodeId}/wardrobe`)
+  },
+  completeWardrobe(episodeId, body) {
+    return request.post(`/episodes/${episodeId}/wardrobe/complete`, body || {})
+  },
+  scanWardrobeLooks(episodeId) {
+    return request.post(`/episodes/${episodeId}/wardrobe/scan-looks`)
+  },
+  proposeWardrobe(episodeId, body) {
+    return request.post(`/episodes/${episodeId}/wardrobe/propose`, body || {})
+  },
+  getCharacterLooks(characterId) {
+    return request.get(`/characters/${characterId}/looks`)
+  },
+  upsertCharacterLook(characterId, lookId, body) {
+    return request.put(`/characters/${characterId}/looks/${encodeURIComponent(lookId)}`, body || {})
+  },
+  deleteCharacterLook(characterId, lookId) {
+    return request.delete(`/characters/${characterId}/looks/${encodeURIComponent(lookId)}`)
+  },
   getStoryboards(episodeId) {
     return request.get(`/episodes/${episodeId}/storyboards`)
   },
@@ -82,5 +130,12 @@ export const dramaAPI = {
   },
   narrationSd2VoiceRefresh(dramaId) {
     return request.post(`/dramas/${dramaId}/narration-sd2-voice-refresh`, {})
-  }
+  },
+  /**
+   * 强对话驱动剧本改写（火宝 dialogue_driven skill）
+   * body: { content, title?, episode_id?, previous_context? }
+   */
+  rewriteScript(data) {
+    return request.post('/scripts/rewrite', data || {})
+  },
 }

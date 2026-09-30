@@ -401,21 +401,130 @@ function resumeFailedVideoPoll(db, log, videoGenId) {
   return { ok: true, item: getById(db, id) };
 }
 
-/** 启动时恢复 processing 视频任务；无 provider_task_id 的视为中断 */
-function resumeProcessingVideoGenerations(db, log) {
-  const stuck = db
+/** 分镜是否已有可播放成片（完成记录或分镜上挂了视频） */
+function storyboardHasPlayableVideo(db, storyboardId) {
+  const sid = Number(storyboardId);
+  if (!Number.isFinite(sid) || sid <= 0) return false;
+  const vg = db
     .prepare(
-      `SELECT id, task_id FROM video_generations
+      `SELECT id, video_url, local_path FROM video_generations
+       WHERE storyboard_id = ? AND status = 'completed' AND deleted_at IS NULL
+       ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(sid);
+  if (vg) {
+    if (vg.local_path && String(vg.local_path).trim()) return true;
+    const u = String(vg.video_url || '').trim();
+    if (/^https?:\/\//i.test(u)) return true;
+  }
+  const sb = db
+    .prepare(`SELECT video_url, local_path FROM storyboards WHERE id = ? AND deleted_at IS NULL`)
+    .get(sid);
+  if (sb) {
+    if (sb.local_path && String(sb.local_path).trim()) return true;
+    if (sb.video_url && String(sb.video_url).trim()) return true;
+  }
+  return false;
+}
+
+/** 启动时恢复 processing 视频：有厂商 task_id 则续轮询；尚无则重新提交（含 queue_full 无限重试） */
+function resumeProcessingVideoGenerations(db, log) {
+  const now = new Date().toISOString();
+  const skipMsg = '分镜已有成片，跳过自动重提（需手动点击才会重新生成）';
+
+  function skipOrFailIfHasVideo(row) {
+    if (!row.storyboard_id) return false;
+    if (!storyboardHasPlayableVideo(db, row.storyboard_id)) return false;
+    setVideoGenFailed(db, row.id, skipMsg, now);
+    if (row.task_id) {
+      try {
+        taskService.updateTaskError(db, row.task_id, skipMsg);
+      } catch (_) {}
+    }
+    log.info('Skip auto-resubmit: storyboard already has video', {
+      videoGenId: row.id,
+      storyboard_id: row.storyboard_id,
+    });
+    return true;
+  }
+
+  // 最近因「重启无 task_id」被误杀的：仅当该分镜还没有成片时才拉回重提
+  const killedByRestart = db
+    .prepare(
+      `SELECT id, task_id, storyboard_id FROM video_generations
+       WHERE status = 'failed' AND deleted_at IS NULL
+         AND (provider_task_id IS NULL OR TRIM(provider_task_id) = '')
+         AND error_msg LIKE '%服务重启后无法恢复%'
+         AND updated_at >= datetime('now', '-12 hours')`
+    )
+    .all();
+  for (const s of killedByRestart) {
+    if (skipOrFailIfHasVideo(s)) continue;
+    try {
+      db.prepare(
+        `UPDATE video_generations SET status = ?, error_msg = ?, updated_at = ? WHERE id = ?`
+      ).run('processing', '服务重启后继续排队重试', now, s.id);
+    } catch (e) {
+      if ((e.message || '').includes('error_msg')) {
+        db.prepare(`UPDATE video_generations SET status = ?, updated_at = ? WHERE id = ?`).run(
+          'processing',
+          now,
+          s.id
+        );
+      } else throw e;
+    }
+    if (s.task_id) {
+      try {
+        taskService.updateTaskStatus(db, s.task_id, 'processing', 1, '服务重启后继续排队重试');
+      } catch (_) {}
+    }
+    log.info('Requeued video generation killed by prior restart', { videoGenId: s.id });
+  }
+
+  const needResubmit = db
+    .prepare(
+      `SELECT id, task_id, storyboard_id FROM video_generations
        WHERE status = 'processing' AND deleted_at IS NULL
          AND (provider_task_id IS NULL OR TRIM(provider_task_id) = '')`
     )
     .all();
-  const stuckMsg = '服务重启后无法恢复轮询（缺少厂商任务 ID），请重新生成';
-  for (const s of stuck) {
-    const now = new Date().toISOString();
-    setVideoGenFailed(db, s.id, stuckMsg, now);
-    if (s.task_id) taskService.updateTaskError(db, s.task_id, stuckMsg);
-    log.warn('Marked interrupted video generation as failed', { videoGenId: s.id });
+  const toResubmit = [];
+  for (const s of needResubmit) {
+    if (skipOrFailIfHasVideo(s)) continue;
+    toResubmit.push(s);
+  }
+  if (toResubmit.length) {
+    log.info('Resuming video generation submits (no provider_task_id yet)', {
+      count: toResubmit.length,
+    });
+  }
+  for (const s of toResubmit) {
+    try {
+      db.prepare(`UPDATE video_generations SET error_msg = ?, updated_at = ? WHERE id = ?`).run(
+        '服务重启后继续排队重试（尚未拿到厂商任务 ID）',
+        now,
+        s.id
+      );
+    } catch (_) {}
+    if (s.task_id) {
+      try {
+        taskService.updateTaskStatus(
+          db,
+          s.task_id,
+          'processing',
+          1,
+          '服务重启后继续排队重试'
+        );
+      } catch (_) {}
+    }
+    setImmediate(() => {
+      processVideoGeneration(db, log, s.id).catch((e) => {
+        log.error('resume submit processVideoGeneration unhandled', {
+          videoGenId: s.id,
+          error: e.message,
+        });
+      });
+    });
   }
 
   const resumable = db
@@ -548,9 +657,17 @@ async function processVideoGeneration(db, log, videoGenId) {
       return;
     }
     if (result.task_id) {
-      db.prepare(
-        'UPDATE video_generations SET status = ?, provider_task_id = ?, updated_at = ? WHERE id = ?'
-      ).run('processing', result.task_id, now2, videoGenId);
+      try {
+        db.prepare(
+          'UPDATE video_generations SET status = ?, provider_task_id = ?, error_msg = ?, updated_at = ? WHERE id = ?'
+        ).run('processing', result.task_id, '', now2, videoGenId);
+      } catch (e) {
+        if ((e.message || '').includes('error_msg')) {
+          db.prepare(
+            'UPDATE video_generations SET status = ?, provider_task_id = ?, updated_at = ? WHERE id = ?'
+          ).run('processing', result.task_id, now2, videoGenId);
+        } else throw e;
+      }
       await pollProviderTaskAndFinalize(db, log, videoGenId, row, rowForAspect, result.task_id, config);
       return;
     }

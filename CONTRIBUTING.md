@@ -93,10 +93,10 @@ npm start         # 默认端口 5679
 ```bash
 cd frontweb
 npm install
-npm run dev       # 默认端口 3013
+npm run dev       # 默认端口 3015
 ```
 
-浏览器访问 `http://localhost:3013`
+浏览器访问 `http://localhost:3015`
 
 ### 一键启动（Windows）
 

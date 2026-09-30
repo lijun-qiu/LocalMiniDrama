@@ -199,11 +199,11 @@ cd backend-node && npm install
 cp configs/config.example.yaml configs/config.yaml   # 填入 API Key
 npm run migrate && npm start
 
-# 前端（端口 3013，新终端）
+# 前端（端口 3015，新终端）
 cd frontweb && npm install && npm run dev
 ```
 
-浏览器打开 `http://localhost:3013`，或双击根目录 **`run_dev.bat`** 一键启动。
+浏览器打开 `http://localhost:3015`，或双击根目录 **`run_dev.bat`** 一键启动。
 
 📖 [详细开发/打包/Docker 指南](docs/quickstart.md) · [AI 配置指南](docs/configuration.md)
 
